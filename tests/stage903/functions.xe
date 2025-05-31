@@ -1,0 +1,20 @@
+fn main()
+{
+    println("Hello, world!");
+    func1();
+}
+
+fn func1()
+{
+    println("Another function.");
+}
+
+// a block return the result of the last expression without `;`
+fn func2() -> i32
+{
+    5
+}
+
+fn plus_one(x : i32) -> i32{
+    x + 1;
+}

@@ -1,0 +1,33 @@
+fn main()
+{
+    // integer
+    let a : i32 = 1;
+    // let b = 2;  // the type is auto deduced
+
+    // Hex
+    let h1 : i32 = 0xff;
+    // Octal
+    let o1 : i32 = 0o77;
+    // Binary
+    let b1 : i32 = 0b1111_0000;
+
+    // float
+    let f1 : f32 = 1.2;
+    // let f2 = 2.4;
+
+    // bool
+    let b2 : bool = false;
+
+    // str
+    // let str1 : str@ = "Hello";
+    
+    // Not implement yet
+    // let c = a + b;  // c = 3
+    // let f3 = f1 + f2; // f3 = 3.6
+    
+    // Unicode (size is 4 bytes)
+    // let heart_eyed_cat : Unicode = '😻';
+    
+    // byte
+    // let bt1 : u8 = b'A';   // let bt1 : byte = b'A';
+}

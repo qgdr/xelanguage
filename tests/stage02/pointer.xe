@@ -1,0 +1,9 @@
+fn main()
+{
+    let a : i32 = 3;
+    // let a_ptr : i32@ = a@;
+
+    // a_ptr# = 5;
+    // println("{}", a);  // 5
+    return a;
+}

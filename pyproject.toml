@@ -1,0 +1,12 @@
+[project]
+name = "xelanguage"
+version = "0.1.0"
+description = "A programing language xe"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "argparse>=1.4.0",
+    "llvmlite>=0.44.0",
+    "ply>=3.11",
+    "typing>=3.10.0.0",
+]
