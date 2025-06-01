@@ -2,7 +2,19 @@ import os
 import subprocess
 from llvmlite import ir, binding as llvm
 from llvmlite.binding import Target
-from parser.node import *
+from parser.node import (
+    BooleanNode,
+    ModuleNode,
+    FunctionNode,
+    PtrDerefMoveNode,
+    VariableNode,
+    BinaryExpressionNode,
+    IntegerNode,
+    FloatNode,
+    ReturnStatementNode,
+    VariableDeclarationNode,
+    VarEqualNode,
+)
 
 
 class LLVMCodeGen:
@@ -18,15 +30,13 @@ class LLVMCodeGen:
         self.module = ir.Module()
         self.module.triple = self.target.triple
 
-        self.builder = None
+        # self.builder = None
 
-    def generate(self, prog):
+    def generate(self, prog, module_name):
         # 生成LLVM IR逻辑
         # 现阶段只有一个函数 main
-        assert prog.type == "Program"
+        self.module.name = module_name
         mainAST = prog.body[0]
-        assert mainAST.type == "Function"
-        assert mainAST.name == "main"
 
         symbol_table_stack_codegen.push()  # Push a new symbol table for the main function
 
@@ -104,6 +114,9 @@ class SymbolTableStack_codegen:
         return self.stack[-1]
 
     def add(self, name, ir_local_var):
+        if name in self.current():
+            raise ValueError(f"Symbol '{name}' already exists in the current symbol table.")
+        # 在当前符号表中添加变量
         self.current().add(name, ir_local_var)
 
     def get(self, name):
@@ -124,16 +137,18 @@ IRType = {
 }
 
 
-
 ## codegen for AST nodes
 # def Function_codegen(self, builder: ir.IRBuilder):
-def Identifier_codegen(self, builder: ir.IRBuilder):
-    # 处理标识符节点
+def Variable_codegen(self, builder: ir.IRBuilder):
+    # 处理变量节点
     var_ptr = symbol_table_stack_codegen.get(self.name)
     return builder.load(var_ptr, typ=var_ptr.type.pointee)
-setattr(IdentifierNode, "codegen", Identifier_codegen)
 
 
+setattr(VariableNode, "codegen", Variable_codegen)
+
+
+# 暂时只支持整数的二元表达式
 def BinaryExpression_codegen(self, builder: ir.IRBuilder):
     left = self.left.codegen(builder)
     right = self.right.codegen(builder)
@@ -148,91 +163,58 @@ def BinaryExpression_codegen(self, builder: ir.IRBuilder):
         return builder.sdiv(left, right)
     else:
         raise NotImplementedError(f"Unsupported operator: {self.op}")
+
+
 setattr(BinaryExpressionNode, "codegen", BinaryExpression_codegen)
 
 
+def Integer_codegen(self, builder: ir.IRBuilder):
+    # 处理整数节点
+    return ir.Constant(ir.IntType(32), int(self.value, 0))
+
+
+setattr(IntegerNode, "codegen", Integer_codegen)
+
+
+def Float_codegen(self, builder: ir.IRBuilder):
+    # 处理浮点数节点
+    return ir.Constant(ir.FloatType(), float(self.value))
+
+
+setattr(FloatNode, "codegen", Float_codegen)
+
+
+def Boolean_codegen(self, builder: ir.IRBuilder):
+    # 处理布尔值节点
+    return ir.Constant(ir.IntType(1), 1 if self.value == "true" else 0)
+
+
+setattr(BooleanNode, "codegen", Boolean_codegen)
+
 
 def ReturnStatement_codegen(self, builder: ir.IRBuilder):
-    if self.value.type == "Integer":
-        builder.ret(ir.Constant(ir.IntType(32), int(self.value.value)))
-    # elif self.value.type == "Identifier":
-    #     value_ptr = symbol_table_stack_codegen.get(self.value.name)
-    #     builder.ret(builder.load(value_ptr, typ=value_ptr.type.pointee))
-    elif self.value.type == "BinaryExpression":
-        # 处理二元表达式
-        builder.ret(self.value.codegen(builder))
-    else:
-        raise NotImplementedError(f"Unsupported return type: {self.value.type}")
+    builder.ret(self.value.codegen(builder))
 
 
 setattr(ReturnStatementNode, "codegen", ReturnStatement_codegen)
 
 
-def VariableDeclaration_codegen(self, builder: ir.IRBuilder):
+def VariableDeclaration_codegen(self: VariableDeclarationNode, builder: ir.IRBuilder):
     if self.value is None:
         raise NotImplementedError("Variable declaration without initial value")
-
-    variable = None  # Ensure variable is always defined
-
-    if not (
-        isinstance(self.variable.var_type, BasicTypeNode)
-        or isinstance(self.variable.var_type, PointerTypeNode)
-    ):
-        raise NotImplementedError(
-            f"Unsupported variable declaration type: {self.variable.var_type.name}"
-        )
-    if isinstance(self.variable.var_type, BasicTypeNode):
-        match self.variable.var_type.name:
-            case "i32":
-                assert isinstance(self.value, IntegerNode), (
-                    f"Expected IntegerNode for i32, got {self.value.type}"
-                )
-                variable = builder.alloca(ir.IntType(32), name=self.variable.name)
-                builder.store(
-                    ir.Constant(ir.IntType(32), int(self.value.value, 0)),
-                    variable,
-                )
-
-            case "f32":
-                assert isinstance(self.value, FloatNode), (
-                    f"Expected FloatNode for f32, got {self.value.type}"
-                )
-                variable = builder.alloca(ir.FloatType(), name=self.variable.name)
-                builder.store(
-                    ir.FloatType()(float(self.value.value)),
-                    variable,
-                )
-            case "bool":
-                assert self.value.name in ["true", "false"], (
-                    f"Expected 'true' or 'false' for bool, got {self.value.name}"
-                )
-                variable = builder.alloca(ir.IntType(1), name=self.variable.name)
-                builder.store(
-                    ir.IntType(1)(1 if self.value.name == "true" else 0),
-                    variable,
-                )
-            case _:
-                raise NotImplementedError(
-                    f"Unsupported type: {self.variable.var_type.name}"
-                )
-
-    elif isinstance(self.variable.var_type, PointerTypeNode):
-        if isinstance(self.value, NamedVarPointerNode):
-            assert self.variable.var_type.base.name in ["i32", "f32"], (
-                f"Unsupported pointer base type: {self.variable.var_type.base.name}"
+    match self.variable.var_type:
+        case "i32":
+            var_type = ir.IntType(32)
+        case "f32":
+            var_type = ir.FloatType()
+        case "bool":
+            var_type = ir.IntType(1)
+        case _:
+            raise NotImplementedError(
+                f"Unsupported variable type: {self.variable.var_type}"
             )
-            # 修复指针类型生成逻辑
-            value_ptr = symbol_table_stack_codegen.get(self.value.base_var.name)
-            assert ir.IntType(32).as_pointer() == value_ptr.type, (
-                f"Expected pointer to i32, got {value_ptr.type}"
-            )
-            variable = builder.alloca(
-                ir.PointerType(ir.IntType(32)), name=self.variable.name
-            )
-            builder.store(value_ptr, variable)
-
-    if variable is None:
-        raise NotImplementedError("Variable was not initialized in declaration.")
+    variable = builder.alloca(var_type, name=self.variable.name)
+    builder.store(self.value.codegen(builder), variable)
     symbol_table_stack_codegen.add(self.variable.name, variable)
 
 

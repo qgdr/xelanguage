@@ -1,4 +1,4 @@
-from parser.node import *
+import parser.node as np0 
 
 
 class SymbolTable:
@@ -66,7 +66,7 @@ def Function_pass01(self):
 
 
 # Ensure FunctionNode is a Python class before assigning
-setattr(FunctionNode, "pass01", Function_pass01)
+setattr(np0.FunctionNode, "pass01", Function_pass01)
 
 
 
@@ -75,7 +75,7 @@ def Declaration_pass01(self):
     Pass 01: Declaration pass, used to collect variable declarations.
     """
     for node in self.body:
-        if isinstance(node, VarTypePairNode):
+        if isinstance(node, np0.VarTypePairNode):
             # Add variable to the current symbol table
             symbol_table_stack.add(node.name, node.var_type)
         else:

@@ -14,3 +14,4 @@ excompiler/parser/parsetab.py
 **.ll
 **.o
 **.out
+ignore/

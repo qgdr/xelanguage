@@ -1,76 +1,112 @@
 import ply.yacc as yacc
 from .lexer import tokens, lexer
-from .node import *
+from parser.node import *
+from parser.node import (
+    BlockNode,
+    BooleanNode,
+    CallExpressionNode,
+    ModuleNode,
+    FunctionNode,
+    PointerTypeNode,
+    VarTypePairNode,
+    VariableNode,
+    BinaryExpressionNode,
+    IntegerNode,
+    FloatNode,
+    ReturnStatementNode,
+    VariableDeclarationNode,
+    VarEqualNode,
+)
+
+## 一些说明
+## 带s的都是列表
+
+# stage01
+
+## 语法分析器的优先级和结合性
+precedence = [
+    ("left", "OR"),
+    ("left", "AND"),
+    ("left", "EQUAL_EQUAL", "NOT_EQUAL"),
+    ("left", "LESS_THAN", "GREATER_THAN", "LESS_EQUAL", "GREATER_EQUAL"),
+    ("left", "PLUS", "MINUS"),
+    ("left", "MULTIPLY", "DIVIDE"),
+]
 
 
-# 带s的都是列表
+def p_empty(p: yacc.YaccProduction):
+    """
+    empty :
+    """
+    p[0] = None  # 空产生式，返回None
+    pass
 
-# 数据类型
+
+## 模块入口
+def p_module(p):
+    """
+    module : functions
+    """
+    p[0] = ModuleNode(p[1])
 
 
-## 基本类型
-def p_basic_type(p):
+def p_functions(p):
+    """
+    functions : function
+    | functions function
+    """
+    if len(p) == 2:
+        p[0] = [p[1]]
+    else:
+        p[1].append(p[2])
+        p[0] = p[1]
+
+
+def p_type(p):
     """
     type : TYPE_I32
-        | TYPE_U32
-        | TYPE_U8
-        | TYPE_F32
-        | TYPE_BOOL
-        | TYPE_STR
+         | TYPE_U32
+         | TYPE_U8
+         | TYPE_F32
+         | TYPE_BOOL
+         | TYPE_STR
+         | TYPE_NONE
+         | IDENTIFIER
     """
-    p[0] = BasicTypeNode(p[1])
+    p[0] = p[1]
 
 
-def p_pointer_type(p):
+# fn main() {}
+def p_main_function(p):
     """
-    type : type AT
+    function : FN IDENTIFIER LPAREN RPAREN block
     """
-    p[0] = PointerTypeNode(p[1])  # 指针类型
+    p[0] = FunctionNode(p[2], "i32", [], p[5])  # 主函数节点
 
 
-# 函数类型
-
-
-# 泛型类型
-# """
-# type :  IDENTIFIER LBRACKET types RBRACKET
-# """
-
-
-def p_program(p):
+# fn add(a : i32, b: i32) -> i32 {
+#     return a + b;
+# }
+def p_other_function(p):
     """
-    program : function
+    function : FN IDENTIFIER LPAREN var_type_pairs RPAREN TO type block
     """
-    p[0] = ProgramNode(p[1])
-
-
-def p_function_def_empty(p):
-    """
-    function : FN IDENTIFIER LPAREN RPAREN LBRACE RBRACE
-    """
-    p[0] = FunctionNode(p[2], [], [], BlockNode([]))
-
-
-def p_function_def_no_para(p):
-    """
-    function : FN IDENTIFIER LPAREN RPAREN  block
-    """
-    p[0] = FunctionNode(p[2], [], [], p[5])
-
-
-def p_function_def_with_para(p):
-    """
-    function : FN IDENTIFIER LPAREN var_type_pairs RPAREN block
-    """
+    p[0] = FunctionNode(
+        p[2],  # 函数名
+        p[6],  # 返回类型
+        p[4],  # 参数列表
+        p[8],  # 函数体
+    )  # 函数节点
 
 
 def p_var_type_pairs(p):
     """
-    var_type_pairs : var_type_pair
-               | var_type_pairs COMMA var_type_pair
+    var_type_pairs : empty
+            | var_type_pair
+            | var_type_pairs COMMA var_type_pair
     """
     if len(p) == 2:
-        p[0] = [p[1]]
+        p[0] = [p[1]] if p[1] is not None else []
     else:
         p[1].append(p[3])
         p[0] = p[1]
@@ -83,16 +119,6 @@ def p_var_type_pair(p):
     p[0] = VarTypePairNode(p[1], p[3])  # 参数节点，包含名称和类型
 
 
-# def p_var_AT_type_pair(p):
-#     """
-#     var_type_pair : IDENTIFIER AT COLON type
-#     """
-#     p[0] = VarRefTypePairNode(p[1], p[4])  # 指针参数节点，包含名称和类型
-
-
-## expression
-
-
 def p_block(p):
     """
     block : LBRACE statements RBRACE
@@ -102,19 +128,12 @@ def p_block(p):
 
 def p_int_literal_expression(p):
     """
-    primary : integer_literal
-    """
-    p[0] = IntegerNode(p[1])
-
-
-def p_integer_literal(p):
-    """
-    integer_literal : INTEGER
+    primary : INTEGER
     | HEX
     | BINARY
     | OCTAL
     """
-    p[0] = p[1]  # 转换为整数
+    p[0] = IntegerNode(p[1])
 
 
 def p_float_literal_expression(p):
@@ -128,14 +147,20 @@ def p_identifier_expression(p):
     """
     primary : IDENTIFIER
     """
-    p[0] = IdentifierNode(p[1])
+    p[0] = VariableNode(p[1])
 
+def p_true_false(p):
+    """
+    primary : TRUE
+            | FALSE
+    """
+    p[0] = BooleanNode(p[1])  # 布尔值节点，使用VariableNode表示
 
-def p_named_var_pointer_expression(p):
+def p_parentheses_expression(p):
     """
-    primary : IDENTIFIER AT
+    primary : LPAREN expression RPAREN
     """
-    p[0] = NamedVarPointerNode(IdentifierNode(p[1]))  # 指针变量
+    p[0] = p[2]  # 括号内的表达式
 
 
 def p_expression(p):
@@ -145,17 +170,27 @@ def p_expression(p):
     p[0] = p[1]
 
 
-#!! 带s的都返回列表，没有对应的Node
+def p_binary_expression(p):
+    """
+    expression : expression PLUS expression
+               | expression MINUS expression
+               | expression MULTIPLY expression
+               | expression DIVIDE expression
+               | expression AND expression
+               | expression OR expression
+    """
+    p[0] = BinaryExpressionNode(p[1], p[3], p[2])  # 二元表达式节点
+
+
 ## statement
-
-
 def p_statements(p):
     """
-    statements : statement
-              | statements statement
+    statements : empty
+            | statement
+            | statements statement
     """
     if len(p) == 2:
-        p[0] = [p[1]]
+        p[0] = [p[1]] if p[1] is not None else []
     else:
         p[1].append(p[2])
         p[0] = p[1]
@@ -176,44 +211,127 @@ def p_statement(p):
 
 def p_return_statement(p):
     """
-    return_statement : RETURN primary SEMICOLON
+    return_statement : RETURN expression SEMICOLON
     """
     p[0] = ReturnStatementNode(p[2])
 
 
-def p_declaration_statemnent(p):
+def p_declaration_statement(p):
     """
-    declaration_statement : LET IDENTIFIER COLON type EQUAL expression SEMICOLON
-    | LET IDENTIFIER COLON type MOVE expression SEMICOLON
+    declaration_statement : LET var_type_pair EQUAL expression SEMICOLON
+
     """
-    p[0] = VariableDeclarationNode(p[2], p[4], p[5], p[6])  # 声明语句
+    p[0] = VariableDeclarationNode(p[2], p[3], p[4])  # 声明语句
 
 
 def p_var_equal_statement(p):
     """
-    statement : IDENTIFIER EQUAL expression SEMICOLON
+    assign_statement : IDENTIFIER EQUAL expression SEMICOLON
     """
-    p[0] = VarEqualNode(IdentifierNode(p[1]), p[3])
+    p[0] = VarEqualNode(VariableNode(p[1]), p[3])
+
+
+def p_expressions(p):
+    """
+    expressions : expression
+                | expressions COMMA expression
+    """
+    if len(p) == 2:
+        p[0] = [p[1]]
+    else:
+        p[1].append(p[3])
+        p[0] = p[1]
+
+
+# stage02
+
+
+def p_call_expression(p):
+    """
+    expression : IDENTIFIER LPAREN RPAREN
+               | IDENTIFIER LPAREN expressions RPAREN
+    """
+    p[0] = CallExpressionNode(
+        p[1],  # 函数名
+        p[3] if len(p) == 5 else [],  # 参数列表，如果没有参数则是空列表
+    )  # 调用表达式节点
+
+
+def p_object_call_expression(p):
+    """
+    expression : expression DOT IDENTIFIER LPAREN RPAREN
+               | expression DOT IDENTIFIER LPAREN expressions RPAREN
+    """
+    # p[0] = ObjectCallExpressionNode(p[1], p[3], p[5])  # 对象调用表达式节点
+
+
+def p_unary_expression(p):
+    """
+    expression : PLUS expression
+               | MINUS expression
+               | NOT expression
+    """
+
+
+def p_pipe_expression(p):
+    """
+    expression : expression PIPE IDENTIFIER
+    """
+
+
+#!! 带s的都返回列表，没有对应的Node
+
+
+def p_pointer_type(p):
+    """
+    type : type AT
+    """
+    p[0] = PointerTypeNode(p[1])  # 指针类型
 
 
 def p_var_move_statement(p):
     """
-    statement : IDENTIFIER MOVE expression SEMICOLON
+    assign_statement : IDENTIFIER MOVE expression SEMICOLON
     """
 
 
 def p_ptr_deref_equal_statement(p):
     """
-    statement : IDENTIFIER SHARP EQUAL expression SEMICOLON
+    assign_statement : IDENTIFIER SHARP EQUAL expression SEMICOLON
     """
-    # p[0] = PtrDerefEqualNode(IdentifierNode(p[1]), p[2], p[3])
 
 
 def p_ptr_deref_move_statement(p):
     """
-    statement : IDENTIFIER SHARP MOVE expression SEMICOLON
+    assign_statement : IDENTIFIER SHARP MOVE expression SEMICOLON
     """
-    p[0] = PtrDerefMoveNode(IdentifierNode(p[1]), p[4])  # 指针解引用赋值语句
+
+
+# def p_named_var_pointer_expression(p):
+#     """
+#     primary : IDENTIFIER AT
+#     """
+
+# 函数类型
+
+
+# 泛型类型
+# def p_generic_type(p):
+#     """
+#     type :  IDENTIFIER LBRACKET types RBRACKET
+#     """
+
+
+# def p_types(p):
+#     """
+#     types : type
+#           | types COMMA type
+#     """
+#     if len(p) == 2:
+#         p[0] = [p[1]]
+#     else:
+#         p[1].append(p[3])
+#         p[0] = p[1]
 
 
 #
@@ -242,7 +360,7 @@ def p_error(p):
 
 
 # 构建语法分析器
-_parser = yacc.yacc(start="program")
+_parser = yacc.yacc(start="module", optimize=False)
 
 
 class Parser:

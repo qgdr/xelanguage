@@ -30,17 +30,17 @@ reserved = {
 
     "str": "TYPE_STR",
 
-
-
+    "true": "TRUE",
+    "false": "FALSE",
     "None": "TYPE_NONE",
 }
 
 # 所有token类型
 t_PLUS = r"\+"
 t_MINUS = r"-"
-t_TIMES = r"\*"
+t_MULTIPLY = r"\*"
 t_DIVIDE = r"/"
-t_Percent = r"%"
+t_PERCENT = r"%"
 
 t_LPAREN = r"\("
 t_RPAREN = r"\)"

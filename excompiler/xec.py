@@ -43,8 +43,8 @@ if __name__ == "__main__":
 
     from parser.parser import Parser
 
-    program = Parser(src).parse()
-    if program is None:
+    module = Parser(src).parse()
+    if module is None:
         print("Parse error!")
         exit(1)
     if args.parser:
@@ -52,19 +52,19 @@ if __name__ == "__main__":
         try:
             ast_file_path = file_path.with_suffix(".ast.json")
             with open(ast_file_path, "w") as f:
-                json.dump(program.to_dict(), f, indent=4)
-            print(json.dumps(program.to_dict(), indent=4))
+                json.dump(module.to_dict(), f, indent=4)
+            print(json.dumps(module.to_dict(), indent=4))
         except Exception as e:
             print(f"Error writing AST to file: {e}")
-            print(program.to_dict())
+            print(module.to_dict())
         exit(0)
 
-    # 生成可执行文件
-    from codegen.llvm_codegen import LLVMCodeGen
+    # 选择不同阶段的代码生成器
+    from parser.codegen import LLVMCodeGen
 
     codegen = LLVMCodeGen()
     # 中间指令 IR
-    ir_code = codegen.generate(program)
+    ir_code = codegen.generate(module, file_path.stem)
     ir_file_path = file_path.with_suffix(".ll")
     ir_file_path.write_text(ir_code)
     if args.ir:
