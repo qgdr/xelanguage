@@ -160,7 +160,7 @@ def VariableDeclaration_codegen(self, builder):
                 assert isinstance(self.value, FloatNode), (
                     f"Expected FloatNode for f32, got {self.value.type}"
                 )
-                variable = builder.alloca(ir.FloatType(), name=self.name)
+                variable = builder.alloca(ir.FloatType(), name=self.variable.name)
                 builder.store(
                     ir.FloatType()(float(self.value.value)),
                     variable,
@@ -169,7 +169,7 @@ def VariableDeclaration_codegen(self, builder):
                 assert self.value.name in ["true", "false"], (
                     f"Expected 'true' or 'false' for bool, got {self.value.name}"
                 )
-                variable = builder.alloca(ir.IntType(1), name=self.name)
+                variable = builder.alloca(ir.IntType(1), name=self.variable.name)
                 builder.store(
                     ir.IntType(1)(1 if self.value.name == "true" else 0),
                     variable,
