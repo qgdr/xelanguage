@@ -1,10 +1,28 @@
 # import json
+from abc import abstractmethod
+from typing import List
 from llvmlite import ir
 
 
 class ASTNode:
     def __init__(self, node_type):
         self.node_type = node_type  # 节点类型
+
+    @abstractmethod
+    def to_dict(self, ):
+        """
+        将节点转换为字典格式
+        :return: 字典表示的节点
+        """
+        raise NotImplementedError("Subclasses should implement this method")
+
+    @abstractmethod
+    def codegen(self, *args):
+        """
+        生成LLVM IR代码
+        :param builder: LLVM IR构建器
+        """
+        raise NotImplementedError("Subclasses should implement this method")
 
 
 # stage01
@@ -23,37 +41,17 @@ class ModuleNode(ASTNode):
         return Module
 
 
-class FunctionNode(ASTNode):
-    def __init__(self, name, return_type, args, block):
-        super().__init__("Function")
-        self.name = name  # 函数名
-        if not return_type:
-            raise ValueError("There should be a function return type")
-        self.return_type = return_type  # 返回类型
-        self.args = args  # 参数列表
-        self.body = block.body  # 函数体
+class TypeNode(ASTNode):
+    def __init__(self, type_name: str):
+        super().__init__("Type")
+        self.type_name = type_name  # 类型名称
 
     def to_dict(self):
-        Function = {
-            "NodeClass": "Function",
-            "name": self.name,
-            "args": [try_to_dict(arg) for arg in self.args],
-            "body": [try_to_dict(stat) for stat in self.body],
-        }
-        return Function
-
-
-class IdentifierNode(ASTNode):
-    def __init__(self, name):
-        super().__init__("Identifier")  # 节点类型为Identifier
-        self.name = name  # 标识符名称
-
-    def to_dict(self):
-        return {"NodeClass": "Identifier", "name": self.name}
+        return {"NodeClass": "Type", "type_name": self.type_name}
 
 
 class VariableNode(ASTNode):
-    def __init__(self, name):
+    def __init__(self, name: str):
         super().__init__("Variable")  # 节点类型为Variable
         self.name = name  # 变量名称
 
@@ -61,8 +59,20 @@ class VariableNode(ASTNode):
         return {"NodeClass": "Variable", "name": self.name}
 
 
+class IdentifierNode(ASTNode):
+    def __init__(self, name: str):
+        super().__init__("Identifier")  # 节点类型为Identifier
+        self.name = name  # 标识符名称
+
+    def to_dict(self):
+        # return {"NodeClass": "Identifier", "name": self.name}
+        raise NotImplementedError(
+            "IdentifierNode does not support to_dict method. Use VariableNode instead."
+        )
+
+
 class IntegerNode(ASTNode):
-    def __init__(self, value):
+    def __init__(self, value: str):
         super().__init__("Integer")  # 节点类型为Integer
         self.value = value  # 整数值
 
@@ -87,8 +97,9 @@ class BooleanNode(ASTNode):
     def to_dict(self):
         return {"NodeClass": "Boolean", "value": self.value}
 
+
 class VarTypePairNode(ASTNode):
-    def __init__(self, name: str, var_type: str):
+    def __init__(self, name: str, var_type: TypeNode):
         super().__init__("VarTypePair")
         self.name = name  # 参数名
         self.var_type = var_type  # 参数类型
@@ -97,18 +108,44 @@ class VarTypePairNode(ASTNode):
         return {
             "NodeClass": "VarTypePair",
             "name": self.name,
-            "var_type": self.var_type,
+            "var_type": try_to_dict(self.var_type),
         }
 
 
 class BlockNode(ASTNode):
-    def __init__(self, statements):
+    def __init__(self, statements : List[ASTNode]):
         super().__init__("Block")
         self.body = statements  # 语句列表
 
     def to_dict(self):
-        Block = {"NodeClass": "block", "body": [node.to_dict() for node in self.body]}
+        Block = {"NodeClass": "block", "body": [try_to_dict(node) for node in self.body]}
         return Block
+
+
+class FunctionNode(ASTNode):
+    def __init__(
+        self,
+        name: str,
+        return_type: TypeNode,
+        args: List[VarTypePairNode],
+        block: BlockNode,
+    ):
+        super().__init__("Function")
+        self.name = name  # 函数名
+        if not return_type:
+            raise ValueError("There should be a function return type")
+        self.return_type = return_type  # 返回类型
+        self.args = args  # 参数列表
+        self.body = block.body  # 函数体
+
+    def to_dict(self):
+        Function = {
+            "NodeClass": "Function",
+            "name": self.name,
+            "args": [try_to_dict(arg) for arg in self.args],
+            "body": [try_to_dict(stat) for stat in self.body],
+        }
+        return Function
 
 
 class BinaryExpressionNode(ASTNode):
@@ -153,7 +190,7 @@ class VariableDeclarationNode(ASTNode):
 
 
 class VarEqualNode(ASTNode):
-    def __init__(self, variable, value):
+    def __init__(self, variable: VariableNode, value):
         super().__init__("VarEqual")
         self.variable = variable  # 变量名
         self.value = value  # 赋值表达式
@@ -161,13 +198,13 @@ class VarEqualNode(ASTNode):
     def to_dict(self):
         return {
             "NodeClass": "VarEqual",
-            "variable": self.variable,
+            "variable": try_to_dict(self.variable),
             "value": try_to_dict(self.value),
         }
 
 
 class CallExpressionNode(ASTNode):
-    def __init__(self, function_name, args):
+    def __init__(self, function_name: str, args: List[ASTNode]):
         super().__init__("CallExpression")
         self.function_name = function_name  # 函数名
         self.args = args  # 参数列表

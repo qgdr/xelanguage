@@ -1,11 +1,12 @@
 import ply.yacc as yacc
 from .lexer import tokens, lexer
-from parser.node import *
+# from parser.node import *
 from parser.node import (
     BlockNode,
     BooleanNode,
     CallExpressionNode,
     ModuleNode,
+    TypeNode,
     FunctionNode,
     PointerTypeNode,
     VarTypePairNode,
@@ -73,7 +74,7 @@ def p_type(p):
          | TYPE_NONE
          | IDENTIFIER
     """
-    p[0] = p[1]
+    p[0] = TypeNode(p[1])
 
 
 # fn main() {}
@@ -81,7 +82,7 @@ def p_main_function(p):
     """
     function : FN IDENTIFIER LPAREN RPAREN block
     """
-    p[0] = FunctionNode(p[2], "i32", [], p[5])  # 主函数节点
+    p[0] = FunctionNode(p[2], TypeNode("i32"), [], p[5])  # 主函数节点
 
 
 # fn add(a : i32, b: i32) -> i32 {
@@ -93,7 +94,7 @@ def p_other_function(p):
     """
     p[0] = FunctionNode(
         p[2],  # 函数名
-        p[6],  # 返回类型
+        p[7],  # 返回类型
         p[4],  # 参数列表
         p[8],  # 函数体
     )  # 函数节点
@@ -205,6 +206,7 @@ def p_statement(p):
     statement : block
     | return_statement
     | declaration_statement
+    | assign_statement
     """
     p[0] = p[1]
 
