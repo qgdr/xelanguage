@@ -1,22 +1,26 @@
 import os
 import subprocess
-from typing import Union
 from llvmlite import ir, binding as llvm
 from llvmlite.binding import Target
 from parser.node import (
-    BooleanNode,
-    CallExpressionNode,
-    ModuleNode,
+    # stage01
+    # ModuleNode,
     FunctionNode,
-    PtrDerefMoveNode,
-    TypeNode,
-    VariableNode,
-    BinaryExpressionNode,
     IntegerNode,
     FloatNode,
+    BooleanNode,
+    VariableNode,
+    TypeNode,
+    UnaryExpressionNode,
+    BinaryExpressionNode,
     ReturnStatementNode,
     VariableDeclarationNode,
     VarEqualNode,
+    CallExpressionNode,
+    # stage02
+    PointerTypeNode,
+    NamedVarPointerNode,
+    PtrDerefEqualNode,
 )
 
 
@@ -43,7 +47,7 @@ class LLVMCodeGen:
             if not isinstance(function, FunctionNode):
                 raise TypeError(f"Expected FunctionNode, got {type(function)}")
             function.codegen(self.module)
-        
+
         return str(self.module)
 
     def compile_to_executable(self, ir_file_path, output_file):
@@ -103,7 +107,7 @@ class SymbolTableStack_codegen:
             raise IndexError("Symbol table stack is empty.")
         return self.stack[-1]
 
-    def add(self, name:str, ir_local_var):
+    def add(self, name: str, ir_local_var):
         if name in self.current():
             raise ValueError(
                 f"Symbol '{name}' already exists in the current symbol table."
@@ -119,7 +123,7 @@ class SymbolTableStack_codegen:
 
 
 symbol_table_stack_codegen = SymbolTableStack_codegen()
-builder : ir.IRBuilder = None  # type: ignore # 全局IR构建器
+builder: ir.IRBuilder = None  # type: ignore # 全局IR构建器
 
 # IRType = {
 #     "i32": ir.IntType(32),
@@ -138,8 +142,6 @@ def Variable_codegen(self: VariableNode):
         return var
     else:
         return builder.load(var)
-
-
 
 
 setattr(VariableNode, "codegen", Variable_codegen)
@@ -166,6 +168,23 @@ def BinaryExpression_codegen(self: BinaryExpressionNode):
 setattr(BinaryExpressionNode, "codegen", BinaryExpression_codegen)
 
 
+def UnaryExpression_codegen(self):
+    global builder
+    # 处理一元表达式
+    value = self.value.codegen()
+    if self.operator == "-":
+        return builder.neg(value)
+    elif self.operator == "+":
+        return value
+    elif self.operator == "not":
+        return builder.not_(value)
+    else:
+        raise NotImplementedError(f"Unsupported operator: {self.operator}")
+
+
+setattr(UnaryExpressionNode, "codegen", UnaryExpression_codegen)
+
+
 def Integer_codegen(self: IntegerNode):
     # 处理整数节点
     return ir.Constant(ir.IntType(32), int(self.value, 0))
@@ -190,7 +209,7 @@ def Boolean_codegen(self: BooleanNode):
 setattr(BooleanNode, "codegen", Boolean_codegen)
 
 
-def ReturnStatement_codegen(self:ReturnStatementNode):
+def ReturnStatement_codegen(self: ReturnStatementNode):
     global builder
     builder.ret(self.value.codegen())
 
@@ -283,6 +302,37 @@ setattr(CallExpressionNode, "codegen", CallExpression_codegen)
 
 
 # stage02
+
+
+def PointerType_codegen(self: PointerTypeNode):
+    # 处理指针类型
+    return self.base.codegen().as_pointer()
+
+
+setattr(PointerTypeNode, "codegen", PointerType_codegen)
+
+
+def NamedVarPointer_codegen(self: NamedVarPointerNode):
+    global builder, symbol_table_stack_codegen
+    # 处理指向变量的指针
+    var_ptr = symbol_table_stack_codegen.get(self.name)
+    if not var_ptr.alloca:
+        raise ValueError(f"Variable '{self.name}' is not allocated.")
+    return var_ptr
+
+
+setattr(NamedVarPointerNode, "codegen", NamedVarPointer_codegen)
+
+
+def PtrDerefEqual_codegen(self: PtrDerefEqualNode):
+    global builder, symbol_table_stack_codegen
+    # 处理指针解引用赋值
+    var_ptr = self.variable.codegen()
+    value = self.value.codegen()
+    builder.store(value, var_ptr)
+
+
+setattr(PtrDerefEqualNode, "codegen", PtrDerefEqual_codegen)
 
 
 # def PtrDerefMove_codegen(self):

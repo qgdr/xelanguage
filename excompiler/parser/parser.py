@@ -1,16 +1,20 @@
 import ply.yacc as yacc
 from .lexer import tokens, lexer
+
 # from parser.node import *
 from parser.node import (
     BlockNode,
     BooleanNode,
     CallExpressionNode,
     ModuleNode,
+    NamedVarPointerNode,
+    PtrDerefEqualNode,
     TypeNode,
     FunctionNode,
     PointerTypeNode,
     VarTypePairNode,
     VariableNode,
+    UnaryExpressionNode,
     BinaryExpressionNode,
     IntegerNode,
     FloatNode,
@@ -150,12 +154,14 @@ def p_identifier_expression(p):
     """
     p[0] = VariableNode(p[1])
 
+
 def p_true_false(p):
     """
     primary : TRUE
             | FALSE
     """
     p[0] = BooleanNode(p[1])  # 布尔值节点，使用VariableNode表示
+
 
 def p_parentheses_expression(p):
     """
@@ -245,9 +251,6 @@ def p_expressions(p):
         p[0] = p[1]
 
 
-# stage02
-
-
 def p_call_expression(p):
     """
     expression : IDENTIFIER LPAREN RPAREN
@@ -259,29 +262,19 @@ def p_call_expression(p):
     )  # 调用表达式节点
 
 
-def p_object_call_expression(p):
-    """
-    expression : expression DOT IDENTIFIER LPAREN RPAREN
-               | expression DOT IDENTIFIER LPAREN expressions RPAREN
-    """
-    # p[0] = ObjectCallExpressionNode(p[1], p[3], p[5])  # 对象调用表达式节点
-
-
 def p_unary_expression(p):
     """
-    expression : PLUS expression
-               | MINUS expression
-               | NOT expression
+    primary : PLUS primary
+               | MINUS primary
+               | NOT primary
     """
+    p[0] = UnaryExpressionNode(
+        p[1],  # 操作符
+        p[2],  # 表达式
+    )  # 一元表达式节点
 
 
-def p_pipe_expression(p):
-    """
-    expression : expression PIPE IDENTIFIER
-    """
-
-
-#!! 带s的都返回列表，没有对应的Node
+# stage02
 
 
 def p_pointer_type(p):
@@ -291,15 +284,36 @@ def p_pointer_type(p):
     p[0] = PointerTypeNode(p[1])  # 指针类型
 
 
-def p_var_move_statement(p):
+def p_named_var_pointer_expression(p):
     """
-    assign_statement : IDENTIFIER MOVE expression SEMICOLON
+    var_get_pointer : IDENTIFIER AT
     """
+    p[0] = NamedVarPointerNode(p[1])  # 指针类型
+
+
+def p_var_get_pointer_expression(p):
+    """
+    expression : var_get_pointer
+    """
+    p[0] = p[1]  # 指针表达式
 
 
 def p_ptr_deref_equal_statement(p):
     """
     assign_statement : IDENTIFIER SHARP EQUAL expression SEMICOLON
+    """
+    p[0] = PtrDerefEqualNode(VariableNode(p[1]), p[4])
+
+
+def p_var_deref_expression(p):
+    """
+    expression : IDENTIFIER SHARP
+    """
+
+
+def p_var_move_statement(p):
+    """
+    assign_statement : IDENTIFIER MOVE expression SEMICOLON
     """
 
 
@@ -308,11 +322,6 @@ def p_ptr_deref_move_statement(p):
     assign_statement : IDENTIFIER SHARP MOVE expression SEMICOLON
     """
 
-
-# def p_named_var_pointer_expression(p):
-#     """
-#     primary : IDENTIFIER AT
-#     """
 
 # 函数类型
 
@@ -334,6 +343,20 @@ def p_ptr_deref_move_statement(p):
 #     else:
 #         p[1].append(p[3])
 #         p[0] = p[1]
+
+
+def p_object_call_expression(p):
+    """
+    expression : expression DOT IDENTIFIER LPAREN RPAREN
+               | expression DOT IDENTIFIER LPAREN expressions RPAREN
+    """
+    # p[0] = ObjectCallExpressionNode(p[1], p[3], p[5])  # 对象调用表达式节点
+
+
+def p_pipe_expression(p):
+    """
+    expression : expression PIPE IDENTIFIER
+    """
 
 
 #

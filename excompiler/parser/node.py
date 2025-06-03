@@ -1,7 +1,6 @@
 # import json
 from abc import abstractmethod
 from typing import List
-from llvmlite import ir
 
 
 class ASTNode:
@@ -9,7 +8,9 @@ class ASTNode:
         self.node_type = node_type  # 节点类型
 
     @abstractmethod
-    def to_dict(self, ):
+    def to_dict(
+        self,
+    ):
         """
         将节点转换为字典格式
         :return: 字典表示的节点
@@ -113,12 +114,15 @@ class VarTypePairNode(ASTNode):
 
 
 class BlockNode(ASTNode):
-    def __init__(self, statements : List[ASTNode]):
+    def __init__(self, statements: List[ASTNode]):
         super().__init__("Block")
         self.body = statements  # 语句列表
 
     def to_dict(self):
-        Block = {"NodeClass": "block", "body": [try_to_dict(node) for node in self.body]}
+        Block = {
+            "NodeClass": "block",
+            "body": [try_to_dict(node) for node in self.body],
+        }
         return Block
 
 
@@ -161,6 +165,20 @@ class BinaryExpressionNode(ASTNode):
             "operator": self.operator,
             "left": try_to_dict(self.left),
             "right": try_to_dict(self.right),
+        }
+
+
+class UnaryExpressionNode(ASTNode):
+    def __init__(self, operator: str, primary: ASTNode):
+        super().__init__("UnaryExpression")
+        self.operator = operator  # 操作符
+        self.value = primary  # 表达式
+
+    def to_dict(self):
+        return {
+            "NodeClass": "UnaryExpression",
+            "operator": self.operator,
+            "value": try_to_dict(self.value),
         }
 
 
@@ -222,28 +240,14 @@ class CallExpressionNode(ASTNode):
 
 ### var@
 class NamedVarPointerNode(ASTNode):
-    def __init__(self, base_var):
+    def __init__(self, name: str):
         super().__init__("NamedVarPointer")
-        self.base_var = base_var  # 基础类型
+        self.name = name  # 变量名
 
     def to_dict(self):
         return {
             "NodeClass": "NamedVarPointer",
-            "base_var": try_to_dict(self.base_var),
-        }
-
-
-class PtrDerefMoveNode(ASTNode):
-    def __init__(self, name, value):
-        super().__init__("PtrDerefMove")
-        self.name = name  # 变量名
-        self.value = value  # 赋值表达式
-
-    def to_dict(self):
-        return {
-            "NodeClass": "PtrDerefMove",
-            "name": self.name.to_dict(),
-            "value": try_to_dict(self.value),
+            "name": self.name,
         }
 
 
@@ -255,6 +259,20 @@ class PointerTypeNode(ASTNode):
 
     def to_dict(self):
         return {"NodeClass": "PointerType", "base": self.base.to_dict()}
+
+
+class PtrDerefEqualNode(ASTNode):
+    def __init__(self, variable: VariableNode, value: ASTNode):
+        super().__init__("PtrDerefEqual")
+        self.variable = variable  # 变量名
+        self.value = value  # 赋值表达式
+
+    def to_dict(self):
+        return {
+            "NodeClass": "PtrDerefEqual",
+            "variable": try_to_dict(self.variable),
+            "value": try_to_dict(self.value),
+        }
 
 
 # class VarRefTypePairNode(ASTNode):

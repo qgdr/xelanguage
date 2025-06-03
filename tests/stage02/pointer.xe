@@ -1,9 +1,9 @@
 fn main()
 {
     let a : i32 = 3;
-    // let a_ptr : i32@ = a@;
+    let a_ptr : i32@ = a@;
 
-    // a_ptr# = 5;
+    a_ptr# = 39 + a;
     // println("{}", a);  // 5
     return a;
 }

@@ -5,7 +5,7 @@ fn add(a : i32, b : i32) -> i32
 
 
 fn main(){
-    let a : i32 = 2;
-    let b : i32 = 3;
+    let a : i32 = 12;
+    let b : i32 = 30;
     return add(a, b);
 }
