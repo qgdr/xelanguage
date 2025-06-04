@@ -2,26 +2,28 @@ import os
 import subprocess
 from llvmlite import ir, binding as llvm
 from llvmlite.binding import Target
-from parser.node import (
-    # stage01
-    # ModuleNode,
-    FunctionNode,
-    IntegerNode,
-    FloatNode,
-    BooleanNode,
-    VariableNode,
-    TypeNode,
-    UnaryExpressionNode,
-    BinaryExpressionNode,
-    ReturnStatementNode,
-    VariableDeclarationNode,
-    VarEqualNode,
-    CallExpressionNode,
-    # stage02
-    PointerTypeNode,
-    NamedVarPointerNode,
-    PtrDerefEqualNode,
-)
+from parser.node import *
+
+# from parser.node import (
+#     # stage01
+#     # ModuleNode,
+#     FunctionNode,
+#     IntegerNode,
+#     FloatNode,
+#     BooleanNode,
+#     VariableNode,
+#     TypeNode,
+#     UnaryExpressionNode,
+#     BinaryExpressionNode,
+#     ReturnStatementNode,
+#     VariableDeclarationNode,
+#     VarEqualNode,
+#     CallExpressionNode,
+#     # stage02
+#     PointerTypeNode,
+#     NamedVarPointerNode,
+#     PtrDerefEqualNode,
+# )
 
 
 class LLVMCodeGen:
@@ -248,6 +250,8 @@ def Type_codegen(self: TypeNode):
             return ir.FloatType()
         case "bool":
             return ir.IntType(1)
+        case "str":
+            return ir.IntType(8)
         case _:
             raise NotImplementedError(f"Unsupported type: {self.type_name}")
 
@@ -333,6 +337,49 @@ def PtrDerefEqual_codegen(self: PtrDerefEqualNode):
 
 
 setattr(PtrDerefEqualNode, "codegen", PtrDerefEqual_codegen)
+
+
+def PtrDeref_codegen(self: PtrDerefNode):
+    global builder, symbol_table_stack_codegen
+    # 处理指针解引用
+    var_ptr = self.variable.codegen()
+    return builder.load(var_ptr)
+
+
+setattr(PtrDerefNode, "codegen", PtrDeref_codegen)
+
+
+# stage04
+
+
+def String_codegen(self: StringNode):
+    global builder
+    # 处理字符串节点
+    name = get_hash_name(self.value)
+    if name in builder.module.globals:
+        return builder.module.get_global(name)
+    else:
+        str_bytes = self.value.encode() + b"\0"
+        str_arr = ir.Constant(
+            ir.ArrayType(ir.IntType(8), len(str_bytes)), bytearray(str_bytes)
+        )
+        str_var = ir.GlobalVariable(
+            builder.module, ir.ArrayType(ir.IntType(8), len(str_bytes)), name=name
+        )
+        str_var.initializer = str_arr  # type: ignore
+        str_var.linkage = "internal"  # 限制作用域，避免外部可见性
+        str_ptr = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
+        return str_ptr
+
+
+setattr(StringNode, "codegen", String_codegen)
+
+import hashlib
+
+
+def get_hash_name(s: str) -> str:
+    hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
+    return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
 
 
 # def PtrDerefMove_codegen(self):

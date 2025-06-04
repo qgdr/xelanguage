@@ -1,0 +1,13 @@
+struct Person{
+    age : u32,
+    name : str@
+}
+
+fn main()
+{
+    let per1 = Person{
+        age = 20,
+        name = "Tom"
+    };
+    return per1.age; 
+}

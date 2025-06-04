@@ -4,5 +4,5 @@ fn main()
               "August", "September", "October", "November", "December"];
 
     let this_month : str@ = months[0];
-    println("This months is {this_month}");   // January
+    println("This months is {}", this_month);   // January
 }

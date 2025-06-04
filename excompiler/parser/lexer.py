@@ -106,7 +106,7 @@ def t_INTEGER(t):
 
 # 字符串规则
 def t_STRING(t):
-    r'"([^\"]|\.)*"'
+    r'"((\\")|[^"])*"'
     t.value = t.value[1:-1]  # 去除引号
     return t
 

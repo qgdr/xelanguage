@@ -253,7 +253,7 @@ class NamedVarPointerNode(ASTNode):
 
 ### 指针类型节点
 class PointerTypeNode(ASTNode):
-    def __init__(self, base):
+    def __init__(self, base: TypeNode):
         super().__init__("PointerType")
         self.base = base  # 基础类型
 
@@ -273,6 +273,42 @@ class PtrDerefEqualNode(ASTNode):
             "variable": try_to_dict(self.variable),
             "value": try_to_dict(self.value),
         }
+
+
+class PtrDerefNode(ASTNode):
+    def __init__(self, variable: VariableNode):
+        super().__init__("PtrDeref")
+        self.variable = variable  # 变量名
+
+    def to_dict(self):
+        return {
+            "NodeClass": "PtrDeref",
+            "variable": try_to_dict(self.variable),
+        }
+
+
+# stage04
+
+
+class StringNode(ASTNode):
+    def __init__(self, value):
+        super().__init__("String")
+        print(value)
+        self.value = proccess_str_literal(value)  # 字符串值
+        print(self.value)
+
+    def to_dict(self):
+        return {"NodeClass": "String", "value": self.value}
+
+
+def proccess_str_literal(raw_content):
+    return (
+        raw_content.replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+        .replace("\\\\", "\\")
+    )
 
 
 # class VarRefTypePairNode(ASTNode):

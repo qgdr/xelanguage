@@ -1,27 +1,28 @@
 import ply.yacc as yacc
 from .lexer import tokens, lexer
 
-# from parser.node import *
-from parser.node import (
-    BlockNode,
-    BooleanNode,
-    CallExpressionNode,
-    ModuleNode,
-    NamedVarPointerNode,
-    PtrDerefEqualNode,
-    TypeNode,
-    FunctionNode,
-    PointerTypeNode,
-    VarTypePairNode,
-    VariableNode,
-    UnaryExpressionNode,
-    BinaryExpressionNode,
-    IntegerNode,
-    FloatNode,
-    ReturnStatementNode,
-    VariableDeclarationNode,
-    VarEqualNode,
-)
+from parser.node import *
+# from parser.node import (
+#     BlockNode,
+#     BooleanNode,
+#     CallExpressionNode,
+#     ModuleNode,
+#     NamedVarPointerNode,
+#     PtrDerefEqualNode,
+#     TypeNode,
+#     FunctionNode,
+#     PointerTypeNode,
+#     VarTypePairNode,
+#     VariableNode,
+#     UnaryExpressionNode,
+#     BinaryExpressionNode,
+#     IntegerNode,
+#     FloatNode,
+#     ReturnStatementNode,
+#     VariableDeclarationNode,
+#     VarEqualNode,
+#     PtrDerefNode
+# )
 
 ## 一些说明
 ## 带s的都是列表
@@ -309,6 +310,26 @@ def p_var_deref_expression(p):
     """
     expression : IDENTIFIER SHARP
     """
+    p[0] = PtrDerefNode(VariableNode(p[1]))
+
+
+# stage04
+
+def p_string_literal_expression(p):
+    """
+    primary : STRING
+    """
+    p[0] = StringNode(p[1])
+
+
+
+
+
+
+
+
+
+
 
 
 def p_var_move_statement(p):
@@ -357,6 +378,7 @@ def p_pipe_expression(p):
     """
     expression : expression PIPE IDENTIFIER
     """
+
 
 
 #
