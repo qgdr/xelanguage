@@ -293,9 +293,7 @@ class PtrDerefNode(ASTNode):
 class StringNode(ASTNode):
     def __init__(self, value):
         super().__init__("String")
-        print(value)
         self.value = proccess_str_literal(value)  # 字符串值
-        print(self.value)
 
     def to_dict(self):
         return {"NodeClass": "String", "value": self.value}
@@ -309,6 +307,32 @@ def proccess_str_literal(raw_content):
         .replace("\\'", "'")
         .replace("\\\\", "\\")
     )
+
+
+class ArrayTypeNode(ASTNode):
+    def __init__(self, base: ASTNode, size: IntegerNode):
+        super().__init__("ArrayType")
+        self.base = base  # 基础类型
+        self.size = size  # 数组大小
+
+    def to_dict(self):
+        return {
+            "NodeClass": "ArrayType",
+            "base": try_to_dict(self.base),
+            "size": try_to_dict(self.size),
+        }
+
+
+class ArrayNode(ASTNode):
+    def __init__(self, elements: List[ASTNode]):
+        super().__init__("Array")
+        self.elements = elements  # 数组元素列表
+
+    def to_dict(self):
+        return {
+            "NodeClass": "Array",
+            "elements": [try_to_dict(element) for element in self.elements],
+        }
 
 
 # class VarRefTypePairNode(ASTNode):

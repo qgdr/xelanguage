@@ -33,6 +33,9 @@ reserved = {
     "true": "TRUE",
     "false": "FALSE",
     "None": "TYPE_NONE",
+
+    # Array
+    "Array": "ARRAY",
 }
 
 # 所有token类型

@@ -225,7 +225,28 @@ def VariableDeclaration_codegen(self: VariableDeclarationNode):
         raise NotImplementedError("Variable declaration without initial value")
     var_type = self.variable.var_type.codegen()
     variable = builder.alloca(var_type, name=self.variable.name)
-    builder.store(self.value.codegen(), variable)
+    if isinstance(self.variable.var_type, TypeNode):
+        builder.store(self.value.codegen(), variable)
+    elif isinstance(self.variable.var_type, PointerTypeNode):
+        builder.store(self.value.codegen(), variable)
+    elif isinstance(self.variable.var_type, ArrayTypeNode):
+        assert isinstance(self.value, ArrayNode), "Value must be an array"
+        assert int(self.variable.var_type.size.value) >= len(self.value.elements), (
+            "Array size too small"
+        )
+        for i, element in enumerate(self.value.elements):
+            builder.store(
+                element.codegen(),
+                builder.gep(
+                    variable,
+                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+                    inbounds=True,
+                ),
+            )
+        variable = builder.bitcast(variable, ir.PointerType(var_type))
+    else:
+        raise NotImplementedError(f"Unsupported type: {type(self.variable.var_type)}")
+
     setattr(variable, "alloca", True)  # 标记为分配的变量
     symbol_table_stack_codegen.add(self.variable.name, variable)
 
@@ -311,6 +332,7 @@ setattr(CallExpressionNode, "codegen", CallExpression_codegen)
 def PointerType_codegen(self: PointerTypeNode):
     # 处理指针类型
     return self.base.codegen().as_pointer()
+    # return ir.PointerType()
 
 
 setattr(PointerTypeNode, "codegen", PointerType_codegen)
@@ -322,6 +344,7 @@ def NamedVarPointer_codegen(self: NamedVarPointerNode):
     var_ptr = symbol_table_stack_codegen.get(self.name)
     if not var_ptr.alloca:
         raise ValueError(f"Variable '{self.name}' is not allocated.")
+    # print(var_ptr.type.pointee)
     return var_ptr
 
 
@@ -343,6 +366,7 @@ def PtrDeref_codegen(self: PtrDerefNode):
     global builder, symbol_table_stack_codegen
     # 处理指针解引用
     var_ptr = self.variable.codegen()
+    # print(var_ptr.type)
     return builder.load(var_ptr)
 
 
@@ -368,8 +392,8 @@ def String_codegen(self: StringNode):
         )
         str_var.initializer = str_arr  # type: ignore
         str_var.linkage = "internal"  # 限制作用域，避免外部可见性
-        str_ptr = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
-        return str_ptr
+        str_var = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
+        return str_var
 
 
 setattr(StringNode, "codegen", String_codegen)
@@ -380,6 +404,17 @@ import hashlib
 def get_hash_name(s: str) -> str:
     hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
     return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
+
+
+def ArrayType_codegen(self: ArrayTypeNode):
+    global builder
+    # 处理数组类型
+    array_type = ir.ArrayType(self.base.codegen(), int(self.size.value))
+    return array_type
+    # return self.base.codegen().as_pointer()
+
+
+setattr(ArrayTypeNode, "codegen", ArrayType_codegen)
 
 
 # def PtrDerefMove_codegen(self):

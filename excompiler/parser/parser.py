@@ -322,8 +322,19 @@ def p_string_literal_expression(p):
     p[0] = StringNode(p[1])
 
 
+def p_array_type(p):
+    """
+    type : ARRAY LBRACKET type COMMA INTEGER RBRACKET
+    """
+    p[0] = ArrayTypeNode(p[3], IntegerNode(p[5]))
 
 
+def p_array_literal_expression(p):
+    """
+    expression : LBRACKET RBRACKET
+            | LBRACKET expressions RBRACKET
+    """
+    p[0] = ArrayNode(p[2] if len(p) == 4 else [])
 
 
 
