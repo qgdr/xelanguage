@@ -3,6 +3,13 @@
 Xelanguage 是一个类似 Rust 的面向对象编的译型语言。
 用于 ~~取代C语言~~ 学习编译原理。
 
+## 项目初始化
+
+- 安装 `uv`, `llvm`
+- 进入当前目录
+    `uv sync`
+- `python ./compiler/xec.py ./tests/stage01/main.xe`
+
 ## 特点
 
 * 类型声明后置。
@@ -12,34 +19,6 @@ Xelanguage 是一个类似 Rust 的面向对象编的译型语言。
 * `<-` 可以用于引用类型，相当于 C++ 中的 `std::move`，引用类型一旦被移动，原位置立即销毁。
     所有定义了 *析构函数* 的结构体 **只能** 使用 `<-`。
 * 引用类型可以显示的调用 `let b <- a.Copy()` 或 `let b <- a.Clone()` 方法（如果实现了该 `Trait`）。
-* 非切片类型的引用类型用 `=` 赋值时，直接报错 （后期可能会修改为警告，以简化内存复制操作）。
+* 定义了析构函数的类型使用 `=` 赋值时，直接报错。
 * 只有当切片内部元素是基本类型的时候可以用`=`赋值。
 
-
-## 项目初始化
-
-- 安装 `uv`, `llvm`
-- 进入当前目录
-    `uv sync`
-- `python ./compiler/xec.py ./tests/stage01/main.xe`
-
-
-
-## Prompt
-
-你是一名专业的编译器工程师，
-你需要根据Xelanguage的语法，
-为Xelanguage编写一个编译器，
-生成可执行文件。
-
-根据tests目录下的测试用例，
-首先编写一个Xelanguage的语法文件，检查语法的合理性，
-在可读性安全性方向上提出意见。
-
-然后使用python ply llvmlite 编写Xelanguage的编译器，生成可执行文件，
-并实现一个简单的标准库。 
-编译器的入口是 ./excompiler/xec.py
-构建此法分析器和语法分析器的 package, `parser`, 生成的 AST 输出成 json 文件。
-根据 json文件和相应的语义生成可执行文件。
-
-项目分模块构建，结构清晰，参考 Rust 和 go 的编译器实现。

@@ -227,8 +227,12 @@ def VariableDeclaration_codegen(self: VariableDeclarationNode):
     variable = builder.alloca(var_type, name=self.variable.name)
     if isinstance(self.variable.var_type, TypeNode):
         builder.store(self.value.codegen(), variable)
+        setattr(variable, "alloca", True)  # 标记为分配的变量
+
     elif isinstance(self.variable.var_type, PointerTypeNode):
         builder.store(self.value.codegen(), variable)
+        setattr(variable, "alloca", True)  # 标记为分配的变量
+
     elif isinstance(self.variable.var_type, ArrayTypeNode):
         assert isinstance(self.value, ArrayNode), "Value must be an array"
         assert int(self.variable.var_type.size.value) >= len(self.value.elements), (
@@ -243,11 +247,12 @@ def VariableDeclaration_codegen(self: VariableDeclarationNode):
                     inbounds=True,
                 ),
             )
-        variable = builder.bitcast(variable, ir.PointerType(var_type))
+        setattr(variable, "alloca", False)  # 标记为分配的变量
+        
+        # variable = builder.bitcast(variable, ir.PointerType(var_type))
     else:
         raise NotImplementedError(f"Unsupported type: {type(self.variable.var_type)}")
 
-    setattr(variable, "alloca", True)  # 标记为分配的变量
     symbol_table_stack_codegen.add(self.variable.name, variable)
 
 
@@ -416,6 +421,17 @@ def ArrayType_codegen(self: ArrayTypeNode):
 
 setattr(ArrayTypeNode, "codegen", ArrayType_codegen)
 
+
+def ArrayItem_codegen(self: ArrayItemNode):
+    global builder, symbol_table_stack_codegen
+    # 处理数组项
+    array_ptr = self.array.codegen()
+    index = self.index.codegen()
+    # print(array_ptr, index)
+    return builder.load(builder.gep(array_ptr, [ir.Constant(ir.IntType(32), 0), index]))
+
+
+setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
 
 # def PtrDerefMove_codegen(self):
 #     if isinstance(self.value, IntegerNode):

@@ -335,6 +335,18 @@ class ArrayNode(ASTNode):
         }
 
 
+class ArrayItemNode(ASTNode):
+    def __init__(self, array: VariableNode, index: ASTNode):
+        super().__init__("ArrayItem")
+        self.array = array  # 数组名
+        self.index = index  # 索引
+    def to_dict(self):
+        return {
+            "NodeClass": "ArrayItem",
+            "array": try_to_dict(self.array),
+            "index": try_to_dict(self.index),
+        }
+
 # class VarRefTypePairNode(ASTNode):
 #     def __init__(self, name, var_type):
 #         super().__init__("VarRefTypePair")

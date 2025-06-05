@@ -3,6 +3,6 @@ fn main()
     let months: Array[str@, 12] = ["January", "February", "March", "April", "May", "June", "July",
               "August", "September", "October", "November", "December"];
 
-    // let this_month : str@ = months[0];
+    let this_month : str@ = months[0];
 }
 // println("This months is {}", this_month);   // January

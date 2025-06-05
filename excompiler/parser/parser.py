@@ -315,6 +315,7 @@ def p_var_deref_expression(p):
 
 # stage04
 
+
 def p_string_literal_expression(p):
     """
     primary : STRING
@@ -337,10 +338,19 @@ def p_array_literal_expression(p):
     p[0] = ArrayNode(p[2] if len(p) == 4 else [])
 
 
+def p_get_array_item_expression(p):
+    """
+    expression : IDENTIFIER LBRACKET expression RBRACKET
+    """
+    p[0] = ArrayItemNode(VariableNode(p[1]), p[3])
 
 
-
-
+#
+#
+#
+#
+#
+#
 
 
 def p_var_move_statement(p):
@@ -389,7 +399,6 @@ def p_pipe_expression(p):
     """
     expression : expression PIPE IDENTIFIER
     """
-
 
 
 #
