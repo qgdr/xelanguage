@@ -1,13 +1,13 @@
 struct Person{
-    age : u32,
+    age : i32,
     name : str@
 }
 
 fn main()
 {
-    let per1 = Person{
-        age = 20,
-        name = "Tom"
+   let per1 : Person = Person{
+        age = 20;
+        name = "Tom";
     };
-    return per1.age; 
+    // return per1.age; 
 }

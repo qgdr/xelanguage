@@ -1,5 +1,6 @@
 import os
 import subprocess
+from symtable import SymbolTable
 from llvmlite import ir, binding as llvm
 from llvmlite.binding import Target
 from parser.node import *
@@ -43,13 +44,14 @@ class LLVMCodeGen:
 
     def generate(self, prog, module_name):
         # 生成LLVM IR逻辑
-        # 现阶段只有一个函数 main
+        global symbol_table_stack_codegen
         self.module.name = module_name
-        for function in prog.body:
-            if not isinstance(function, FunctionNode):
-                raise TypeError(f"Expected FunctionNode, got {type(function)}")
-            function.codegen(self.module)
-
+        symbol_table_stack_codegen.push()
+        for module_item in prog.body:
+            # if not isinstance(function, FunctionNode):
+            #     raise TypeError(f"Expected FunctionNode, got {type(function)}")
+            module_item.codegen(self.module)
+        symbol_table_stack_codegen.pop()
         return str(self.module)
 
     def compile_to_executable(self, ir_file_path, output_file):
@@ -99,12 +101,12 @@ class SymbolTableStack_codegen:
     def push(self):
         self.stack.append(SymbolTable_codegen())
 
-    def pop(self):
+    def pop(self) -> SymbolTable_codegen:
         if not self.stack:
             raise IndexError("Symbol table stack is empty.")
         return self.stack.pop()
 
-    def current(self):
+    def current(self) -> SymbolTable_codegen:
         if not self.stack:
             raise IndexError("Symbol table stack is empty.")
         return self.stack[-1]
@@ -248,8 +250,23 @@ def VariableDeclaration_codegen(self: VariableDeclarationNode):
                 ),
             )
         setattr(variable, "alloca", False)  # 标记为分配的变量
-        
+
         # variable = builder.bitcast(variable, ir.PointerType(var_type))
+    elif isinstance(self.variable.var_type, StructTypeNode):
+        symbol_table = self.value.codegen()
+        if not isinstance(symbol_table, SymbolTable_codegen):
+            raise TypeError(
+                "Value must be a SymbolTable_codegen instance for struct"
+            )
+        for i, key in enumerate(symbol_table.symbols):
+            builder.store(
+                symbol_table.symbols[key],
+                builder.gep(
+                    variable,
+                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+                    inbounds=True,
+                ),
+            )
     else:
         raise NotImplementedError(f"Unsupported type: {type(self.variable.var_type)}")
 
@@ -432,6 +449,44 @@ def ArrayItem_codegen(self: ArrayItemNode):
 
 
 setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
+
+
+## struct
+def StructType_codegen(self: StructTypeNode):
+    global builder
+    return builder.module.get_identified_types()[self.type_name]
+
+
+setattr(StructTypeNode, "codegen", StructType_codegen)
+
+
+def StructTypeDef_codegen(self: StructTypeDefNode, module: ir.Module):
+    global builder, symbol_table_stack_codegen
+    # 处理结构体类型定义
+    # struct_type = ir.IdentifiedStructType(module.context, name=self.name)
+    ctx = ir.context.global_context
+    struct_type = ctx.get_identified_type(self.name)
+    struct_type.set_body(
+        *[var_type_pair.var_type.codegen() for var_type_pair in self.struct_fields]
+    )
+    # symbol_table_stack_codegen.add(self.name, struct_type)
+    # return struct_type
+
+
+setattr(StructTypeDefNode, "codegen", StructTypeDef_codegen)
+
+
+def StructLiteral_codegen(self: StructLiteralNode):
+    global builder, symbol_table_stack_codegen
+    symbol_table_stack_codegen.push()
+    for stat in self.body:
+        if not isinstance(stat, VarEqualNode):
+            raise NotImplementedError(f"Unsupported statement: {type(stat)}")
+        symbol_table_stack_codegen.add(stat.variable.name, stat.value.codegen())
+    return symbol_table_stack_codegen.pop()
+
+
+setattr(StructLiteralNode, "codegen", StructLiteral_codegen)
 
 # def PtrDerefMove_codegen(self):
 #     if isinstance(self.value, IntegerNode):

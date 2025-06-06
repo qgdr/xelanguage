@@ -30,9 +30,9 @@ class ASTNode:
 
 
 class ModuleNode(ASTNode):
-    def __init__(self, functions):
+    def __init__(self, module_items: List[ASTNode]):
         super().__init__("Module")
-        self.body = functions  # 函数列表
+        self.body = module_items  # 模块中的项目列表
 
     def to_dict(self):
         Module = {
@@ -340,12 +340,64 @@ class ArrayItemNode(ASTNode):
         super().__init__("ArrayItem")
         self.array = array  # 数组名
         self.index = index  # 索引
+
     def to_dict(self):
         return {
             "NodeClass": "ArrayItem",
             "array": try_to_dict(self.array),
             "index": try_to_dict(self.index),
         }
+
+class StructTypeNode(ASTNode):
+    def __init__(self, type_name: str):
+        super().__init__("StructType")
+        self.type_name = type_name  # 类型名称
+
+    def to_dict(self):
+        return {"NodeClass": "StructType", "type_name": self.type_name}
+
+
+class StructTypeDefNode(ASTNode):
+    def __init__(self, name:str, var_type_pairs: List[VarTypePairNode]):
+        super().__init__("StructTypeDef")
+        self.name = name
+        self.struct_fields = var_type_pairs  # 结构体成员列表
+
+    def to_dict(self):
+        return {
+            "NodeClass": "StructTypeDef",
+            "name": self.name,
+            "struct_fields": [try_to_dict(field) for field in self.struct_fields],
+        }
+
+
+class StructLiteralNode(ASTNode):
+    def __init__(self, struct_type: TypeNode, body: List[ASTNode]):
+        super().__init__("StructLiteral")
+        self.struct_type = struct_type  # 结构体类型
+        self.body = body  # 结构体成员列表
+
+    def to_dict(self):
+        return {
+            "NodeClass": "StructLiteral",
+            "struct_type": try_to_dict(self.struct_type),
+            "body": [try_to_dict(stat) for stat in self.body],
+        }
+
+
+class ObjectFieldNode(ASTNode):
+    def __init__(self, variable: VariableNode, field: str):
+        super().__init__("ObjectField")
+        self.object = variable  # 对象
+        self.field = field  # 字段名
+
+    def to_dict(self):
+        return {
+            "NodeClass": "ObjectField",
+            "object": try_to_dict(self.object),
+            "field": self.field,
+        }
+
 
 # class VarRefTypePairNode(ASTNode):
 #     def __init__(self, name, var_type):

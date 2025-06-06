@@ -51,21 +51,30 @@ def p_empty(p: yacc.YaccProduction):
 ## 模块入口
 def p_module(p):
     """
-    module : functions
+    module : module_items
     """
     p[0] = ModuleNode(p[1])
 
 
-def p_functions(p):
+def p_module_items(p):
     """
-    functions : function
-    | functions function
+    module_items : module_item
+    | module_items module_item
     """
     if len(p) == 2:
         p[0] = [p[1]]
     else:
         p[1].append(p[2])
         p[0] = p[1]
+
+
+def p_module_item(p):
+    """
+    module_item : function
+    | type_defination
+    | declaration_statement
+    """
+    p[0] = p[1]
 
 
 def p_type(p):
@@ -77,10 +86,14 @@ def p_type(p):
          | TYPE_BOOL
          | TYPE_STR
          | TYPE_NONE
-         | IDENTIFIER
     """
     p[0] = TypeNode(p[1])
 
+def p_struct_type(p):
+    """
+    type : IDENTIFIER
+    """
+    p[0] = StructTypeNode(p[1])
 
 # fn main() {}
 def p_main_function(p):
@@ -345,6 +358,27 @@ def p_get_array_item_expression(p):
     p[0] = ArrayItemNode(VariableNode(p[1]), p[3])
 
 
+def p_struct_type_def(p):
+    """
+    type_defination : STRUCT IDENTIFIER LBRACE var_type_pairs RBRACE
+    """
+    p[0] = StructTypeDefNode(p[2], p[4])
+
+
+def p_struct_literal_expression(p):
+    """
+    expression : IDENTIFIER block
+    """
+    p[0] = StructLiteralNode(StructTypeNode(p[1]), p[2].body)
+
+
+def p_object_field_expression(p):
+    """
+    expression : IDENTIFIER DOT IDENTIFIER
+    """
+    p[0] = ObjectFieldNode(VariableNode(p[1]), p[3])
+
+
 #
 #
 #
@@ -387,12 +421,12 @@ def p_ptr_deref_move_statement(p):
 #         p[0] = p[1]
 
 
-def p_object_call_expression(p):
-    """
-    expression : expression DOT IDENTIFIER LPAREN RPAREN
-               | expression DOT IDENTIFIER LPAREN expressions RPAREN
-    """
-    # p[0] = ObjectCallExpressionNode(p[1], p[3], p[5])  # 对象调用表达式节点
+# def p_object_call_expression(p):
+#     """
+#     expression : expression DOT IDENTIFIER LPAREN RPAREN
+#                | expression DOT IDENTIFIER LPAREN expressions RPAREN
+#     """
+#     # p[0] = ObjectCallExpressionNode(p[1], p[3], p[5])  # 对象调用表达式节点
 
 
 def p_pipe_expression(p):
