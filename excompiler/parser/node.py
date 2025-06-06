@@ -1,29 +1,13 @@
 # import json
-from abc import abstractmethod
 from typing import List
+from llvmlite import ir
+from .symtable import *
 
 
-class ASTNode:
-    def __init__(self, node_type):
-        self.node_type = node_type  # 节点类型
+symbol_table_stack_codegen = SymbolTableStack_codegen()
+builder: ir.IRBuilder  # 全局IR构建器
 
-    @abstractmethod
-    def to_dict(
-        self,
-    ):
-        """
-        将节点转换为字典格式
-        :return: 字典表示的节点
-        """
-        raise NotImplementedError("Subclasses should implement this method")
 
-    @abstractmethod
-    def codegen(self, *args):
-        """
-        生成LLVM IR代码
-        :param builder: LLVM IR构建器
-        """
-        raise NotImplementedError("Subclasses should implement this method")
 
 
 # stage01
@@ -36,19 +20,11 @@ class ModuleNode(ASTNode):
 
     def to_dict(self):
         Module = {
-            "NodeClass": "Module",
+            "ClassName": "Module",
             "body": [try_to_dict(node) for node in self.body],
         }
         return Module
 
-
-class TypeNode(ASTNode):
-    def __init__(self, type_name: str):
-        super().__init__("Type")
-        self.type_name = type_name  # 类型名称
-
-    def to_dict(self):
-        return {"NodeClass": "Type", "type_name": self.type_name}
 
 
 class VariableNode(ASTNode):
@@ -57,7 +33,7 @@ class VariableNode(ASTNode):
         self.name = name  # 变量名称
 
     def to_dict(self):
-        return {"NodeClass": "Variable", "name": self.name}
+        return {"ClassName": "Variable", "name": self.name}
 
 
 class IdentifierNode(ASTNode):
@@ -66,19 +42,13 @@ class IdentifierNode(ASTNode):
         self.name = name  # 标识符名称
 
     def to_dict(self):
-        # return {"NodeClass": "Identifier", "name": self.name}
+        # return {"ClassName": "Identifier", "name": self.name}
         raise NotImplementedError(
             "IdentifierNode does not support to_dict method. Use VariableNode instead."
         )
 
 
-class IntegerNode(ASTNode):
-    def __init__(self, value: str):
-        super().__init__("Integer")  # 节点类型为Integer
-        self.value = value  # 整数值
 
-    def to_dict(self):
-        return {"NodeClass": "Integer", "value": self.value}
 
 
 class FloatNode(ASTNode):
@@ -87,7 +57,7 @@ class FloatNode(ASTNode):
         self.value = value  # 浮点数值
 
     def to_dict(self):
-        return {"NodeClass": "Float", "value": self.value}
+        return {"ClassName": "Float", "value": self.value}
 
 
 class BooleanNode(ASTNode):
@@ -96,21 +66,10 @@ class BooleanNode(ASTNode):
         self.value = value  # 布尔值
 
     def to_dict(self):
-        return {"NodeClass": "Boolean", "value": self.value}
+        return {"ClassName": "Boolean", "value": self.value}
 
 
-class VarTypePairNode(ASTNode):
-    def __init__(self, name: str, var_type: TypeNode):
-        super().__init__("VarTypePair")
-        self.name = name  # 参数名
-        self.var_type = var_type  # 参数类型
 
-    def to_dict(self):
-        return {
-            "NodeClass": "VarTypePair",
-            "name": self.name,
-            "var_type": try_to_dict(self.var_type),
-        }
 
 
 class BlockNode(ASTNode):
@@ -120,7 +79,7 @@ class BlockNode(ASTNode):
 
     def to_dict(self):
         Block = {
-            "NodeClass": "block",
+            "ClassName": "block",
             "body": [try_to_dict(node) for node in self.body],
         }
         return Block
@@ -144,7 +103,7 @@ class FunctionNode(ASTNode):
 
     def to_dict(self):
         Function = {
-            "NodeClass": "Function",
+            "ClassName": "Function",
             "name": self.name,
             "args": [try_to_dict(arg) for arg in self.args],
             "body": [try_to_dict(stat) for stat in self.body],
@@ -161,7 +120,7 @@ class BinaryExpressionNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "BinaryExpression",
+            "ClassName": "BinaryExpression",
             "operator": self.operator,
             "left": try_to_dict(self.left),
             "right": try_to_dict(self.right),
@@ -176,7 +135,7 @@ class UnaryExpressionNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "UnaryExpression",
+            "ClassName": "UnaryExpression",
             "operator": self.operator,
             "value": try_to_dict(self.value),
         }
@@ -188,7 +147,7 @@ class ReturnStatementNode(ASTNode):
         self.value = expression  # 返回表达式
 
     def to_dict(self):
-        return {"NodeClass": "ReturnStatement", "value": self.value.to_dict()}
+        return {"ClassName": "ReturnStatement", "value": self.value.to_dict()}
 
 
 class VariableDeclarationNode(ASTNode):
@@ -200,7 +159,7 @@ class VariableDeclarationNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "VariableDeclaration",
+            "ClassName": "VariableDeclaration",
             "variable": try_to_dict(self.variable),
             "equal_or_move": self.equal_or_move,
             "value": try_to_dict(self.value),
@@ -215,7 +174,7 @@ class VarEqualNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "VarEqual",
+            "ClassName": "VarEqual",
             "variable": try_to_dict(self.variable),
             "value": try_to_dict(self.value),
         }
@@ -229,7 +188,7 @@ class CallExpressionNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "CallExpression",
+            "ClassName": "CallExpression",
             "function_name": self.function_name,
             "args": [try_to_dict(arg) for arg in self.args],
         }
@@ -246,19 +205,11 @@ class NamedVarPointerNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "NamedVarPointer",
+            "ClassName": "NamedVarPointer",
             "name": self.name,
         }
 
 
-### 指针类型节点
-class PointerTypeNode(ASTNode):
-    def __init__(self, base: TypeNode):
-        super().__init__("PointerType")
-        self.base = base  # 基础类型
-
-    def to_dict(self):
-        return {"NodeClass": "PointerType", "base": self.base.to_dict()}
 
 
 class PtrDerefEqualNode(ASTNode):
@@ -269,7 +220,7 @@ class PtrDerefEqualNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "PtrDerefEqual",
+            "ClassName": "PtrDerefEqual",
             "variable": try_to_dict(self.variable),
             "value": try_to_dict(self.value),
         }
@@ -282,7 +233,7 @@ class PtrDerefNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "PtrDeref",
+            "ClassName": "PtrDeref",
             "variable": try_to_dict(self.variable),
         }
 
@@ -296,7 +247,7 @@ class StringNode(ASTNode):
         self.value = proccess_str_literal(value)  # 字符串值
 
     def to_dict(self):
-        return {"NodeClass": "String", "value": self.value}
+        return {"ClassName": "String", "value": self.value}
 
 
 def proccess_str_literal(raw_content):
@@ -309,18 +260,6 @@ def proccess_str_literal(raw_content):
     )
 
 
-class ArrayTypeNode(ASTNode):
-    def __init__(self, base: ASTNode, size: IntegerNode):
-        super().__init__("ArrayType")
-        self.base = base  # 基础类型
-        self.size = size  # 数组大小
-
-    def to_dict(self):
-        return {
-            "NodeClass": "ArrayType",
-            "base": try_to_dict(self.base),
-            "size": try_to_dict(self.size),
-        }
 
 
 class ArrayNode(ASTNode):
@@ -330,7 +269,7 @@ class ArrayNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "Array",
+            "ClassName": "Array",
             "elements": [try_to_dict(element) for element in self.elements],
         }
 
@@ -343,10 +282,11 @@ class ArrayItemNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "ArrayItem",
+            "ClassName": "ArrayItem",
             "array": try_to_dict(self.array),
             "index": try_to_dict(self.index),
         }
+
 
 class StructTypeNode(ASTNode):
     def __init__(self, type_name: str):
@@ -354,21 +294,10 @@ class StructTypeNode(ASTNode):
         self.type_name = type_name  # 类型名称
 
     def to_dict(self):
-        return {"NodeClass": "StructType", "type_name": self.type_name}
+        return {"ClassName": "StructType", "type_name": self.type_name}
 
 
-class StructTypeDefNode(ASTNode):
-    def __init__(self, name:str, var_type_pairs: List[VarTypePairNode]):
-        super().__init__("StructTypeDef")
-        self.name = name
-        self.struct_fields = var_type_pairs  # 结构体成员列表
 
-    def to_dict(self):
-        return {
-            "NodeClass": "StructTypeDef",
-            "name": self.name,
-            "struct_fields": [try_to_dict(field) for field in self.struct_fields],
-        }
 
 
 class StructLiteralNode(ASTNode):
@@ -379,7 +308,7 @@ class StructLiteralNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "StructLiteral",
+            "ClassName": "StructLiteral",
             "struct_type": try_to_dict(self.struct_type),
             "body": [try_to_dict(stat) for stat in self.body],
         }
@@ -393,7 +322,7 @@ class ObjectFieldNode(ASTNode):
 
     def to_dict(self):
         return {
-            "NodeClass": "ObjectField",
+            "ClassName": "ObjectField",
             "object": try_to_dict(self.object),
             "field": self.field,
         }
@@ -427,12 +356,7 @@ class ObjectFieldNode(ASTNode):
 #
 
 
-def try_to_dict(node):
-    """尝试将节点转换为字典格式"""
-    try:
-        return node.to_dict()
-    except AttributeError as e:
-        return f"\033[31mError: Node {type(node).__name__} to_dict error {node.name}\033[0m"
+
 
 
 # class ExpressionNode(ASTNode):

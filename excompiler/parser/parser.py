@@ -80,14 +80,22 @@ def p_module_item(p):
 def p_type(p):
     """
     type : TYPE_I32
-         | TYPE_U32
-         | TYPE_U8
          | TYPE_F32
          | TYPE_BOOL
          | TYPE_STR
-         | TYPE_NONE
     """
-    p[0] = TypeNode(p[1])
+    match p[1]:
+        case "i32":
+            p[0] = IntTypeNode(32)
+        case "f32":
+            p[0] = FloatTypeNode(32)
+        case "bool":
+            p[0] = BooleanTypeNode()
+        case "str":
+            p[0] = StringTypeNode()
+        case _:
+            raise NotImplementedError(f"Unsupported type: {p[1]}")
+        
 
 def p_struct_type(p):
     """

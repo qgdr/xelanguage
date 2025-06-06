@@ -1,6 +1,5 @@
 import os
 import subprocess
-from symtable import SymbolTable
 from llvmlite import ir, binding as llvm
 from llvmlite.binding import Target
 from parser.node import *
@@ -72,63 +71,6 @@ class LLVMCodeGen:
             exit(1)
 
 
-# 符号栈
-class SymbolTable_codegen:
-    def __init__(self):
-        self.symbols = {}
-
-    def add(self, name, ir_local_var):
-        if name in self.symbols:
-            raise ValueError(f"Symbol '{name}' already exists.")
-        self.symbols[name] = ir_local_var
-
-    def get(self, name):
-        if name not in self.symbols:
-            raise KeyError(f"Symbol '{name}' not found.")
-        return self.symbols.get(name)
-
-    def __contains__(self, name):
-        return name in self.symbols
-
-    def __repr__(self):
-        return f"SymbolTable({self.symbols})"
-
-
-class SymbolTableStack_codegen:
-    def __init__(self):
-        self.stack = []
-
-    def push(self):
-        self.stack.append(SymbolTable_codegen())
-
-    def pop(self) -> SymbolTable_codegen:
-        if not self.stack:
-            raise IndexError("Symbol table stack is empty.")
-        return self.stack.pop()
-
-    def current(self) -> SymbolTable_codegen:
-        if not self.stack:
-            raise IndexError("Symbol table stack is empty.")
-        return self.stack[-1]
-
-    def add(self, name: str, ir_local_var):
-        if name in self.current():
-            raise ValueError(
-                f"Symbol '{name}' already exists in the current symbol table."
-            )
-        # 在当前符号表中添加变量
-        self.current().add(name, ir_local_var)
-
-    def get(self, name):
-        for table in reversed(self.stack):
-            if name in table:
-                return table.get(name)
-        raise KeyError(f"Symbol '{name}' not found in any symbol table.")
-
-
-symbol_table_stack_codegen = SymbolTableStack_codegen()
-builder: ir.IRBuilder = None  # type: ignore # 全局IR构建器
-
 # IRType = {
 #     "i32": ir.IntType(32),
 #     "f32": ir.FloatType(),
@@ -189,12 +131,7 @@ def UnaryExpression_codegen(self):
 setattr(UnaryExpressionNode, "codegen", UnaryExpression_codegen)
 
 
-def Integer_codegen(self: IntegerNode):
-    # 处理整数节点
-    return ir.Constant(ir.IntType(32), int(self.value, 0))
 
-
-setattr(IntegerNode, "codegen", Integer_codegen)
 
 
 def Float_codegen(self: FloatNode):
@@ -285,21 +222,7 @@ def VarEqual_codegen(self: VarEqualNode):
 setattr(VarEqualNode, "codegen", VarEqual_codegen)
 
 
-def Type_codegen(self: TypeNode):
-    match self.type_name:
-        case "i32":
-            return ir.IntType(32)
-        case "f32":
-            return ir.FloatType()
-        case "bool":
-            return ir.IntType(1)
-        case "str":
-            return ir.IntType(8)
-        case _:
-            raise NotImplementedError(f"Unsupported type: {self.type_name}")
 
-
-setattr(TypeNode, "codegen", Type_codegen)
 
 
 def Function_codegen(self: FunctionNode, module: ir.Module):
@@ -351,13 +274,6 @@ setattr(CallExpressionNode, "codegen", CallExpression_codegen)
 # stage02
 
 
-def PointerType_codegen(self: PointerTypeNode):
-    # 处理指针类型
-    return self.base.codegen().as_pointer()
-    # return ir.PointerType()
-
-
-setattr(PointerTypeNode, "codegen", PointerType_codegen)
 
 
 def NamedVarPointer_codegen(self: NamedVarPointerNode):
@@ -428,15 +344,6 @@ def get_hash_name(s: str) -> str:
     return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
 
 
-def ArrayType_codegen(self: ArrayTypeNode):
-    global builder
-    # 处理数组类型
-    array_type = ir.ArrayType(self.base.codegen(), int(self.size.value))
-    return array_type
-    # return self.base.codegen().as_pointer()
-
-
-setattr(ArrayTypeNode, "codegen", ArrayType_codegen)
 
 
 def ArrayItem_codegen(self: ArrayItemNode):
@@ -463,14 +370,11 @@ setattr(StructTypeNode, "codegen", StructType_codegen)
 def StructTypeDef_codegen(self: StructTypeDefNode, module: ir.Module):
     global builder, symbol_table_stack_codegen
     # 处理结构体类型定义
-    # struct_type = ir.IdentifiedStructType(module.context, name=self.name)
     ctx = ir.context.global_context
     struct_type = ctx.get_identified_type(self.name)
     struct_type.set_body(
         *[var_type_pair.var_type.codegen() for var_type_pair in self.struct_fields]
     )
-    # symbol_table_stack_codegen.add(self.name, struct_type)
-    # return struct_type
 
 
 setattr(StructTypeDefNode, "codegen", StructTypeDef_codegen)
