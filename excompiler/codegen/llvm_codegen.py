@@ -28,7 +28,7 @@ class LLVMCodeGen:
         assert mainAST.type == "Function"
         assert mainAST.name == "main"
 
-        symbol_table_stack_codegen.push()  # Push a new symbol table for the main function
+        symbol_table_stack.push()  # Push a new symbol table for the main function
 
         main_type = ir.FunctionType(ir.IntType(32), [])
         main_func = ir.Function(self.module, main_type, name="main")
@@ -43,7 +43,7 @@ class LLVMCodeGen:
         if not self.builder.block.is_terminated:
             self.builder.ret(ir.Constant(ir.IntType(32), 0))
 
-        symbol_table_stack_codegen.pop()  # Pop the symbol table for the main function
+        symbol_table_stack.pop()  # Pop the symbol table for the main function
         return str(self.module)
 
     def compile_to_executable(self, ir_file_path, output_file):
@@ -65,7 +65,7 @@ class LLVMCodeGen:
 
 
 # 符号栈
-class SymbolTable_codegen:
+class SymbolTable:
     def __init__(self):
         self.symbols = {}
 
@@ -86,12 +86,12 @@ class SymbolTable_codegen:
         return f"SymbolTable({self.symbols})"
 
 
-class SymbolTableStack_codegen:
+class SymbolTableStack:
     def __init__(self):
         self.stack = []
 
     def push(self):
-        self.stack.append(SymbolTable_codegen())
+        self.stack.append(SymbolTable())
 
     def pop(self):
         if not self.stack:
@@ -113,7 +113,7 @@ class SymbolTableStack_codegen:
         raise KeyError(f"Symbol '{name}' not found in any symbol table.")
 
 
-symbol_table_stack_codegen = SymbolTableStack_codegen()
+symbol_table_stack = SymbolTableStack()
 
 
 IRType = {
@@ -129,7 +129,7 @@ IRType = {
 # def Function_codegen(self, builder: ir.IRBuilder):
 def Identifier_codegen(self, builder: ir.IRBuilder):
     # 处理标识符节点
-    var_ptr = symbol_table_stack_codegen.get(self.name)
+    var_ptr = symbol_table_stack.get(self.name)
     return builder.load(var_ptr, typ=var_ptr.type.pointee)
 setattr(IdentifierNode, "codegen", Identifier_codegen)
 
@@ -222,7 +222,7 @@ def VariableDeclaration_codegen(self, builder: ir.IRBuilder):
                 f"Unsupported pointer base type: {self.variable.var_type.base.name}"
             )
             # 修复指针类型生成逻辑
-            value_ptr = symbol_table_stack_codegen.get(self.value.base_var.name)
+            value_ptr = symbol_table_stack.get(self.value.base_var.name)
             assert ir.IntType(32).as_pointer() == value_ptr.type, (
                 f"Expected pointer to i32, got {value_ptr.type}"
             )
@@ -233,7 +233,7 @@ def VariableDeclaration_codegen(self, builder: ir.IRBuilder):
 
     if variable is None:
         raise NotImplementedError("Variable was not initialized in declaration.")
-    symbol_table_stack_codegen.add(self.variable.name, variable)
+    symbol_table_stack.add(self.variable.name, variable)
 
 
 setattr(VariableDeclarationNode, "codegen", VariableDeclaration_codegen)

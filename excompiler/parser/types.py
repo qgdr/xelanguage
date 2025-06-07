@@ -3,9 +3,6 @@ from typing import List  # 导入List类型注解
 from abc import abstractmethod
 
 
-module: ir.Module
-
-
 class ASTNode:
     @abstractmethod
     def to_dict(
@@ -17,36 +14,52 @@ class ASTNode:
         """
         raise NotImplementedError("Subclasses should implement this method")
 
-    @abstractmethod
-    def codegen(self, *args):
-        """
-        生成LLVM IR代码
-        :param builder: LLVM IR构建器
-        """
-        raise NotImplementedError("Subclasses should implement this method")
+    # @abstractmethod
+    # def codegen(self, *args):
+    #     """
+    #     生成LLVM IR代码
+    #     :param builder: LLVM IR构建器
+    #     """
+    #     raise NotImplementedError(f"Subclasses {self.__class__.__name__} should implement this method")
 
 
 class TypeNode(ASTNode):
-    pass
+    def get_ir_type(self) -> ir.Type:
+        raise NotImplementedError(
+            f"Subclasses {self.__class__.__name__} should implement this method"
+        )
 
 
 class ExpressionNode(ASTNode):
     value_type: TypeNode
-    pass
+
+    @abstractmethod
+    def get_ir_value(self) -> ir.Value:
+        raise NotImplementedError(
+            f"Subclasses {self.__class__.__name__} should implement this method"
+        )
+    
+    @abstractmethod
+    def get_value_type(self) -> TypeNode:
+        return self.value_type
+
+    def get_ir_type(self) -> ir.Type:
+        return self.get_value_type().get_ir_type()
 
 
 class IntegerNode(ExpressionNode):
     def __init__(self, value: str | int):
+        self.value_type = IntTypeNode(32)
         self.value = value  # 整数值
 
     def to_dict(self):
         return {"ClassName": "Integer", "value": self.value}
 
-    def codegen(self):
+    def get_ir_value(self):
         return ir.Constant(ir.IntType(32), int(self.value))
 
 
-class AtomicTypeNode(ASTNode):
+class AtomicTypeNode(TypeNode):
     pass
 
 
@@ -57,7 +70,7 @@ class IntTypeNode(AtomicTypeNode):
     def to_dict(self):
         return {"ClassName": self.__class__.__name__, "type": f"i{self.bits}"}
 
-    def codegen(self):
+    def get_ir_type(self):
         return ir.IntType(self.bits)
 
 
@@ -65,8 +78,21 @@ class FloatTypeNode(AtomicTypeNode):
     def to_dict(self):
         return {"ClassName": self.__class__.__name__, "type": "float"}
 
-    def codegen(self):
+    def get_ir_type(self):
         return ir.FloatType(self.bits)
+
+
+class BoolTypeNode(AtomicTypeNode):
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__, "type": "bool"}
+
+    def get_ir_type(self):
+        return ir.IntType(1)
+
+
+class StrTypeNode(AtomicTypeNode):
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__, "type": "str"}
 
 
 ### 指针类型节点
@@ -77,8 +103,11 @@ class PointerTypeNode(TypeNode):
     def to_dict(self):
         return {"ClassName": self.__class__.__name__, "base": try_to_dict(self.base)}
 
-    def codegen(self):
-        return self.base.codegen().as_pointer()
+    def get_ir_type(self):
+        if isinstance(self.base, StrTypeNode):
+            return ir.PointerType(ir.IntType(8))
+        else:
+            return self.base.codegen().as_pointer()
 
 
 class ArrayTypeNode(TypeNode):
@@ -111,11 +140,26 @@ class VarTypePairNode(ASTNode):
         }
 
 
-class StructTypeNode(TypeNode):
-    def __init__(
-        self, module: ir.Module, name: str, var_type_pairs: List[VarTypePairNode]
-    ):
-        self.module = module
+class IdentifiedTypeNode(TypeNode):
+    def __init__(self, name: str):
+        self.name = name
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "name": self.name,
+        }
+
+    def get_ir_type(self, module: ir.Module):
+        identified_types = module.get_identified_types()
+        if self.name in identified_types:
+            return identified_types[self.name]
+        else:
+            raise ValueError(f"Type {self.name} not found")
+
+
+class StructTypeNode(IdentifiedTypeNode):
+    def __init__(self, name: str, var_type_pairs: List[VarTypePairNode]):
         self.name = name
         self.var_type_pairs = var_type_pairs  # 结构体成员列表
         field_names: List[str] = []
@@ -138,16 +182,62 @@ class StructTypeNode(TypeNode):
     def field_idx(self, field_name: str) -> int:
         return self.field_names.index(field_name)
 
-    def codegen(self):
-        identified_types = self.module.get_identified_types()
-        if self.name in identified_types:
-            return identified_types[self.name]
-        else:
-            ctx = self.module.context
-            struct_type = ctx.get_identified_type(self.name)
-            struct_type.set_body(
-                *[field_type.codegen() for field_type in self.field_types]
-            )
+    def register_to_module(self, module: ir.Module):
+        ctx = module.context
+        struct_type = ctx.get_identified_type(self.name)
+        struct_type.set_body(*[field_type.codegen() for field_type in self.field_types])
+        return struct_type
+
+
+
+class EnumTypeNode(IdentifiedTypeNode):
+    pass
+
+
+class NoneTypeNode(TypeNode):
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__}
+
+
+class AnyTypeNode(TypeNode):
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__}
+
+
+## expression
+
+
+class FloatNode(ExpressionNode):
+    def __init__(self, value):
+        self.value_type = FloatTypeNode()
+        self.value = value  # 浮点数值
+
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__, "value": self.value}
+
+    def get_ir_value(self):
+        return ir.Constant(ir.FloatType(), float(self.value))
+
+
+class BooleanNode(ExpressionNode):
+    def __init__(self, value):
+        self.value_type = BoolTypeNode()
+        self.value = value  # 布尔值
+
+    def to_dict(self):
+        return {"ClassName": "Boolean", "value": self.value}
+
+    def get_ir_value(self):
+        match self.value:
+            case "true":
+                return ir.Constant(ir.IntType(1), 1)
+            case "false":
+                return ir.Constant(ir.IntType(1), 0)
+            case _:
+                raise ValueError(f"Invalid boolean value: {self.value}")
+
+
+
 
 
 #
@@ -179,4 +269,4 @@ def try_to_dict(node):
     try:
         return node.to_dict()
     except AttributeError as e:
-        return f"\033[31mError: Node {type(node).__name__} to_dict error {node.name}\033[0m"
+        return f"Error: Node {type(node).__name__} to_dict error {node.name}\n" + str(e)

@@ -90,18 +90,19 @@ def p_type(p):
         case "f32":
             p[0] = FloatTypeNode(32)
         case "bool":
-            p[0] = BooleanTypeNode()
+            p[0] = BoolTypeNode()
         case "str":
-            p[0] = StringTypeNode()
+            p[0] = StrTypeNode()
         case _:
             raise NotImplementedError(f"Unsupported type: {p[1]}")
-        
 
-def p_struct_type(p):
+
+def p_identified_type(p):
     """
     type : IDENTIFIER
     """
-    p[0] = StructTypeNode(p[1])
+    p[0] = IdentifiedTypeNode(p[1])
+
 
 # fn main() {}
 def p_main_function(p):
@@ -370,7 +371,7 @@ def p_struct_type_def(p):
     """
     type_defination : STRUCT IDENTIFIER LBRACE var_type_pairs RBRACE
     """
-    p[0] = StructTypeDefNode(p[2], p[4])
+    p[0] = StructTypeNode(p[2], p[4])
 
 
 def p_struct_literal_expression(p):

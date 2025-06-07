@@ -33,6 +33,7 @@ reserved = {
     "true": "TRUE",
     "false": "FALSE",
     "None": "TYPE_NONE",
+    "Any" : "TYPE_ANY",
 
     # Array
     "Array": "ARRAY",
