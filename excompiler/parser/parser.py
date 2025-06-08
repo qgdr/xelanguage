@@ -13,7 +13,7 @@ from parser.node import *
 #     FunctionNode,
 #     PointerTypeNode,
 #     VarTypePairNode,
-#     VariableNode,
+#     PHVariable,
 #     UnaryExpressionNode,
 #     BinaryExpressionNode,
 #     IntegerNode,
@@ -70,8 +70,8 @@ def p_module_items(p):
 
 def p_module_item(p):
     """
-    module_item : function
-    | type_defination
+    module_item : function_definition
+    | type_definition
     | declaration_statement
     """
     p[0] = p[1]
@@ -88,7 +88,7 @@ def p_type(p):
         case "i32":
             p[0] = IntTypeNode(32)
         case "f32":
-            p[0] = FloatTypeNode(32)
+            p[0] = FloatTypeNode()
         case "bool":
             p[0] = BoolTypeNode()
         case "str":
@@ -101,25 +101,39 @@ def p_identified_type(p):
     """
     type : IDENTIFIER
     """
-    p[0] = IdentifiedTypeNode(p[1])
+    p[0] = PHType(p[1])
+
+
+def p_pointer_type(p):
+    """
+    type : type AT
+    """
+    p[0] = PointerTypeNode(p[1])  # 指针类型
+
+
+def p_array_type(p):
+    """
+    type : ARRAY LBRACKET type COMMA INTEGER RBRACKET
+    """
+    p[0] = ArrayTypeNode(p[3], IntegerNode(p[5]))
 
 
 # fn main() {}
-def p_main_function(p):
+def p_main_function_definition(p):
     """
-    function : FN IDENTIFIER LPAREN RPAREN block
+    function_definition : FN IDENTIFIER LPAREN RPAREN block
     """
-    p[0] = FunctionNode(p[2], TypeNode("i32"), [], p[5])  # 主函数节点
+    p[0] = FunctionDefNode(p[2], IntTypeNode(32), [], p[5])  # 主函数节点
 
 
 # fn add(a : i32, b: i32) -> i32 {
 #     return a + b;
 # }
-def p_other_function(p):
+def p_other_function_definition(p):
     """
-    function : FN IDENTIFIER LPAREN var_type_pairs RPAREN TO type block
+    function_definition : FN IDENTIFIER LPAREN var_type_pairs RPAREN TO type block
     """
-    p[0] = FunctionNode(
+    p[0] = FunctionDefNode(
         p[2],  # 函数名
         p[7],  # 返回类型
         p[4],  # 参数列表
@@ -154,6 +168,9 @@ def p_block(p):
     p[0] = BlockNode(p[2])
 
 
+## expression
+
+
 def p_int_literal_expression(p):
     """
     primary : INTEGER
@@ -175,7 +192,7 @@ def p_identifier_expression(p):
     """
     primary : IDENTIFIER
     """
-    p[0] = VariableNode(p[1])
+    p[0] = PHVariable(p[1])
 
 
 def p_true_false(p):
@@ -183,7 +200,7 @@ def p_true_false(p):
     primary : TRUE
             | FALSE
     """
-    p[0] = BooleanNode(p[1])  # 布尔值节点，使用VariableNode表示
+    p[0] = BooleanNode(p[1])  # 布尔值节点，使用PHVariable表示
 
 
 def p_parentheses_expression(p):
@@ -212,7 +229,101 @@ def p_binary_expression(p):
     p[0] = BinaryExpressionNode(p[1], p[3], p[2])  # 二元表达式节点
 
 
+def p_expressions(p):
+    """
+    expressions : expression
+                | expressions COMMA expression
+    """
+    if len(p) == 2:
+        p[0] = [p[1]]
+    else:
+        p[1].append(p[3])
+        p[0] = p[1]
+
+
+def p_call_expression(p):
+    """
+    expression : IDENTIFIER LPAREN RPAREN
+               | IDENTIFIER LPAREN expressions RPAREN
+    """
+    p[0] = CallExpressionNode(
+        PHFunction(p[1]),  # 函数名
+        p[3] if len(p) == 5 else [],  # 参数列表，如果没有参数则是空列表
+    )  # 调用表达式节点
+
+
+def p_unary_expression(p):
+    """
+    primary : PLUS primary
+               | MINUS primary
+               | NOT primary
+    """
+    p[0] = UnaryExpressionNode(
+        p[1],  # 操作符
+        p[2],  # 表达式
+    )  # 一元表达式节点
+
+
+def p_named_var_pointer_expression(p):
+    """
+    var_get_pointer : IDENTIFIER AT
+    """
+    p[0] = NamedVarPointerNode(PHVariable(p[1]))  # 指针类型
+
+
+def p_var_get_pointer_expression(p):
+    """
+    expression : var_get_pointer
+    """
+    p[0] = p[1]  # 指针表达式
+
+
+def p_var_deref_expression(p):
+    """
+    expression : IDENTIFIER SHARP
+    """
+    p[0] = PtrDerefNode(PHVariable(p[1]))
+
+
+def p_string_literal_expression(p):
+    """
+    primary : STRING
+    """
+    p[0] = StringNode(p[1])
+
+
+def p_array_literal_expression(p):
+    """
+    expression : LBRACKET RBRACKET
+            | LBRACKET expressions RBRACKET
+    """
+    p[0] = ArrayNode(p[2] if len(p) == 4 else [])
+
+
+def p_get_array_item_expression(p):
+    """
+    expression : IDENTIFIER LBRACKET expression RBRACKET
+    """
+    p[0] = ArrayItemNode(PHVariable(p[1]), p[3])
+
+
+def p_struct_literal_expression(p):
+    """
+    expression : IDENTIFIER block
+    """
+    p[0] = StructLiteralNode(PHStructType(p[1]), p[2].body)
+
+
+def p_object_field_expression(p):
+    """
+    expression : primary DOT IDENTIFIER
+    """
+    p[0] = ObjectFieldNode(p[1], PHVariable(p[3]))
+
+
 ## statement
+
+
 def p_statements(p):
     """
     statements : empty
@@ -259,133 +370,21 @@ def p_var_equal_statement(p):
     """
     assign_statement : IDENTIFIER EQUAL expression SEMICOLON
     """
-    p[0] = VarEqualNode(VariableNode(p[1]), p[3])
-
-
-def p_expressions(p):
-    """
-    expressions : expression
-                | expressions COMMA expression
-    """
-    if len(p) == 2:
-        p[0] = [p[1]]
-    else:
-        p[1].append(p[3])
-        p[0] = p[1]
-
-
-def p_call_expression(p):
-    """
-    expression : IDENTIFIER LPAREN RPAREN
-               | IDENTIFIER LPAREN expressions RPAREN
-    """
-    p[0] = CallExpressionNode(
-        p[1],  # 函数名
-        p[3] if len(p) == 5 else [],  # 参数列表，如果没有参数则是空列表
-    )  # 调用表达式节点
-
-
-def p_unary_expression(p):
-    """
-    primary : PLUS primary
-               | MINUS primary
-               | NOT primary
-    """
-    p[0] = UnaryExpressionNode(
-        p[1],  # 操作符
-        p[2],  # 表达式
-    )  # 一元表达式节点
-
-
-# stage02
-
-
-def p_pointer_type(p):
-    """
-    type : type AT
-    """
-    p[0] = PointerTypeNode(p[1])  # 指针类型
-
-
-def p_named_var_pointer_expression(p):
-    """
-    var_get_pointer : IDENTIFIER AT
-    """
-    p[0] = NamedVarPointerNode(p[1])  # 指针类型
-
-
-def p_var_get_pointer_expression(p):
-    """
-    expression : var_get_pointer
-    """
-    p[0] = p[1]  # 指针表达式
+    p[0] = VarEqualNode(PHVariable(p[1]), p[3])
 
 
 def p_ptr_deref_equal_statement(p):
     """
     assign_statement : IDENTIFIER SHARP EQUAL expression SEMICOLON
     """
-    p[0] = PtrDerefEqualNode(VariableNode(p[1]), p[4])
-
-
-def p_var_deref_expression(p):
-    """
-    expression : IDENTIFIER SHARP
-    """
-    p[0] = PtrDerefNode(VariableNode(p[1]))
-
-
-# stage04
-
-
-def p_string_literal_expression(p):
-    """
-    primary : STRING
-    """
-    p[0] = StringNode(p[1])
-
-
-def p_array_type(p):
-    """
-    type : ARRAY LBRACKET type COMMA INTEGER RBRACKET
-    """
-    p[0] = ArrayTypeNode(p[3], IntegerNode(p[5]))
-
-
-def p_array_literal_expression(p):
-    """
-    expression : LBRACKET RBRACKET
-            | LBRACKET expressions RBRACKET
-    """
-    p[0] = ArrayNode(p[2] if len(p) == 4 else [])
-
-
-def p_get_array_item_expression(p):
-    """
-    expression : IDENTIFIER LBRACKET expression RBRACKET
-    """
-    p[0] = ArrayItemNode(VariableNode(p[1]), p[3])
+    p[0] = PtrDerefEqualNode(PHVariable(p[1]), p[4])
 
 
 def p_struct_type_def(p):
     """
-    type_defination : STRUCT IDENTIFIER LBRACE var_type_pairs RBRACE
+    type_definition : STRUCT IDENTIFIER LBRACE var_type_pairs RBRACE
     """
     p[0] = StructTypeNode(p[2], p[4])
-
-
-def p_struct_literal_expression(p):
-    """
-    expression : IDENTIFIER block
-    """
-    p[0] = StructLiteralNode(StructTypeNode(p[1]), p[2].body)
-
-
-def p_object_field_expression(p):
-    """
-    expression : IDENTIFIER DOT IDENTIFIER
-    """
-    p[0] = ObjectFieldNode(VariableNode(p[1]), p[3])
 
 
 #

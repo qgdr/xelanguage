@@ -74,36 +74,6 @@ class LLVMCodeGen:
 # }
 
 
-
-
-
-
-
-def UnaryExpression_codegen(self):
-    global builder
-    # 处理一元表达式
-    value = self.value.codegen()
-    if self.operator == "-":
-        return builder.neg(value)
-    elif self.operator == "+":
-        return value
-    elif self.operator == "not":
-        return builder.not_(value)
-    else:
-        raise NotImplementedError(f"Unsupported operator: {self.operator}")
-
-
-setattr(UnaryExpressionNode, "codegen", UnaryExpression_codegen)
-
-
-
-
-
-
-
-
-
-
 def ReturnStatement_codegen(self: ReturnStatementNode):
     global builder
     builder.ret(self.value.codegen())
@@ -146,9 +116,7 @@ def VariableDeclaration_codegen(self: VariableDeclarationNode):
     elif isinstance(self.variable.var_type, StructTypeNode):
         symbol_table = self.value.codegen()
         if not isinstance(symbol_table, SymbolTable):
-            raise TypeError(
-                "Value must be a SymbolTable_codegen instance for struct"
-            )
+            raise TypeError("Value must be a SymbolTable_codegen instance for struct")
         for i, key in enumerate(symbol_table.symbols):
             builder.store(
                 symbol_table.symbols[key],
@@ -176,11 +144,6 @@ def VarEqual_codegen(self: VarEqualNode):
 setattr(VarEqualNode, "codegen", VarEqual_codegen)
 
 
-
-
-
-
-
 def CallExpression_codegen(self: CallExpressionNode):
     global builder
     # 处理函数调用表达式
@@ -196,8 +159,6 @@ setattr(CallExpressionNode, "codegen", CallExpression_codegen)
 
 
 # stage02
-
-
 
 
 def NamedVarPointer_codegen(self: NamedVarPointerNode):
@@ -266,8 +227,6 @@ import hashlib
 def get_hash_name(s: str) -> str:
     hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
     return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
-
-
 
 
 def ArrayItem_codegen(self: ArrayItemNode):

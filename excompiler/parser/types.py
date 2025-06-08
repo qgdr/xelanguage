@@ -14,14 +14,6 @@ class ASTNode:
         """
         raise NotImplementedError("Subclasses should implement this method")
 
-    # @abstractmethod
-    # def codegen(self, *args):
-    #     """
-    #     生成LLVM IR代码
-    #     :param builder: LLVM IR构建器
-    #     """
-    #     raise NotImplementedError(f"Subclasses {self.__class__.__name__} should implement this method")
-
 
 class TypeNode(ASTNode):
     def get_ir_type(self) -> ir.Type:
@@ -34,17 +26,25 @@ class ExpressionNode(ASTNode):
     value_type: TypeNode
 
     @abstractmethod
+    def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
+        return self.value_type
+
+    @abstractmethod
     def get_ir_value(self) -> ir.Value:
         raise NotImplementedError(
             f"Subclasses {self.__class__.__name__} should implement this method"
         )
-    
-    @abstractmethod
-    def get_value_type(self) -> TypeNode:
-        return self.value_type
 
-    def get_ir_type(self) -> ir.Type:
-        return self.get_value_type().get_ir_type()
+    def get_ir_type(self, builder: ir.IRBuilder) -> ir.Type:
+        return self.get_value_type(builder).get_ir_type()
+
+
+class StatementNode(ASTNode):
+    @abstractmethod
+    def codegen(self, *args):
+        raise NotImplementedError(
+            f"Subclasses {self.__class__.__name__} should implement this method"
+        )
 
 
 class IntegerNode(ExpressionNode):
@@ -53,7 +53,7 @@ class IntegerNode(ExpressionNode):
         self.value = value  # 整数值
 
     def to_dict(self):
-        return {"ClassName": "Integer", "value": self.value}
+        return {"ClassName": self.__class__.__name__, "value": self.value}
 
     def get_ir_value(self):
         return ir.Constant(ir.IntType(32), int(self.value))
@@ -93,6 +93,9 @@ class BoolTypeNode(AtomicTypeNode):
 class StrTypeNode(AtomicTypeNode):
     def to_dict(self):
         return {"ClassName": self.__class__.__name__, "type": "str"}
+
+    def get_ir_type(self):
+        return ir.IntType(8).as_pointer()
 
 
 ### 指针类型节点
@@ -144,12 +147,6 @@ class IdentifiedTypeNode(TypeNode):
     def __init__(self, name: str):
         self.name = name
 
-    def to_dict(self):
-        return {
-            "ClassName": self.__class__.__name__,
-            "name": self.name,
-        }
-
     def get_ir_type(self, module: ir.Module):
         identified_types = module.get_identified_types()
         if self.name in identified_types:
@@ -187,7 +184,6 @@ class StructTypeNode(IdentifiedTypeNode):
         struct_type = ctx.get_identified_type(self.name)
         struct_type.set_body(*[field_type.codegen() for field_type in self.field_types])
         return struct_type
-
 
 
 class EnumTypeNode(IdentifiedTypeNode):
@@ -235,9 +231,6 @@ class BooleanNode(ExpressionNode):
                 return ir.Constant(ir.IntType(1), 0)
             case _:
                 raise ValueError(f"Invalid boolean value: {self.value}")
-
-
-
 
 
 #

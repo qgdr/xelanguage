@@ -15,7 +15,7 @@ class IdentifierNode(ASTNode):
     def to_dict(self):
         # return {"ClassName": "Identifier", "name": self.name}
         raise NotImplementedError(
-            "IdentifierNode does not support to_dict method. Use VariableNode instead."
+            "IdentifierNode does not support to_dict method. Use PHVariable instead."
         )
 
 
@@ -34,7 +34,7 @@ class ModuleNode(ASTNode):
         return Module
 
 
-class BlockNode(ASTNode):
+class BlockNode(ExpressionNode):
     def __init__(self, statements: List[ASTNode]):
         self.body = statements  # 语句列表
 
@@ -46,7 +46,7 @@ class BlockNode(ASTNode):
         return Block
 
 
-class FunctionNode(ASTNode):
+class FunctionDefNode(StatementNode):
     def __init__(
         self,
         name: str,
@@ -89,7 +89,7 @@ class FunctionNode(ASTNode):
             [arg_type.get_ir_type() for arg_type in self.arg_types],
         )
 
-    def register_to_module(self, module: ir.Module):
+    def codegen(self, module: ir.Module):
         global symbol_table_stack
         func_type = self.get_ir_type()
         function = ir.Function(module, func_type, name=self.name)
@@ -99,7 +99,7 @@ class FunctionNode(ASTNode):
         symbol_table_stack.push()  # Push a new symbol table for the function
         # 将参数添加到符号表
         for i, name in enumerate(self.arg_names):
-            ir_local_var = IRLocalVar(
+            ir_local_var = IRVariable(
                 name, function.args[i], self.arg_types[i], is_alloca=False
             )
             symbol_table_stack.add(name, ir_local_var)  # 添加到符号表
@@ -120,29 +120,29 @@ class FunctionNode(ASTNode):
 ## expression
 
 
-class VariableNode(ExpressionNode):
-    def __init__(self, name: str):
-        self.name = name  # 变量名称
+# class PHVariable(ExpressionNode):
+#     def __init__(self, name: str):
+#         self.name = name  # 变量名称
 
-    def to_dict(self):
-        return {"ClassName": "Variable", "name": self.name}
+#     def to_dict(self):
+#         return {"ClassName": "Variable", "name": self.name}
 
-    @override
-    def get_ir_value(self):
-        global symbol_table_stack
-        ir_local_var = symbol_table_stack.get(self.name)
-        return ir_local_var.ir_value
+#     @override
+#     def get_ir_value(self, builder: ir.IRBuilder):
+#         global symbol_table_stack
+#         ir_local_var = symbol_table_stack.get(self.name)
+#         return ir_local_var.ir_value
 
-    @override
-    def get_value_type(self) -> TypeNode:
-        global symbol_table_stack
-        ir_local_var = symbol_table_stack.get(self.name)
-        return ir_local_var.var_type
+#     @override
+#     def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
+#         global symbol_table_stack
+#         ir_local_var = symbol_table_stack.get(self.name)
+#         return ir_local_var.var_type
 
-    def is_alloca(self):
-        global symbol_table_stack
-        ir_local_var = symbol_table_stack.get(self.name)
-        return ir_local_var.is_alloca
+#     def is_alloca(self):
+#         global symbol_table_stack
+#         ir_local_var = symbol_table_stack.get(self.name)
+#         return ir_local_var.is_alloca
 
 
 class BinaryExpressionNode(ExpressionNode):
@@ -187,7 +187,6 @@ class BinaryExpressionNode(ExpressionNode):
 
 class UnaryExpressionNode(ExpressionNode):
     def __init__(self, operator: str, primary: ExpressionNode):
-        super().__init__("UnaryExpression")
         self.operator = operator  # 操作符
         self.value = primary  # 表达式
 
@@ -214,117 +213,6 @@ class UnaryExpressionNode(ExpressionNode):
         return self.value.get_value_type()
 
 
-    
-
-## statements
-
-class ReturnStatementNode(ASTNode):
-    def __init__(self, expression):
-        super().__init__("ReturnStatement")
-        self.value = expression  # 返回表达式
-
-    def to_dict(self):
-        return {"ClassName": "ReturnStatement", "value": self.value.to_dict()}
-
-
-class VariableDeclarationNode(ASTNode):
-    def __init__(self, var_type_pair: VarTypePairNode, equal_or_move: str, value):
-        super().__init__("VariableDeclaration")
-        self.variable = var_type_pair  # 变量名和类型
-        self.equal_or_move = equal_or_move
-        self.value = value  # 可选的初始值
-
-    def to_dict(self):
-        return {
-            "ClassName": "VariableDeclaration",
-            "variable": try_to_dict(self.variable),
-            "equal_or_move": self.equal_or_move,
-            "value": try_to_dict(self.value),
-        }
-
-
-class VarEqualNode(ASTNode):
-    def __init__(self, variable: VariableNode, value):
-        super().__init__("VarEqual")
-        self.variable = variable  # 变量名
-        self.value = value  # 赋值表达式
-
-    def to_dict(self):
-        return {
-            "ClassName": "VarEqual",
-            "variable": try_to_dict(self.variable),
-            "value": try_to_dict(self.value),
-        }
-
-
-class CallExpressionNode(ASTNode):
-    def __init__(self, function_name: str, args: List[ASTNode]):
-        super().__init__("CallExpression")
-        self.function_name = function_name  # 函数名
-        self.args = args  # 参数列表
-
-    def to_dict(self):
-        return {
-            "ClassName": "CallExpression",
-            "function_name": self.function_name,
-            "args": [try_to_dict(arg) for arg in self.args],
-        }
-
-
-# stage02
-
-
-### var@
-class NamedVarPointerNode(ASTNode):
-    def __init__(self, name: str):
-        super().__init__("NamedVarPointer")
-        self.name = name  # 变量名
-
-    def to_dict(self):
-        return {
-            "ClassName": "NamedVarPointer",
-            "name": self.name,
-        }
-
-
-class PtrDerefEqualNode(ASTNode):
-    def __init__(self, variable: VariableNode, value: ASTNode):
-        super().__init__("PtrDerefEqual")
-        self.variable = variable  # 变量名
-        self.value = value  # 赋值表达式
-
-    def to_dict(self):
-        return {
-            "ClassName": "PtrDerefEqual",
-            "variable": try_to_dict(self.variable),
-            "value": try_to_dict(self.value),
-        }
-
-
-class PtrDerefNode(ASTNode):
-    def __init__(self, variable: VariableNode):
-        super().__init__("PtrDeref")
-        self.variable = variable  # 变量名
-
-    def to_dict(self):
-        return {
-            "ClassName": "PtrDeref",
-            "variable": try_to_dict(self.variable),
-        }
-
-
-# stage04
-
-
-class StringNode(ASTNode):
-    def __init__(self, value):
-        super().__init__("String")
-        self.value = proccess_str_literal(value)  # 字符串值
-
-    def to_dict(self):
-        return {"ClassName": "String", "value": self.value}
-
-
 def proccess_str_literal(raw_content):
     return (
         raw_content.replace("\\n", "\n")
@@ -335,9 +223,95 @@ def proccess_str_literal(raw_content):
     )
 
 
+import hashlib
+
+
+def get_hash_name(s: str) -> str:
+    hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
+    return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
+
+
+class StringNode(ExpressionNode):
+    def __init__(self, value: str):
+        self.value_type = StrTypeNode()
+        self.value = proccess_str_literal(value)  # 字符串值
+
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__, "value": self.value}
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        name = get_hash_name(self.value)
+        if name in builder.module.globals:
+            return builder.module.get_global(name)
+        else:
+            str_bytes = self.value.encode() + b"\0"
+            str_arr = ir.Constant(
+                ir.ArrayType(ir.IntType(8), len(str_bytes)), bytearray(str_bytes)
+            )
+            str_var = ir.GlobalVariable(
+                builder.module, ir.ArrayType(ir.IntType(8), len(str_bytes)), name=name
+            )
+            str_var.initializer = str_arr  # type: ignore
+            str_var.linkage = "internal"  # 限制作用域，避免外部可见性
+            str_var = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
+            return str_var
+
+
+class CallExpressionNode(ExpressionNode):
+    def __init__(self, function: PHFunction, args: List[ExpressionNode]):
+        self.function = function  # 函数名
+        self.args = args  # 参数列表
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "function": try_to_dict(self.function),
+            "args": [try_to_dict(arg) for arg in self.args],
+        }
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        function = builder.module.get_global(self.function_name)
+        if not isinstance(function, ir.Function):
+            raise ValueError(f"Function '{self.function_name}' not found in module.")
+        args = [arg.codegen() for arg in self.args]
+        call = builder.call(function, args)
+        return call
+
+    def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
+        global symbol_table_stack
+        func_node = symbol_table_stack.get(self.function_name)
+        if not isinstance(func_node, FunctionNode):
+            raise ValueError(f"Function '{self.function_name}' not found in module.")
+        return func_node.return_type
+
+
+### var@
+class NamedVarPointerNode(ExpressionNode):
+    def __init__(self, variable: PHVariable):
+        self.variable = variable  # 变量名
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "variable": try_to_dict(
+                self.variable,
+            ),
+        }
+
+
+class PtrDerefNode(ASTNode):
+    def __init__(self, variable: PHVariable):
+        self.variable = variable  # 变量名
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "variable": try_to_dict(self.variable),
+        }
+
+
 class ArrayNode(ASTNode):
     def __init__(self, elements: List[ASTNode]):
-        super().__init__("Array")
         self.elements = elements  # 数组元素列表
 
     def to_dict(self):
@@ -348,8 +322,7 @@ class ArrayNode(ASTNode):
 
 
 class ArrayItemNode(ASTNode):
-    def __init__(self, array: VariableNode, index: ASTNode):
-        super().__init__("ArrayItem")
+    def __init__(self, array: PHVariable, index: ExpressionNode):
         self.array = array  # 数组名
         self.index = index  # 索引
 
@@ -363,7 +336,6 @@ class ArrayItemNode(ASTNode):
 
 class StructLiteralNode(ASTNode):
     def __init__(self, struct_type: TypeNode, body: List[ASTNode]):
-        super().__init__("StructLiteral")
         self.struct_type = struct_type  # 结构体类型
         self.body = body  # 结构体成员列表
 
@@ -376,8 +348,7 @@ class StructLiteralNode(ASTNode):
 
 
 class ObjectFieldNode(ASTNode):
-    def __init__(self, variable: VariableNode, field: str):
-        super().__init__("ObjectField")
+    def __init__(self, variable: PHVariable, field: str):
         self.object = variable  # 对象
         self.field = field  # 字段名
 
@@ -387,6 +358,61 @@ class ObjectFieldNode(ASTNode):
             "object": try_to_dict(self.object),
             "field": self.field,
         }
+
+
+## statements
+
+
+class ReturnStatementNode(StatementNode):
+    def __init__(self, expression):
+        self.value = expression  # 返回表达式
+
+    def to_dict(self):
+        return {"ClassName": "ReturnStatement", "value": self.value.to_dict()}
+
+
+class VariableDeclarationNode(StatementNode):
+    def __init__(self, var_type_pair: VarTypePairNode, equal_or_move: str, value):
+        self.variable = var_type_pair  # 变量名和类型
+        self.equal_or_move = equal_or_move
+        self.value = value  # 可选的初始值
+
+    def to_dict(self):
+        return {
+            "ClassName": "VariableDeclaration",
+            "variable": try_to_dict(self.variable),
+            "equal_or_move": self.equal_or_move,
+            "value": try_to_dict(self.value),
+        }
+
+
+class VarEqualNode(StatementNode):
+    def __init__(self, variable: PHVariable, value: ExpressionNode):
+        self.variable = variable  # 变量名
+        self.value = value  # 赋值表达式
+
+    def to_dict(self):
+        return {
+            "ClassName": "VarEqual",
+            "variable": try_to_dict(self.variable),
+            "value": try_to_dict(self.value),
+        }
+
+
+class PtrDerefEqualNode(StatementNode):
+    def __init__(self, variable: PHVariable, value: ExpressionNode):
+        self.variable = variable  # 变量名
+        self.value = value  # 赋值表达式
+
+    def to_dict(self):
+        return {
+            "ClassName": "PtrDerefEqual",
+            "variable": try_to_dict(self.variable),
+            "value": try_to_dict(self.value),
+        }
+
+
+# stage04
 
 
 # class VarRefTypePairNode(ASTNode):
@@ -415,13 +441,3 @@ class ObjectFieldNode(ASTNode):
 #
 #
 #
-
-
-# class ExpressionNode(ASTNode):
-#     def __init__(self, type, left, right):
-#         super().__init__(type)  # 节点类型
-#         self.left = left  # 左表达式
-#         self.right = right  # 右表达式
-
-#     def to_dict(self):
-#         return {}
