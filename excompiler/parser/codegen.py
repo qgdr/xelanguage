@@ -43,9 +43,11 @@ class LLVMCodeGen:
 
     def generate(self, prog, module_name):
         # 生成LLVM IR逻辑
+        symbol_table_stack.push(is_global=True)
         self.module.name = module_name
         for module_item in prog.body:
             module_item.codegen(self.module)
+        symbol_table_stack.pop()
         return str(self.module)
 
     def compile_to_executable(self, ir_file_path, output_file):
@@ -74,65 +76,59 @@ class LLVMCodeGen:
 # }
 
 
-def ReturnStatement_codegen(self: ReturnStatementNode):
-    global builder
-    builder.ret(self.value.codegen())
 
 
-setattr(ReturnStatementNode, "codegen", ReturnStatement_codegen)
+# def VariableDeclaration_codegen(self: VariableDeclarationNode):
+#     global builder, symbol_table_stack
+#     if self.value is None:
+#         raise NotImplementedError("Variable declaration without initial value")
+#     var_type = self.variable.var_type.codegen()
+#     variable = builder.alloca(var_type, name=self.variable.name)
+#     if isinstance(self.variable.var_type, TypeNode):
+#         builder.store(self.value.codegen(), variable)
+#         setattr(variable, "alloca", True)  # 标记为分配的变量
+
+#     elif isinstance(self.variable.var_type, PointerTypeNode):
+#         builder.store(self.value.codegen(), variable)
+#         setattr(variable, "alloca", True)  # 标记为分配的变量
+
+#     elif isinstance(self.variable.var_type, ArrayTypeNode):
+#         assert isinstance(self.value, ArrayNode), "Value must be an array"
+#         assert int(self.variable.var_type.size.value) >= len(self.value.elements), (
+#             "Array size too small"
+#         )
+#         for i, element in enumerate(self.value.elements):
+#             builder.store(
+#                 element.codegen(),
+#                 builder.gep(
+#                     variable,
+#                     [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+#                     inbounds=True,
+#                 ),
+#             )
+#         setattr(variable, "alloca", False)  # 标记为分配的变量
+
+#         # variable = builder.bitcast(variable, ir.PointerType(var_type))
+#     elif isinstance(self.variable.var_type, StructTypeNode):
+#         symbol_table = self.value.codegen()
+#         if not isinstance(symbol_table, SymbolTable):
+#             raise TypeError("Value must be a SymbolTable_codegen instance for struct")
+#         for i, key in enumerate(symbol_table.symbols):
+#             builder.store(
+#                 symbol_table.symbols[key],
+#                 builder.gep(
+#                     variable,
+#                     [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+#                     inbounds=True,
+#                 ),
+#             )
+#     else:
+#         raise NotImplementedError(f"Unsupported type: {type(self.variable.var_type)}")
+
+#     symbol_table_stack.add(self.variable.name, variable)
 
 
-def VariableDeclaration_codegen(self: VariableDeclarationNode):
-    global builder, symbol_table_stack
-    if self.value is None:
-        raise NotImplementedError("Variable declaration without initial value")
-    var_type = self.variable.var_type.codegen()
-    variable = builder.alloca(var_type, name=self.variable.name)
-    if isinstance(self.variable.var_type, TypeNode):
-        builder.store(self.value.codegen(), variable)
-        setattr(variable, "alloca", True)  # 标记为分配的变量
-
-    elif isinstance(self.variable.var_type, PointerTypeNode):
-        builder.store(self.value.codegen(), variable)
-        setattr(variable, "alloca", True)  # 标记为分配的变量
-
-    elif isinstance(self.variable.var_type, ArrayTypeNode):
-        assert isinstance(self.value, ArrayNode), "Value must be an array"
-        assert int(self.variable.var_type.size.value) >= len(self.value.elements), (
-            "Array size too small"
-        )
-        for i, element in enumerate(self.value.elements):
-            builder.store(
-                element.codegen(),
-                builder.gep(
-                    variable,
-                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
-                    inbounds=True,
-                ),
-            )
-        setattr(variable, "alloca", False)  # 标记为分配的变量
-
-        # variable = builder.bitcast(variable, ir.PointerType(var_type))
-    elif isinstance(self.variable.var_type, StructTypeNode):
-        symbol_table = self.value.codegen()
-        if not isinstance(symbol_table, SymbolTable):
-            raise TypeError("Value must be a SymbolTable_codegen instance for struct")
-        for i, key in enumerate(symbol_table.symbols):
-            builder.store(
-                symbol_table.symbols[key],
-                builder.gep(
-                    variable,
-                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
-                    inbounds=True,
-                ),
-            )
-    else:
-        raise NotImplementedError(f"Unsupported type: {type(self.variable.var_type)}")
-
-    symbol_table_stack.add(self.variable.name, variable)
-
-
-setattr(VariableDeclarationNode, "codegen", VariableDeclaration_codegen)
+# setattr(VariableDeclarationNode, "codegen", VariableDeclaration_codegen)
 
 
 def VarEqual_codegen(self: VarEqualNode):
@@ -199,34 +195,34 @@ setattr(PtrDerefNode, "codegen", PtrDeref_codegen)
 # stage04
 
 
-def String_codegen(self: StringNode):
-    global builder
-    # 处理字符串节点
-    name = get_hash_name(self.value)
-    if name in builder.module.globals:
-        return builder.module.get_global(name)
-    else:
-        str_bytes = self.value.encode() + b"\0"
-        str_arr = ir.Constant(
-            ir.ArrayType(ir.IntType(8), len(str_bytes)), bytearray(str_bytes)
-        )
-        str_var = ir.GlobalVariable(
-            builder.module, ir.ArrayType(ir.IntType(8), len(str_bytes)), name=name
-        )
-        str_var.initializer = str_arr  # type: ignore
-        str_var.linkage = "internal"  # 限制作用域，避免外部可见性
-        str_var = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
-        return str_var
+# def String_codegen(self: StringNode):
+#     global builder
+#     # 处理字符串节点
+#     name = get_hash_name(self.value)
+#     if name in builder.module.globals:
+#         return builder.module.get_global(name)
+#     else:
+#         str_bytes = self.value.encode() + b"\0"
+#         str_arr = ir.Constant(
+#             ir.ArrayType(ir.IntType(8), len(str_bytes)), bytearray(str_bytes)
+#         )
+#         str_var = ir.GlobalVariable(
+#             builder.module, ir.ArrayType(ir.IntType(8), len(str_bytes)), name=name
+#         )
+#         str_var.initializer = str_arr  # type: ignore
+#         str_var.linkage = "internal"  # 限制作用域，避免外部可见性
+#         str_var = builder.bitcast(str_var, ir.PointerType(ir.IntType(8)))
+#         return str_var
 
 
-setattr(StringNode, "codegen", String_codegen)
+# setattr(StringNode, "codegen", String_codegen)
 
-import hashlib
+# import hashlib
 
 
-def get_hash_name(s: str) -> str:
-    hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
-    return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
+# def get_hash_name(s: str) -> str:
+#     hash_val = hashlib.md5(s.encode()).hexdigest()  # 生成128位哈希
+#     return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
 
 
 def ArrayItem_codegen(self: ArrayItemNode):
@@ -242,25 +238,25 @@ setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
 
 
 ## struct
-def StructType_codegen(self: StructTypeNode):
-    global builder
-    return builder.module.get_identified_types()[self.type_name]
+# def StructType_codegen(self: StructTypeNode):
+#     global builder
+#     return builder.module.get_identified_types()[self.type_name]
 
 
-setattr(StructTypeNode, "codegen", StructType_codegen)
+# setattr(StructTypeNode, "codegen", StructType_codegen)
 
 
-def StructTypeDef_codegen(self: StructTypeDefNode, module: ir.Module):
-    global builder, symbol_table_stack
-    # 处理结构体类型定义
-    ctx = ir.context.global_context
-    struct_type = ctx.get_identified_type(self.name)
-    struct_type.set_body(
-        *[var_type_pair.var_type.codegen() for var_type_pair in self.struct_fields]
-    )
+# def StructTypeDef_codegen(self: StructTypeDefNode, module: ir.Module):
+#     global builder, symbol_table_stack
+#     # 处理结构体类型定义
+#     ctx = ir.context.global_context
+#     struct_type = ctx.get_identified_type(self.name)
+#     struct_type.set_body(
+#         *[var_type_pair.var_type.codegen() for var_type_pair in self.struct_fields]
+#     )
 
 
-setattr(StructTypeDefNode, "codegen", StructTypeDef_codegen)
+# setattr(StructTypeDefNode, "codegen", StructTypeDef_codegen)
 
 
 def StructLiteral_codegen(self: StructLiteralNode):

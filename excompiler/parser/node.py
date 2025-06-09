@@ -4,24 +4,24 @@ from llvmlite import ir
 from .symtable import *
 
 
-symbol_table_stack = SymbolTableStack()
 # builder: ir.IRBuilder  # 全局IR构建器
 
 
-class IdentifierNode(ASTNode):
-    def __init__(self, name: str):
-        self.name = name  # 标识符名称
+# class IdentifierNode(ASTNode):
+#     def __init__(self, name: str):
+#         self.name = name  # 标识符名称
 
-    def to_dict(self):
-        # return {"ClassName": "Identifier", "name": self.name}
-        raise NotImplementedError(
-            "IdentifierNode does not support to_dict method. Use PHVariable instead."
-        )
+#     def to_dict(self):
+#         # return {"ClassName": "Identifier", "name": self.name}
+#         raise NotImplementedError(
+#             "IdentifierNode does not support to_dict method. Use PHVariable instead."
+#         )
 
 
 ## frame
 
 
+## 没有 codegen
 class ModuleNode(ASTNode):
     def __init__(self, module_items: List[ASTNode]):
         self.body = module_items  # 模块中的项目列表
@@ -46,6 +46,7 @@ class BlockNode(ExpressionNode):
         return Block
 
 
+## statement , has codegen method
 class FunctionDefNode(StatementNode):
     def __init__(
         self,
@@ -80,18 +81,15 @@ class FunctionDefNode(StatementNode):
         }
         return Function
 
-    def arg_idx(self, arg_name: str) -> int:
-        return self.arg_names.index(arg_name)
-
-    def get_ir_type(self):
-        return ir.FunctionType(
-            self.return_type.get_ir_type(),
-            [arg_type.get_ir_type() for arg_type in self.arg_types],
-        )
-
     def codegen(self, module: ir.Module):
         global symbol_table_stack
-        func_type = self.get_ir_type()
+        assert symbol_table_stack.current().is_global, ValueError(
+            "Function definition should be in global scope"
+        )
+        ir_function_symbol = IRFunctionSymbol(self.name, self.return_type, self.arg_names, self.arg_types)
+        symbol_table_stack.current().add(self.name, ir_function_symbol)
+        # 创建函数类型
+        func_type = ir_function_symbol.get_ir_type()
         function = ir.Function(module, func_type, name=self.name)
         entry_block = function.append_basic_block("entry")
         builder = ir.IRBuilder(entry_block)
@@ -99,8 +97,8 @@ class FunctionDefNode(StatementNode):
         symbol_table_stack.push()  # Push a new symbol table for the function
         # 将参数添加到符号表
         for i, name in enumerate(self.arg_names):
-            ir_local_var = IRVariable(
-                name, function.args[i], self.arg_types[i], is_alloca=False
+            ir_local_var = IRVariableSymbol(
+                name, self.arg_types[i], function.args[i], is_alloca=False
             )
             symbol_table_stack.add(name, ir_local_var)  # 添加到符号表
         # 处理函数体
@@ -117,32 +115,129 @@ class FunctionDefNode(StatementNode):
         symbol_table_stack.pop()  # Pop the symbol table for the function
 
 
+class StructTypeDefNode(StatementNode):
+    def __init__(self, name: str, var_type_pairs: List[VarTypePairNode]):
+        self.name = name
+        self.var_type_pairs = var_type_pairs  # 结构体成员列表
+        field_names: List[str] = []
+        field_types: List[TypeNode] = []
+        for pair in var_type_pairs:
+            if pair.name in field_names:
+                raise ValueError(f"Duplicate field name: {pair.name}")
+            field_names.append(pair.name)
+            field_types.append(pair.var_type)
+        self.field_names = field_names
+        self.field_types = field_types
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "name": self.name,
+            "var_type_pairs": [try_to_dict(pair) for pair in self.var_type_pairs],
+        }
+
+    def codegen(self, module: ir.Module):
+        global symbol_table_stack
+        assert symbol_table_stack.current().is_global, ValueError(
+            "Struct definition should be in global scope"
+        )
+        ir_struct_type_symbol = IRStructTypeSymbol(
+            self.name, self.field_names, self.field_types
+        )
+        symbol_table_stack.current().add(self.name, ir_struct_type_symbol)
+        ctx = module.context
+        struct_type = ctx.get_identified_type(self.name)
+        struct_type.set_body(*[field_type.get_ir_type() for field_type in self.field_types])
+        return struct_type
+
+
+class ReturnStatementNode(StatementNode):
+    def __init__(self, expression: ExpressionNode):
+        self.value = expression  # 返回表达式
+
+    def to_dict(self):
+        return {"ClassName": self.__class__.__name__, "value": self.value.to_dict()}
+
+    def codegen(self, builder: ir.IRBuilder):
+        value = self.value.get_ir_value(builder)
+        builder.ret(value)
+
+
+class VariableDeclarationNode(StatementNode):
+    def __init__(
+        self, var_type_pair: VarTypePairNode, equal_or_move: str, value: ExpressionNode
+    ):
+        self.variable = var_type_pair  # 变量名和类型
+        self.equal_or_move = equal_or_move
+        self.value = value  # 可选的初始值
+        if self.value is None:
+            raise NotImplementedError("Variable declaration without initial value")
+
+    def to_dict(self):
+        return {
+            "ClassName": self.__class__.__name__,
+            "variable": try_to_dict(self.variable),
+            "equal_or_move": self.equal_or_move,
+            "value": try_to_dict(self.value),
+        }
+
+    def codegen(self, bm: ir.IRBuilder | ir.Module):
+        global symbol_table_stack
+        if isinstance(bm, ir.Module):
+            assert symbol_table_stack.current().is_global
+            # 全局变量
+            ir_var = ir.GlobalVariable(
+                module,
+                self.variable.var_type.get_ir_type(),
+                name=self.variable.name,
+            )
+            ir_var.initializer = self.value.get_ir_value()
+        else:
+            # 局部变量
+            assert not symbol_table_stack.current().is_global
+            ir_var = bm.alloca(
+                self.variable.var_type.get_ir_type(bm.module), name=self.variable.name
+            )
+            self.variable.var_type.store(bm, ir_var, self.value)
+
+        ir_var_symbol = IRVariableSymbol(
+            self.variable.name,
+            self.variable.var_type,
+            ir_var,
+            is_alloca=True,
+            is_global=False,
+        )
+
+        symbol_table_stack.current().add(self.variable.name, ir_var_symbol)
+
+
+class VarEqualNode(StatementNode):
+    def __init__(self, variable: PHVariable, value: ExpressionNode):
+        self.variable = variable  # 变量名
+        self.value = value  # 赋值表达式
+
+    def to_dict(self):
+        return {
+            "ClassName": "VarEqual",
+            "variable": try_to_dict(self.variable),
+            "value": try_to_dict(self.value),
+        }
+
+
+class PtrDerefEqualNode(StatementNode):
+    def __init__(self, variable: PHVariable, value: ExpressionNode):
+        self.variable = variable  # 变量名
+        self.value = value  # 赋值表达式
+
+    def to_dict(self):
+        return {
+            "ClassName": "PtrDerefEqual",
+            "variable": try_to_dict(self.variable),
+            "value": try_to_dict(self.value),
+        }
+
+
 ## expression
-
-
-# class PHVariable(ExpressionNode):
-#     def __init__(self, name: str):
-#         self.name = name  # 变量名称
-
-#     def to_dict(self):
-#         return {"ClassName": "Variable", "name": self.name}
-
-#     @override
-#     def get_ir_value(self, builder: ir.IRBuilder):
-#         global symbol_table_stack
-#         ir_local_var = symbol_table_stack.get(self.name)
-#         return ir_local_var.ir_value
-
-#     @override
-#     def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
-#         global symbol_table_stack
-#         ir_local_var = symbol_table_stack.get(self.name)
-#         return ir_local_var.var_type
-
-#     def is_alloca(self):
-#         global symbol_table_stack
-#         ir_local_var = symbol_table_stack.get(self.name)
-#         return ir_local_var.is_alloca
 
 
 class BinaryExpressionNode(ExpressionNode):
@@ -233,7 +328,7 @@ def get_hash_name(s: str) -> str:
 
 class StringNode(ExpressionNode):
     def __init__(self, value: str):
-        self.value_type = StrTypeNode()
+        self.value_type = PointerTypeNode(StrTypeNode())
         self.value = proccess_str_literal(value)  # 字符串值
 
     def to_dict(self):
@@ -299,7 +394,7 @@ class NamedVarPointerNode(ExpressionNode):
         }
 
 
-class PtrDerefNode(ASTNode):
+class PtrDerefNode(ExpressionNode):
     def __init__(self, variable: PHVariable):
         self.variable = variable  # 变量名
 
@@ -310,7 +405,7 @@ class PtrDerefNode(ASTNode):
         }
 
 
-class ArrayNode(ASTNode):
+class ArrayNode(ExpressionNode):
     def __init__(self, elements: List[ASTNode]):
         self.elements = elements  # 数组元素列表
 
@@ -321,7 +416,7 @@ class ArrayNode(ASTNode):
         }
 
 
-class ArrayItemNode(ASTNode):
+class ArrayItemNode(ExpressionNode):
     def __init__(self, array: PHVariable, index: ExpressionNode):
         self.array = array  # 数组名
         self.index = index  # 索引
@@ -334,7 +429,7 @@ class ArrayItemNode(ASTNode):
         }
 
 
-class StructLiteralNode(ASTNode):
+class StructLiteralNode(ExpressionNode):
     def __init__(self, struct_type: TypeNode, body: List[ASTNode]):
         self.struct_type = struct_type  # 结构体类型
         self.body = body  # 结构体成员列表
@@ -347,7 +442,7 @@ class StructLiteralNode(ASTNode):
         }
 
 
-class ObjectFieldNode(ASTNode):
+class ObjectFieldNode(ExpressionNode):
     def __init__(self, variable: PHVariable, field: str):
         self.object = variable  # 对象
         self.field = field  # 字段名
@@ -357,58 +452,6 @@ class ObjectFieldNode(ASTNode):
             "ClassName": "ObjectField",
             "object": try_to_dict(self.object),
             "field": self.field,
-        }
-
-
-## statements
-
-
-class ReturnStatementNode(StatementNode):
-    def __init__(self, expression):
-        self.value = expression  # 返回表达式
-
-    def to_dict(self):
-        return {"ClassName": "ReturnStatement", "value": self.value.to_dict()}
-
-
-class VariableDeclarationNode(StatementNode):
-    def __init__(self, var_type_pair: VarTypePairNode, equal_or_move: str, value):
-        self.variable = var_type_pair  # 变量名和类型
-        self.equal_or_move = equal_or_move
-        self.value = value  # 可选的初始值
-
-    def to_dict(self):
-        return {
-            "ClassName": "VariableDeclaration",
-            "variable": try_to_dict(self.variable),
-            "equal_or_move": self.equal_or_move,
-            "value": try_to_dict(self.value),
-        }
-
-
-class VarEqualNode(StatementNode):
-    def __init__(self, variable: PHVariable, value: ExpressionNode):
-        self.variable = variable  # 变量名
-        self.value = value  # 赋值表达式
-
-    def to_dict(self):
-        return {
-            "ClassName": "VarEqual",
-            "variable": try_to_dict(self.variable),
-            "value": try_to_dict(self.value),
-        }
-
-
-class PtrDerefEqualNode(StatementNode):
-    def __init__(self, variable: PHVariable, value: ExpressionNode):
-        self.variable = variable  # 变量名
-        self.value = value  # 赋值表达式
-
-    def to_dict(self):
-        return {
-            "ClassName": "PtrDerefEqual",
-            "variable": try_to_dict(self.variable),
-            "value": try_to_dict(self.value),
         }
 
 

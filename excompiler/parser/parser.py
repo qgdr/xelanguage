@@ -101,7 +101,7 @@ def p_identified_type(p):
     """
     type : IDENTIFIER
     """
-    p[0] = PHType(p[1])
+    p[0] = PHIdentifiedType(p[1])
 
 
 def p_pointer_type(p):
@@ -384,7 +384,7 @@ def p_struct_type_def(p):
     """
     type_definition : STRUCT IDENTIFIER LBRACE var_type_pairs RBRACE
     """
-    p[0] = StructTypeNode(p[2], p[4])
+    p[0] = StructTypeDefNode(p[2], p[4])
 
 
 #

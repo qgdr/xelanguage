@@ -1,5 +1,5 @@
 from llvmlite import ir
-from typing import List  # 导入List类型注解
+from typing import override, List
 from abc import abstractmethod
 
 
@@ -16,7 +16,19 @@ class ASTNode:
 
 
 class TypeNode(ASTNode):
-    def get_ir_type(self) -> ir.Type:
+    @abstractmethod
+    def get_ir_type(self, *args) -> ir.Type:
+        raise NotImplementedError(
+            f"Subclasses {self.__class__.__name__} should implement this method"
+        )
+
+    @abstractmethod
+    def store(
+        self,
+        builder: ir.IRBuilder,
+        ir_var_ptr: ir.Value | ir.AllocaInstr,
+        value: "ExpressionNode",
+    ):
         raise NotImplementedError(
             f"Subclasses {self.__class__.__name__} should implement this method"
         )
@@ -25,18 +37,17 @@ class TypeNode(ASTNode):
 class ExpressionNode(ASTNode):
     value_type: TypeNode
 
-    @abstractmethod
-    def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
+    def get_value_type(self) -> TypeNode:
         return self.value_type
 
+    def get_ir_type(self) -> ir.Type:
+        return self.get_value_type().get_ir_type()
+
     @abstractmethod
-    def get_ir_value(self) -> ir.Value:
+    def get_ir_value(self, builder: ir.IRBuilder) -> ir.Value:
         raise NotImplementedError(
             f"Subclasses {self.__class__.__name__} should implement this method"
         )
-
-    def get_ir_type(self, builder: ir.IRBuilder) -> ir.Type:
-        return self.get_value_type(builder).get_ir_type()
 
 
 class StatementNode(ASTNode):
@@ -63,6 +74,7 @@ class AtomicTypeNode(TypeNode):
     pass
 
 
+## built-in types
 class IntTypeNode(AtomicTypeNode):
     def __init__(self, bits: int):
         self.bits = bits
@@ -95,7 +107,9 @@ class StrTypeNode(AtomicTypeNode):
         return {"ClassName": self.__class__.__name__, "type": "str"}
 
     def get_ir_type(self):
-        return ir.IntType(8).as_pointer()
+        raise NotImplementedError(
+            f"Subclasses {self.__class__.__name__} should implement this method"
+        )
 
 
 ### 指针类型节点
@@ -110,7 +124,15 @@ class PointerTypeNode(TypeNode):
         if isinstance(self.base, StrTypeNode):
             return ir.PointerType(ir.IntType(8))
         else:
-            return self.base.codegen().as_pointer()
+            return self.base.get_ir_type().as_pointer()
+
+    def store(
+        self,
+        builder: ir.IRBuilder,
+        ir_var_ptr: ir.Value | ir.AllocaInstr,
+        value: ExpressionNode,
+    ):
+        builder.store(value.get_ir_value(builder), ir_var_ptr)
 
 
 class ArrayTypeNode(TypeNode):
@@ -125,69 +147,27 @@ class ArrayTypeNode(TypeNode):
             "size": try_to_dict(self.size),
         }
 
-    def codegen(self):
+    def get_ir_type(self):
         array_type = ir.ArrayType(self.base.codegen(), int(self.size.value))
         return array_type
 
-
-class VarTypePairNode(ASTNode):
-    def __init__(self, name: str, var_type: TypeNode):
-        self.name = name  # 参数名
-        self.var_type = var_type  # 参数类型
-
-    def to_dict(self):
-        return {
-            "ClassName": self.__class__.__name__,
-            "name": self.name,
-            "var_type": try_to_dict(self.var_type),
-        }
-
-
-class IdentifiedTypeNode(TypeNode):
-    def __init__(self, name: str):
-        self.name = name
-
-    def get_ir_type(self, module: ir.Module):
-        identified_types = module.get_identified_types()
-        if self.name in identified_types:
-            return identified_types[self.name]
-        else:
-            raise ValueError(f"Type {self.name} not found")
-
-
-class StructTypeNode(IdentifiedTypeNode):
-    def __init__(self, name: str, var_type_pairs: List[VarTypePairNode]):
-        self.name = name
-        self.var_type_pairs = var_type_pairs  # 结构体成员列表
-        field_names: List[str] = []
-        field_types: List[TypeNode] = []
-        for pair in var_type_pairs:
-            if pair.name in field_names:
-                raise ValueError(f"Duplicate field name: {pair.name}")
-            field_names.append(pair.name)
-            field_types.append(pair.var_type)
-        self.field_names = field_names
-        self.field_types = field_types
-
-    def to_dict(self):
-        return {
-            "ClassName": self.__class__.__name__,
-            "name": self.name,
-            "var_type_pairs": [try_to_dict(pair) for pair in self.var_type_pairs],
-        }
-
-    def field_idx(self, field_name: str) -> int:
-        return self.field_names.index(field_name)
-
-    def register_to_module(self, module: ir.Module):
-        ctx = module.context
-        struct_type = ctx.get_identified_type(self.name)
-        struct_type.set_body(*[field_type.codegen() for field_type in self.field_types])
-        return struct_type
-
-
-class EnumTypeNode(IdentifiedTypeNode):
-    pass
+    def store(
+        self,
+        builder: ir.IRBuilder,
+        ir_var_ptr: ir.Value | ir.AllocaInstr,
+        value: ExpressionNode,
+    ):
+        assert (value.__class__.__name__ == 'ArrayNode'), "Value must be an array"
+        assert int(self.size.value) >= len(value.elements), "Array size too small"
+        for i, element in enumerate(value.elements):
+            builder.store(
+                element.codegen(),
+                builder.gep(
+                    ir_var_ptr,
+                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+                    inbounds=True,
+                ),
+            )
 
 
 class NoneTypeNode(TypeNode):
