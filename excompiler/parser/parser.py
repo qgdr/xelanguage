@@ -316,9 +316,9 @@ def p_struct_literal_expression(p):
 
 def p_object_field_expression(p):
     """
-    expression : primary DOT IDENTIFIER
+    expression : expression DOT IDENTIFIER
     """
-    p[0] = ObjectFieldNode(p[1], PHVariable(p[3]))
+    p[0] = ObjectFieldNode(p[1], p[3])
 
 
 ## statement

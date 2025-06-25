@@ -40,7 +40,7 @@ class IRVariableSymbol(IRSymbol, ExpressionNode):
     @override
     def get_ir_value(self, builder: ir.IRBuilder) -> ir.Value:
         if self.is_alloca:
-            return builder.load(self.get_ir_ptr())
+            return builder.load(self.get_ir_ptr(builder))
         else:
             return self.ir_value
 
@@ -109,6 +109,9 @@ class IRStructTypeSymbol(IRIdentifiedTypeSymbol):
     def field_idx(self, field_name: str) -> int:
         return self.field_names.index(field_name)
 
+    def get_field_type(self, field_name: str) -> TypeNode:
+        return self.field_types[self.field_idx(field_name)]
+
     def add_method(self, function: IRFunctionSymbol):
         raise NotImplementedError("not implemented")
 
@@ -119,8 +122,14 @@ class IRStructTypeSymbol(IRIdentifiedTypeSymbol):
         ir_var_ptr: ir.Value | ir.AllocaInstr,
         value: "ExpressionNode",
     ):
-        assert (value.__class__.__name__ == 'StructLiteralNode'), "Value must be a struct literal"
-        pass
+        assert value.__class__.__name__ == "StructLiteralNode", (
+            "Value must be a struct literal"
+        )
+        # raise NotImplementedError("not implemented")
+        struct_type = value.get_value_type()
+        assert isinstance(struct_type, IRStructTypeSymbol)
+        struct_ir_value = value.get_ir_value(builder)
+        builder.store(struct_ir_value, ir_var_ptr)
 
 
 class EnumTypeNode(IRIdentifiedTypeSymbol):
@@ -246,6 +255,15 @@ class PHFunction(PlaceHolder):
         ir_function_symbol = symbol_table_stack.get(self.name)
         assert isinstance(ir_function_symbol, IRFunctionSymbol)
         return ir_function_symbol
+
+    def get_ir_function(self, builder: ir.IRBuilder) -> ir.Function:
+        return self.get_symbol().get_ir_function(builder)
+
+    def get_return_type(self) -> TypeNode:
+        return self.get_symbol().return_type
+
+    def get_ir_return_type(self) -> ir.Type:
+        return self.get_return_type().get_ir_type()
 
 
 class PHIdentifiedType(PlaceHolder, IRIdentifiedTypeSymbol):

@@ -66,12 +66,19 @@ class IntegerNode(ExpressionNode):
     def to_dict(self):
         return {"ClassName": self.__class__.__name__, "value": self.value}
 
-    def get_ir_value(self):
+    def get_ir_value(self, *args):
         return ir.Constant(ir.IntType(32), int(self.value))
 
 
 class AtomicTypeNode(TypeNode):
-    pass
+    @override
+    def store(
+        self,
+        builder: ir.IRBuilder,
+        ir_var_ptr: ir.Value | ir.AllocaInstr,
+        value: "ExpressionNode",
+    ):
+        builder.store(value.get_ir_value(builder), ir_var_ptr)
 
 
 ## built-in types
@@ -136,7 +143,7 @@ class PointerTypeNode(TypeNode):
 
 
 class ArrayTypeNode(TypeNode):
-    def __init__(self, base: ASTNode, size: IntegerNode):
+    def __init__(self, base: TypeNode, size: IntegerNode):
         self.base = base  # 基础类型
         self.size = size  # 数组大小
 
@@ -148,7 +155,7 @@ class ArrayTypeNode(TypeNode):
         }
 
     def get_ir_type(self):
-        array_type = ir.ArrayType(self.base.codegen(), int(self.size.value))
+        array_type = ir.ArrayType(self.base.get_ir_type(), int(self.size.value))
         return array_type
 
     def store(
@@ -157,11 +164,11 @@ class ArrayTypeNode(TypeNode):
         ir_var_ptr: ir.Value | ir.AllocaInstr,
         value: ExpressionNode,
     ):
-        assert (value.__class__.__name__ == 'ArrayNode'), "Value must be an array"
+        assert value.__class__.__name__ == "ArrayNode", "Value must be an array"
         assert int(self.size.value) >= len(value.elements), "Array size too small"
         for i, element in enumerate(value.elements):
             builder.store(
-                element.codegen(),
+                element.get_ir_value(builder),
                 builder.gep(
                     ir_var_ptr,
                     [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],

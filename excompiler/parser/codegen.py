@@ -76,8 +76,6 @@ class LLVMCodeGen:
 # }
 
 
-
-
 # def VariableDeclaration_codegen(self: VariableDeclarationNode):
 #     global builder, symbol_table_stack
 #     if self.value is None:
@@ -131,65 +129,65 @@ class LLVMCodeGen:
 # setattr(VariableDeclarationNode, "codegen", VariableDeclaration_codegen)
 
 
-def VarEqual_codegen(self: VarEqualNode):
-    global builder, symbol_table_stack
-    variable = symbol_table_stack.get(self.variable.name)
-    builder.store(self.value.codegen(), variable)
+# def VarEqual_codegen(self: VarEqualNode):
+#     global builder, symbol_table_stack
+#     variable = symbol_table_stack.get(self.variable.name)
+#     builder.store(self.value.codegen(), variable)
 
 
-setattr(VarEqualNode, "codegen", VarEqual_codegen)
+# setattr(VarEqualNode, "codegen", VarEqual_codegen)
 
 
-def CallExpression_codegen(self: CallExpressionNode):
-    global builder
-    # 处理函数调用表达式
-    function = builder.module.get_global(self.function_name)
-    if not isinstance(function, ir.Function):
-        raise ValueError(f"Function '{self.function_name}' not found in module.")
-    args = [arg.codegen() for arg in self.args]
-    call = builder.call(function, args)
-    return call
+# def CallExpression_codegen(self: CallExpressionNode):
+#     global builder
+#     # 处理函数调用表达式
+#     function = builder.module.get_global(self.function_name)
+#     if not isinstance(function, ir.Function):
+#         raise ValueError(f"Function '{self.function_name}' not found in module.")
+#     args = [arg.codegen() for arg in self.args]
+#     call = builder.call(function, args)
+#     return call
 
 
-setattr(CallExpressionNode, "codegen", CallExpression_codegen)
+# setattr(CallExpressionNode, "codegen", CallExpression_codegen)
 
 
 # stage02
 
 
-def NamedVarPointer_codegen(self: NamedVarPointerNode):
-    global builder, symbol_table_stack
-    # 处理指向变量的指针
-    var_ptr = symbol_table_stack.get(self.name)
-    if not var_ptr.alloca:
-        raise ValueError(f"Variable '{self.name}' is not allocated.")
-    # print(var_ptr.type.pointee)
-    return var_ptr
+# def NamedVarPointer_codegen(self: NamedVarPointerNode):
+#     global builder, symbol_table_stack
+#     # 处理指向变量的指针
+#     var_ptr = symbol_table_stack.get(self.name)
+#     if not var_ptr.alloca:
+#         raise ValueError(f"Variable '{self.name}' is not allocated.")
+#     # print(var_ptr.type.pointee)
+#     return var_ptr
 
 
-setattr(NamedVarPointerNode, "codegen", NamedVarPointer_codegen)
+# setattr(NamedVarPointerNode, "codegen", NamedVarPointer_codegen)
 
 
-def PtrDerefEqual_codegen(self: PtrDerefEqualNode):
-    global builder, symbol_table_stack
-    # 处理指针解引用赋值
-    var_ptr = self.variable.codegen()
-    value = self.value.codegen()
-    builder.store(value, var_ptr)
+# def PtrDerefEqual_codegen(self: PtrDerefEqualNode):
+#     global builder, symbol_table_stack
+#     # 处理指针解引用赋值
+#     var_ptr = self.variable.codegen()
+#     value = self.value.codegen()
+#     builder.store(value, var_ptr)
 
 
-setattr(PtrDerefEqualNode, "codegen", PtrDerefEqual_codegen)
+# setattr(PtrDerefEqualNode, "codegen", PtrDerefEqual_codegen)
 
 
-def PtrDeref_codegen(self: PtrDerefNode):
-    global builder, symbol_table_stack
-    # 处理指针解引用
-    var_ptr = self.variable.codegen()
-    # print(var_ptr.type)
-    return builder.load(var_ptr)
+# def PtrDeref_codegen(self: PtrDerefNode):
+#     global builder, symbol_table_stack
+#     # 处理指针解引用
+#     var_ptr = self.variable.codegen()
+#     # print(var_ptr.type)
+#     return builder.load(var_ptr)
 
 
-setattr(PtrDerefNode, "codegen", PtrDeref_codegen)
+# setattr(PtrDerefNode, "codegen", PtrDeref_codegen)
 
 
 # stage04
@@ -225,16 +223,16 @@ setattr(PtrDerefNode, "codegen", PtrDeref_codegen)
 #     return f"str_{hash_val[:8]}"  # 取前8位作为短名称[6](@ref)
 
 
-def ArrayItem_codegen(self: ArrayItemNode):
-    global builder, symbol_table_stack
-    # 处理数组项
-    array_ptr = self.array.codegen()
-    index = self.index.codegen()
-    # print(array_ptr, index)
-    return builder.load(builder.gep(array_ptr, [ir.Constant(ir.IntType(32), 0), index]))
+# def ArrayItem_codegen(self: ArrayItemNode):
+#     global builder, symbol_table_stack
+#     # 处理数组项
+#     array_ptr = self.array.codegen()
+#     index = self.index.codegen()
+#     # print(array_ptr, index)
+#     return builder.load(builder.gep(array_ptr, [ir.Constant(ir.IntType(32), 0), index]))
 
 
-setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
+# setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
 
 
 ## struct
@@ -259,17 +257,17 @@ setattr(ArrayItemNode, "codegen", ArrayItem_codegen)
 # setattr(StructTypeDefNode, "codegen", StructTypeDef_codegen)
 
 
-def StructLiteral_codegen(self: StructLiteralNode):
-    global builder, symbol_table_stack
-    symbol_table_stack.push()
-    for stat in self.body:
-        if not isinstance(stat, VarEqualNode):
-            raise NotImplementedError(f"Unsupported statement: {type(stat)}")
-        symbol_table_stack.add(stat.variable.name, stat.value.codegen())
-    return symbol_table_stack.pop()
+# def StructLiteral_codegen(self: StructLiteralNode):
+#     global builder, symbol_table_stack
+#     symbol_table_stack.push()
+#     for stat in self.body:
+#         if not isinstance(stat, VarEqualNode):
+#             raise NotImplementedError(f"Unsupported statement: {type(stat)}")
+#         symbol_table_stack.add(stat.variable.name, stat.value.codegen())
+#     return symbol_table_stack.pop()
 
 
-setattr(StructLiteralNode, "codegen", StructLiteral_codegen)
+# setattr(StructLiteralNode, "codegen", StructLiteral_codegen)
 
 # def PtrDerefMove_codegen(self):
 #     if isinstance(self.value, IntegerNode):

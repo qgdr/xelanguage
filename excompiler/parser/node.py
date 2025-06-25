@@ -1,4 +1,6 @@
 # import json
+from dataclasses import field
+from tkinter import Variable
 from typing import List, override
 from llvmlite import ir
 from .symtable import *
@@ -86,7 +88,9 @@ class FunctionDefNode(StatementNode):
         assert symbol_table_stack.current().is_global, ValueError(
             "Function definition should be in global scope"
         )
-        ir_function_symbol = IRFunctionSymbol(self.name, self.return_type, self.arg_names, self.arg_types)
+        ir_function_symbol = IRFunctionSymbol(
+            self.name, self.return_type, self.arg_names, self.arg_types
+        )
         symbol_table_stack.current().add(self.name, ir_function_symbol)
         # 创建函数类型
         func_type = ir_function_symbol.get_ir_type()
@@ -147,7 +151,9 @@ class StructTypeDefNode(StatementNode):
         symbol_table_stack.current().add(self.name, ir_struct_type_symbol)
         ctx = module.context
         struct_type = ctx.get_identified_type(self.name)
-        struct_type.set_body(*[field_type.get_ir_type() for field_type in self.field_types])
+        struct_type.set_body(
+            *[field_type.get_ir_type() for field_type in self.field_types]
+        )
         return struct_type
 
 
@@ -183,26 +189,32 @@ class VariableDeclarationNode(StatementNode):
 
     def codegen(self, bm: ir.IRBuilder | ir.Module):
         global symbol_table_stack
+        var_type = self.variable.var_type
+        if isinstance(var_type, PHIdentifiedType):
+            var_type = var_type.get_symbol()
+            ir_type = var_type.get_ir_type(bm.module)
+        else:
+            ir_type = var_type.get_ir_type()
+
         if isinstance(bm, ir.Module):
             assert symbol_table_stack.current().is_global
             # 全局变量
             ir_var = ir.GlobalVariable(
                 module,
-                self.variable.var_type.get_ir_type(),
+                ir_type,
                 name=self.variable.name,
             )
             ir_var.initializer = self.value.get_ir_value()
         else:
             # 局部变量
             assert not symbol_table_stack.current().is_global
-            ir_var = bm.alloca(
-                self.variable.var_type.get_ir_type(bm.module), name=self.variable.name
-            )
-            self.variable.var_type.store(bm, ir_var, self.value)
+
+            ir_var = bm.alloca(ir_type, name=self.variable.name)
+            var_type.store(bm, ir_var, self.value)
 
         ir_var_symbol = IRVariableSymbol(
             self.variable.name,
-            self.variable.var_type,
+            var_type,
             ir_var,
             is_alloca=True,
             is_global=False,
@@ -222,6 +234,12 @@ class VarEqualNode(StatementNode):
             "variable": try_to_dict(self.variable),
             "value": try_to_dict(self.value),
         }
+
+    def codegen(self, bm: ir.IRBuilder | ir.Module):
+        global symbol_table_stack
+        assert isinstance(bm, ir.IRBuilder), ValueError("bm must be ir.IRBuilder")
+        var_sym = symbol_table_stack.get(self.variable.name)
+        bm.store(self.value.get_ir_value(bm), var_sym.get_ir_ptr(bm))
 
 
 class PtrDerefEqualNode(StatementNode):
@@ -255,11 +273,11 @@ class BinaryExpressionNode(ExpressionNode):
         }
 
     def get_ir_value(self, builder: ir.IRBuilder):
-        assert self.left.get_value_type() == self.right.get_value_type(), ValueError(
-            "Type mismatch in binary expression"
-        )
-        left = self.left.get_ir_value()
-        right = self.right.get_ir_value()
+        # assert self.left.get_value_type() == self.right.get_value_type(), ValueError(
+        #     "Type mismatch in binary expression", self.left.get_value_type(), self.right.get_value_type()
+        # )
+        left = self.left.get_ir_value(builder)
+        right = self.right.get_ir_value(builder)
 
         if self.operator == "+":
             return builder.add(left, right)
@@ -274,9 +292,9 @@ class BinaryExpressionNode(ExpressionNode):
 
     @override
     def get_value_type(self) -> TypeNode:
-        assert self.left.get_value_type() == self.right.get_value_type(), ValueError(
-            "Type mismatch in binary expression"
-        )
+        # assert self.left.get_value_type() == self.right.get_value_type(), ValueError(
+        #     "Type mismatch in binary expression", self.left.get_value_type(), self.right.get_value_type()
+        # # )
         return self.left.get_value_type()
 
 
@@ -293,7 +311,7 @@ class UnaryExpressionNode(ExpressionNode):
         }
 
     def get_ir_value(self, builder: ir.IRBuilder):
-        value = self.value.get_ir_value()
+        value = self.value.get_ir_value(builder)
         if self.operator == "-":
             return builder.neg(value)
         elif self.operator == "+":
@@ -364,20 +382,16 @@ class CallExpressionNode(ExpressionNode):
             "args": [try_to_dict(arg) for arg in self.args],
         }
 
+    def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
+        return self.function.get_return_type()
+
     def get_ir_value(self, builder: ir.IRBuilder):
-        function = builder.module.get_global(self.function_name)
+        function = self.function.get_ir_function(builder)
         if not isinstance(function, ir.Function):
             raise ValueError(f"Function '{self.function_name}' not found in module.")
-        args = [arg.codegen() for arg in self.args]
+        args = [arg.get_ir_value(builder) for arg in self.args]
         call = builder.call(function, args)
         return call
-
-    def get_value_type(self, builder: ir.IRBuilder) -> TypeNode:
-        global symbol_table_stack
-        func_node = symbol_table_stack.get(self.function_name)
-        if not isinstance(func_node, FunctionNode):
-            raise ValueError(f"Function '{self.function_name}' not found in module.")
-        return func_node.return_type
 
 
 ### var@
@@ -393,6 +407,15 @@ class NamedVarPointerNode(ExpressionNode):
             ),
         }
 
+    def get_value_type(self) -> TypeNode:
+        return PointerTypeNode(self.variable.get_value_type())
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        assert self.variable.get_symbol().is_alloca, (
+            "NamedVarPointerNode must be alloca"
+        )
+        return self.variable.get_ir_ptr()
+
 
 class PtrDerefNode(ExpressionNode):
     def __init__(self, variable: PHVariable):
@@ -403,6 +426,17 @@ class PtrDerefNode(ExpressionNode):
             "ClassName": self.__class__.__name__,
             "variable": try_to_dict(self.variable),
         }
+
+    def get_value_type(self) -> TypeNode:
+        ptr_type = self.variable.get_value_type()
+        assert isinstance(ptr_type, PointerTypeNode)
+        return ptr_type.base
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        assert self.variable.get_symbol().is_alloca, (
+            "NamedVarPointerNode must be alloca"
+        )
+        return builder.load(self.variable.get_ir_ptr())
 
 
 class ArrayNode(ExpressionNode):
@@ -428,9 +462,19 @@ class ArrayItemNode(ExpressionNode):
             "index": try_to_dict(self.index),
         }
 
+    def get_value_type(self) -> TypeNode:
+        array_type = self.array.get_value_type()
+        assert isinstance(array_type, ArrayTypeNode | StrTypeNode)
+        return array_type.base
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        array = self.array.get_ir_ptr(builder)
+        index = self.index.get_ir_value(builder)
+        return builder.load(builder.gep(array, [ir.Constant(ir.IntType(32), 0), index]))
+
 
 class StructLiteralNode(ExpressionNode):
-    def __init__(self, struct_type: TypeNode, body: List[ASTNode]):
+    def __init__(self, struct_type: PHStructType, body: List[VarEqualNode]):
         self.struct_type = struct_type  # 结构体类型
         self.body = body  # 结构体成员列表
 
@@ -441,9 +485,26 @@ class StructLiteralNode(ExpressionNode):
             "body": [try_to_dict(stat) for stat in self.body],
         }
 
+    def get_value_type(self) -> TypeNode:
+        return self.struct_type.get_symbol()
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        struct_type = self.struct_type.get_symbol()
+        assert isinstance(struct_type, IRStructTypeSymbol)
+        struct_ir_type = struct_type.get_ir_type(builder.module)
+        undef = ir.Constant(struct_ir_type, ir.Undefined)
+        for stat in self.body:
+            assert isinstance(stat, VarEqualNode), "StructLiteralNode body must be VarEqualNode"
+            field_name = stat.variable.name
+            field_value = stat.value.get_ir_value(builder)
+            idx = struct_type.field_idx(field_name)
+            undef = builder.insert_value(undef, field_value, idx)
+
+        return undef
+
 
 class ObjectFieldNode(ExpressionNode):
-    def __init__(self, variable: PHVariable, field: str):
+    def __init__(self, variable: ExpressionNode, field: str):
         self.object = variable  # 对象
         self.field = field  # 字段名
 
@@ -453,6 +514,25 @@ class ObjectFieldNode(ExpressionNode):
             "object": try_to_dict(self.object),
             "field": self.field,
         }
+
+    def get_value_type(self) -> TypeNode:
+        object_type = self.object.get_value_type()
+        assert isinstance(object_type, IRStructTypeSymbol)
+        return object_type.get_field_type(self.field)
+
+    def get_ir_value(self, builder: ir.IRBuilder):
+        object_type = self.object.get_value_type()
+        assert isinstance(object_type, IRStructTypeSymbol)
+        idx = object_type.field_idx(self.field)
+        object_value = self.object.get_ir_value(builder)
+        # field = builder.load(
+        #     builder.gep(
+        #         object_ptr,
+        #         [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), idx)],
+        #     )
+        # )
+        field = builder.extract_value(object_value, idx)
+        return field
 
 
 # stage04
