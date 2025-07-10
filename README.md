@@ -28,5 +28,5 @@ Xelanguage 是一个类似 Rust 的面向对象编的译型语言。
 
 ## 当前阶段
 
-stage04
+tests/stage04
 
