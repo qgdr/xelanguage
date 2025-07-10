@@ -1,0 +1,14 @@
+fn fun1(x : i32) -> i32{
+    return 2*x;
+}
+
+fn fun2(x: i32, y: i32)->i32{
+    return x + y;
+}
+
+fn main(){
+    let a = 3;
+    let b = 4;
+    let c = a |> fun1 |> x -> fun2(x, b);
+    println("{}", c); // c = 10
+}
