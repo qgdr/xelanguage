@@ -1,6 +1,6 @@
 fn main()
 {
-    let s <- String::from("hello world");
+    let s <- String.from("hello world");
 
     let hello : Slice[String]  <- s[0..5];
     let world <- s[6..11];
