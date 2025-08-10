@@ -6,8 +6,8 @@ struct Person{
 fn main()
 {
    let per1 : Person = Person{
-        .age = 20;
-        .name = "Tom";
+        age = 20;
+        name = "Tom";
     };
     return per1.age; 
 }
