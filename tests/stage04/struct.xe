@@ -1,6 +1,6 @@
 struct Person{
     age : i32,
-    name : str@
+    name : str
 }
 
 fn main()

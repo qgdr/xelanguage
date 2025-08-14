@@ -1,13 +1,13 @@
 fn main()
 {
-    let s <- String.from("hello world");
+    let s <| String.from("hello world");
 
-    let hello : Slice[String]  <- s[0..5];
-    let world <- s[6..11];
+    let hello : Slice[String]  <| s[0..5];
+    let world <| s[6..11];
 
     let a = [1, 2, 3, 4, 5];
     let b = [1, 1, 1, 1, 1];
     a[3..] = b[3..];   //  a = [1, 2, 3, 1, 1]
 }
 
-// Currently firbid twive `<-` for `Slice`
+// Currently firbid twive `<|` for `Slice`
