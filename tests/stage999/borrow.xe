@@ -1,0 +1,16 @@
+fn increment(value: i32@[mut]) {
+    value# = value# + 1;
+}
+
+fn main() {
+    var value: i32 = 41;
+
+    let read: i32@ = value@;
+    println("value = {}, address = {:p}", read, read);
+    // read 的最后一次使用已经结束，共享借用在这里结束。
+
+    let write: i32@[mut] << value@[mut];
+    increment(write);
+
+    println("{}", value); // 42
+}

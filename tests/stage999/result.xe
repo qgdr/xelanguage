@@ -1,0 +1,29 @@
+fn opened(file: File) {
+    println("file size: {}", file.size());
+}
+
+fn failed(error: io::Error) {
+    eprintln("open failed: {}", error@);
+}
+
+fn print_file_size(path: str) {
+    // 无修饰 ? 必须显式处理正常和错误通道。
+    File::open(path)?
+        1> opened
+        2> failed;
+}
+
+fn read_file(path: str) -> String?[io::Error] {
+    // [return] 表示错误从当前函数提前返回。
+    let file: File << File::open(path)?[return];
+    file.read_to_string()
+}
+
+fn file_size_or_zero(path: str) -> usize {
+    File::open(path)?
+        1> file -> file.size()
+        2> error -> {
+            eprintln("{}", error@);
+            0
+        }
+}

@@ -1,0 +1,8 @@
+enum Token {
+    Integer[i32],
+}
+
+fn main() {
+    // 编译失败：枚举变体的负载使用 []，() 只表示调用。
+    let token: Token << Token::Integer(42);
+}

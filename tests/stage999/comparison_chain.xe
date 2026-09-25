@@ -1,0 +1,12 @@
+fn main() {
+    let a: i32 = 3;
+    let b: i32 = 3;
+    let c: i32 = 3;
+
+    let all_equal: bool = a == b == c; // true：检查相邻两对。
+    let one_diff: bool = a == b == 4; // false。
+    let in_range: bool = 1 < a <= 3; // true。
+    let adjacent_only: bool = 1 != 2 != 1; // true；没有比较首尾。
+
+    println("{} {} {} {}", all_equal, one_diff, in_range, adjacent_only);
+}

@@ -1,0 +1,6 @@
+fn main() {
+    let text: str = "hello";
+
+    // 编译失败：str 已经是地址和长度视图，安全代码禁止 str@。
+    let pointer: str@ = text@;
+}

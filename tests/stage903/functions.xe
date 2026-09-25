@@ -9,12 +9,13 @@ fn func1()
     println("Another function.");
 }
 
-// a block return the result of the last expression without `;`
-fn func2() -> i32
+// 块末尾不带 `;` 的表达式是块的返回值。
+fn answer() -> i32
 {
-    5
+    42
 }
 
-fn plus_one(x : i32) -> i32{
-    x + 1;
+fn plus_one(value: i32) -> i32
+{
+    value + 1
 }

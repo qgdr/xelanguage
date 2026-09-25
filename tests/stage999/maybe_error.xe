@@ -1,0 +1,21 @@
+fn divide(numerator: i32, denominator: i32) -> i32?[str] {
+    if denominator == 0 {
+        Maybe::No["division by zero"]
+    } else {
+        Maybe::Yes[numerator / denominator]
+    }
+}
+
+fn double_quotient(numerator: i32, denominator: i32) -> i32?[str] {
+    let quotient: i32 = divide(numerator, denominator)?[return];
+    Maybe::Yes[quotient * 2]
+}
+
+fn main() {
+    let value: i32 = double_quotient(10, 2)?
+        1> quotient -> quotient
+        2> error -> {
+            eprintln("{}", error);
+            0
+        };
+    println("{}", value); // 10

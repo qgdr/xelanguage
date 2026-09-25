@@ -1,0 +1,14 @@
+struct Message {
+    text: String,
+    line: usize,
+}
+
+fn main() {
+    let text: String << String::from("hello");
+    let message: Message << Message {
+        .text << text;
+        .line = 1;
+    };
+
+    println("{}:{}", message.line, message.text@);
+}

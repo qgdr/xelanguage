@@ -1,0 +1,8 @@
+fn main() {
+    var value: i32 = 1;
+    let shared: i32@ = value@;
+
+    // 编译失败：shared 仍会被使用，不能同时取得独占可写借用。
+    let writable: i32@[mut] << value@[mut];
+    println("{}", shared);
+}

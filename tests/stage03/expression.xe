@@ -1,8 +1,7 @@
 fn main()
 {
-    let a : i32 = 2;
-    let b : i32 = 3;
-    a = -a - b * -a;
-    return a;
-    // return a;
+    var left: i32 = 2;
+    let right: i32 = 3;
+    left = -left - right * -left;
+    return left;
 }

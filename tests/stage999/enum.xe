@@ -1,0 +1,18 @@
+enum Token {
+    End,
+    Identifier[String],
+    Integer[i64],
+}
+
+fn describe(token: Token@) -> str {
+    match token {
+        Token::End -> "end",
+        Token::Identifier[_] -> "identifier",
+        Token::Integer[_] -> "integer",
+    }
+}
+
+fn main() {
+    let token: Token << Token::Identifier[String::from("name")];
+    println("{}", describe(token@));
+}

@@ -1,0 +1,4 @@
+fn load(path: str) {
+    // 编译失败：无修饰 ? 必须紧跟 1> 和 2>。
+    let file: File << File::open(path)?;
+}

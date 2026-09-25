@@ -1,13 +1,17 @@
 fn main()
 {
-    let s <| String.from("hello world");
+    let text: String << String::from("hello world");
+    let view: str = text.as_str();
 
-    let hello : Slice[String]  <| s[0..5];
-    let world <| s[6..11];
+    // slice_bytes 会检查范围和 UTF-8 边界；这里的字面量范围已知有效。
+    let hello: str = view.slice_bytes(0..5).expect("valid UTF-8 boundary");
+    let world: str = view.slice_bytes(6..11).expect("valid UTF-8 boundary");
 
-    let a = [1, 2, 3, 4, 5];
-    let b = [1, 1, 1, 1, 1];
-    a[3..] = b[3..];   //  a = [1, 2, 3, 1, 1]
+    println("{} {}", hello, world);
+
+    var target = [1, 2, 3, 4, 5];
+    let source = [1, 1, 1, 1, 1];
+    var target_tail: SliceMut[i32] << target.slice_mut(3..);
+    let source_tail: Slice[i32] = source.slice(3..);
+    target_tail.copy_from(source_tail); // target == [1, 2, 3, 1, 1]
 }
-
-// Currently firbid twive `<|` for `Slice`

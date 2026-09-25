@@ -1,0 +1,5 @@
+fn main() {
+    // 编译失败：String 是移动类型，必须使用 `<<`。
+    let text: String = String::from("hello");
+    println("{}", text);
+}

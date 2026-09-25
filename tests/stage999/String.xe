@@ -1,8 +1,10 @@
 fn main()
 {
-    let s <| String.from("hello");
+    var text: String << String::from("hello");
 
-    s.push_str(", world!"); // push_str() 在字符串后追加字面值
+    println("before = {}", text@); // 显式借用，因此 text 仍可修改。
+    text.push_str(", world!");
 
-    println!("{s}"); // 将打印 `hello, world!`
+    let view: str = text.as_str();
+    println("{}", view); // hello, world!
 }

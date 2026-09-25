@@ -1,0 +1,18 @@
+fn first_word(text: str) -> str {
+    for index in 0..text.len() {
+        if text.byte_at(index) == b' ' {
+            return text.slice_bytes(0..index)
+                .expect("space is a UTF-8 boundary");
+        }
+    }
+
+    text
+}
+
+fn main() {
+    let literal: str = "hello world";
+    let word: str = first_word(literal);
+
+    println("{}", word);
+    println("data address = {:p}", word.data());
+}

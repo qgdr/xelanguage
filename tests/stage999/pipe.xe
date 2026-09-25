@@ -1,14 +1,17 @@
-fn fun1(x : i32) -> i32{
-    return 2*x;
+fn twice(value: i32) -> i32 {
+    value * 2
 }
 
-fn fun2(x: i32, y: i32)->i32{
-    return x + y;
+fn add(left: i32, right: i32) -> i32 {
+    left + right
 }
 
-fn main(){
-    let a = 3;
-    let b = 4;
-    let c = a |> fun1 |> x: i32 -> fun2(x, b);
-    println("{}", c); // c = 10
+fn main() {
+    let first = 3;
+    let second = 4;
+    let result = first
+        |> twice
+        |> add(_, second);
+
+    println("{}", result); // 10
 }

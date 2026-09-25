@@ -1,0 +1,9 @@
+fn main() {
+    let text: String << String::from("hello");
+
+    // 普通按值参数会取得 String 的所有权，println 不会隐式借用。
+    println("{}", text);
+
+    // 编译失败：text 已经移动到上一次 println 调用。
+    println("{}", text@);
+}
