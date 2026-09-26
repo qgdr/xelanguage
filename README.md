@@ -47,6 +47,10 @@ fn main() {
 
 ## 工具链
 
+第一阶段的独立 AST 前端已放在 compiler/，不依赖旧编译器。运行 make ast 生成
+target/ast/ 下的 JSON，make ast-test 运行前端测试。详细命令与阶段边界见
+[compiler/README.md](compiler/README.md)；下方 xe 命令仍是后续目标工具接口。
+
 目标工具统一使用 `xe` 命令：
 
 ```sh
