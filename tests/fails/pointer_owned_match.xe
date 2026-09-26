@@ -1,0 +1,7 @@
+enum Token { End, Identifier[String], }
+fn bad(token: Token@) -> str {
+    token ? {
+        Token::End :> _ -> "end",
+        Token::Identifier :> _ -> "identifier",
+    } // 错误：指针匹配必须显式写 ?[@]
+}

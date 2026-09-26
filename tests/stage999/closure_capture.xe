@@ -1,0 +1,11 @@
+// 后续捕获闭包实现阶段；不作为第一版自举必过项。
+fn positive(value: i32) -> i32? { if value > 0 { value } else { None } }
+
+fn main() {
+    let callback << positive(40)?
+        1> base: i32 -> {
+            fn[base](value: i32) -> i32 { base + value }
+        }
+        2> _ -> { return; };
+    println("{}", callback(2)); // 42；拥有捕获闭包调用后已消耗
+}

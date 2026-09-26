@@ -1,0 +1,6 @@
+fn positive(value: i32) -> i32? { value }
+fn main() {
+    let result = positive(1)?
+        1> value: i32 -> value
+        2> 0; // 错误：0 不是处理函数，改为 _ -> 0
+}

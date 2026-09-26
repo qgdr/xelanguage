@@ -5,10 +5,10 @@ enum Token {
 }
 
 fn describe(token: Token@) -> str {
-    match token {
-        Token::End -> "end",
-        Token::Identifier[_] -> "identifier",
-        Token::Integer[_] -> "integer",
+    token ?[@] {
+        Token::End :> _ -> "end",
+        Token::Identifier :> text: String@ -> "identifier",
+        Token::Integer :> number: i64@ -> "integer",
     }
 }
 

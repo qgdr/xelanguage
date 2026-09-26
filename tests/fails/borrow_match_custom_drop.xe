@@ -1,0 +1,14 @@
+enum Token { Identifier[String], End, }
+
+impl Drop for Token {
+    fn drop(self: Self@[mut]) {
+        println("token released");
+    }
+}
+
+fn into_text(token: Token) -> String {
+    token ? {
+        Token::Identifier :> text: String -> text,
+        Token::End :> _ -> String::from(""),
+    } // 错误：Token 自己实现了 Drop，首版禁止抽取其资源负载。
+}

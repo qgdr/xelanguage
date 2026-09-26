@@ -1,0 +1,12 @@
+// 默认模式（不开 --check-borrows）：只使用无修饰指针。
+// 此例不承诺借用安全；资源移动检查仍开启。
+fn increment(value: i32@) {
+    value# = value# + 1;
+}
+
+fn main() {
+    var value: i32 = 41;
+    let pointer: i32@ = value@;
+    increment(pointer);
+    println("{}", value); // 42
+}

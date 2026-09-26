@@ -1,0 +1,7 @@
+fn positive(value: i32) -> i32? { value }
+fn twice(value: i32) -> i32 { value * 2 }
+fn main() {
+    let result = positive(1)?
+        1> twice(_) // 错误：直接写 twice 或 value -> twice(value)
+        2> _ -> 0;
+}

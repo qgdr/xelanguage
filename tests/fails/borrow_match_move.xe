@@ -1,0 +1,7 @@
+enum Token { Identifier[String], }
+fn consume(text: String) { println("{}", text); }
+fn forward(token: Token@) {
+    token ?[@] {
+        Token::Identifier :> text: String@ -> consume(text#),
+    }; // 错误：text 是非拥有指针，不能移走它指向的 String
+}

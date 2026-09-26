@@ -1,0 +1,17 @@
+fn twice(value: i32) -> i32 { value * 2 }
+fn add_one(value: i32) -> i32 { value + 1 }
+
+fn choose(value: i32?) -> fn(i32) -> i32 {
+    value?
+        1> _ -> twice
+        2> _ -> add_one
+}
+
+fn main() {
+    let transform: fn(i32) -> i32 = choose(Maybe::Yes[1]);
+    println("{}", transform(21)); // 42
+    let result = 20
+        |> fn(value: i32) -> i32 { value + 1 }
+        |> twice;
+    println("{}", result); // 42
+}

@@ -1,0 +1,13 @@
+enum Token { Integer[i64], End, }
+
+fn inspect(token: Token@) -> i64 {
+    token ?[@] {
+        Token::Integer :> number: i64@ -> number#,
+        Token::End :> _ -> 0,
+    }
+}
+
+fn main() {
+    let token: Token << Token::Integer[42];
+    println("{}", inspect(token@)); // 42
+}

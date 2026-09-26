@@ -1,9 +1,10 @@
-fn main()
+// 默认模式：所有地址均不附带借用修饰；检查模式的版本见 stage999/borrow.xe。
+fn main() -> i32
 {
     var left: i32 = 3;
     let right: i32 = 39;
 
-    let left_pointer: i32@[mut] << left@[mut];
+    let left_pointer: i32@ = left@;
     let right_pointer: i32@ = right@;
 
     left_pointer# = right_pointer# + left_pointer#;

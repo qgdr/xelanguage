@@ -1,0 +1,26 @@
+enum Token { End, Identifier[String], Integer[i64], }
+
+fn integer_value(number: i64@) -> i64 { number# }
+
+fn value(token: Token@) -> i64 {
+    token ?[@] {
+        Token::Identifier :> text: String@ -> 0,
+        Token::Integer :> integer_value,
+        Token::End :> _ -> 0,
+    }
+}
+
+fn classify(number: i32) -> str {
+    number ? {
+        1 :> _ -> "one",
+        2 :> _ -> "two",
+        _ :> _ -> "other",
+    }
+}
+
+fn main() {
+    let token: Token << Token::Integer[42];
+    println("{} {}", value(token@), classify(1)); // 42 one
+    let positive: bool = 1>0; // 普通比较，不是分流通道
+    println("{}", positive); // true
+}

@@ -1,0 +1,22 @@
+// 检查模式：提前返回和循环跳转也要清理资源。
+struct Trace {
+    label: i32,
+}
+
+impl Drop for Trace {
+    fn drop(self: Self@[mut]) { println("drop {}", self.label); }
+}
+
+fn early() -> i32? {
+    let local: Trace << Trace { .label = 0; };
+    return None; // 输出 drop 0
+}
+
+fn main() {
+    early()? 1> _ -> unit 2> _ -> unit;
+    for number in 0..2 {
+        let item: Trace << Trace { .label = 1; };
+        if number == 0 { continue; }
+        break;
+    } // 每次跳转均输出 drop 1，总共两次
+}

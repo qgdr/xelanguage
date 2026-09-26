@@ -1,0 +1,5 @@
+fn main() {
+    let base: i32 = 40;
+    let transform = fn[base](value: i32) -> i32 { base + value };
+    // 错误：捕获闭包为移动类型，即使捕获项全部 Copy 也用 << 创建。
+}

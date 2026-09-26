@@ -1,0 +1,11 @@
+// 成功与错误类型相同，也不会根据类型猜测是哪一个分支。
+fn checked(value: i32) -> i32?[i32] {
+    if value > 0 { value } else { Maybe::No[value] }
+}
+
+fn main() {
+    let answer: i32 = checked(-1)?
+        1> value: i32 -> value
+        2> error -> 0 - error;
+    println("{}", answer); // 1
+}

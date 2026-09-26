@@ -1,0 +1,5 @@
+// 两种模式均非法：管道转送的是资源，但指针没有资源所有权。
+fn consume(text: String) { println("{}", text); }
+fn forward(text: String@) {
+    text# |> consume;
+}

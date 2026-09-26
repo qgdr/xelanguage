@@ -1,0 +1,6 @@
+enum Token { Integer[i64], }
+fn bad(token: Token@) -> i64 {
+    token ?[@] {
+        Token::Integer :> number: i64 -> number,
+    } // 错误：输入为 i64@；应绑定 number: i64@ 并读取 number#
+}

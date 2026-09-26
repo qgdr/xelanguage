@@ -11,7 +11,7 @@ fn main() {
     let second = 4;
     let result = first
         |> twice
-        |> add(_, second);
+        |> value: i32 -> add(value, second);
 
     println("{}", result); // 10
 }

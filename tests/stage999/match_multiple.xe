@@ -1,0 +1,12 @@
+enum Event { Pair[i32, i32], End, }
+
+fn sum(event: Event) -> i32 {
+    event ? {
+        Event::Pair :> [left: i32, right: i32] -> left + right,
+        Event::End :> _ -> 0,
+    }
+}
+
+fn main() {
+    println("{}", sum(Event::Pair[20, 22])); // 42
+}

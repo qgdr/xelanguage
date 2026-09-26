@@ -1,0 +1,4 @@
+fn main() {
+    let transform = value: i32 -> value + 1;
+    // 错误：普通表达式中的匿名函数必须写 fn(value: i32) -> i32 { value + 1 }
+}

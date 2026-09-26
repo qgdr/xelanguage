@@ -1,0 +1,25 @@
+enum Token {
+    End,
+    Identifier[String],
+}
+
+fn length(token: Token@) -> usize {
+    token ?[@] {
+        Token::End :> _ -> 0,
+        Token::Identifier :> text: String@ -> text.len(),
+    }
+}
+
+fn into_text(token: Token) -> String {
+    token ? {
+        Token::End :> _ -> String::from(""),
+        Token::Identifier :> text: String -> text,
+    }
+}
+
+fn main() {
+    let token: Token << Token::Identifier[String::from("name")];
+    println("{}", length(token@)); // 借用，token 仍有效
+    let text: String << into_text(token); // 按值匹配，token 失效
+    println("{}", text@);
+}

@@ -1,23 +1,23 @@
 fn positive(value: i32) -> i32?[None] {
     if value > 0 {
-        Maybe::Yes[value]
+        value
     } else {
-        Maybe::None
+        None
     }
 }
 
 fn twice_positive(value: i32) -> i32? {
     let positive_value: i32 = positive(value)?[return];
-    Maybe::Yes[positive_value * 2]
+    positive_value * 2
 }
 
 fn main() {
     let fallback: i32 = positive(-1)?
-        1> value -> value
-        2> -> 0;
+        1> value: i32 -> value
+        2> _ -> 0;
 
     let doubled: i32 = twice_positive(21)?
-        1> value -> value
-        2> -> 0;
+        1> value: i32 -> value
+        2> _ -> 0;
     println("{} {}", fallback, doubled); // 0 42
 }

@@ -1,0 +1,3 @@
+fn invalid() -> i32?[str] {
+    None // 错误：带错误结果必须返回具体错误 Maybe::No[error]
+}

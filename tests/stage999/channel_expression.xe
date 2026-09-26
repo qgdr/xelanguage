@@ -1,0 +1,15 @@
+fn positive(value: i32) -> i32? {
+    if value > 0 { value } else { None }
+}
+
+fn double(value: i32) -> i32 { value * 2 }
+
+fn main() {
+    let first: i32 = positive(21)?
+        1> double
+        2> _ -> 0;
+    let second: i32 = positive(-1)?
+        1> value: i32 -> value
+        2> _ -> 0;
+    println("{} {}", first, second); // 42 0
+}
