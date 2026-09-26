@@ -1,0 +1,21 @@
+struct Trace { label: i32, }
+impl Drop for Trace {
+    fn drop(self: Self@[mut]) { println("drop {}", self.label); }
+}
+fn early() -> i32 {
+    let local << Trace { .label = 1; };
+    { let nested << Trace { .label = 2; }; return 7; };
+    0
+}
+fn take(item: Trace) { println("take {}", item.label); }
+fn main() {
+    println("returned {}", early());
+    for number in 0..2 {
+        let item << Trace { .label = number + 10; };
+        if number == 0 { continue; }
+        break;
+    }
+    let owner << Trace { .label = 20; };
+    if true { take(owner); }
+    println("finished");
+}

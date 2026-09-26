@@ -9,30 +9,59 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 from .ast import document
 from .parser import parse_source
 from .source import Diagnostic, Source
+from .build import BuildError
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Xe 单文件前端：输出 AST，或检查类型与所有权")
+    parser = argparse.ArgumentParser(description="Xe 单文件编译器：AST、语义检查、C 输出、构建与运行")
     parser.add_argument("source", type=Path, help="UTF-8 .xe 源文件")
-    parser.add_argument("-o", "--output", help="JSON 文件；- 表示标准输出")
+    parser.add_argument("-o", "--output", help="AST/C/程序输出路径；- 仅用于文本标准输出")
     parser.add_argument("--diagnostic-format", choices=("text", "json"), default="text")
-    parser.add_argument("--check", action="store_true", help="语义检查，不写 AST 文件")
-    parser.add_argument("--check-borrows", action="store_true", help="语义检查时启用基础借用/生命周期检查")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--check", action="store_true", help="语义检查，不写 AST 文件")
+    actions.add_argument("--emit-c", action="store_true", help="语义检查并输出可读 C")
+    actions.add_argument("--build", action="store_true", help="生成 C 并编译可执行程序")
+    actions.add_argument("--run", action="store_true", help="构建并运行程序")
+    parser.add_argument("--cc", default="cc", help="系统 C 编译器路径（默认 cc）")
+    parser.add_argument("--check-borrows", action="store_true", help="检查/后端动作启用基础借用与生命周期检查")
     args = parser.parse_args(argv)
-    if args.check_borrows and not args.check:
-        parser.error("--check-borrows 必须与 --check 一起使用；AST 阶段不检查借用")
+    if args.check_borrows and not (args.check or args.emit_c or args.build or args.run):
+        parser.error("--check-borrows 必须用于检查或后端动作；AST 阶段不检查借用")
     if args.check and args.output is not None:
         parser.error("--check 不写 AST，请移除 -o；诊断 JSON 使用 --diagnostic-format json")
+    backend = args.emit_c or args.build or args.run
+    if (args.build or args.run) and args.output == "-":
+        parser.error("可执行文件输出不能是 -")
     output = Path(args.output) if args.output and args.output != "-" else None
     if args.output is None:
-        output = Path("target/ast") / (args.source.name + ".ast.json")
+        output = (Path("target/c") / (args.source.name + ".c") if args.emit_c else
+                  Path("target/debug") / args.source.stem if args.build or args.run else
+                  Path("target/ast") / (args.source.name + ".ast.json"))
+    source_text = ""
     try:
         if output is not None and output.resolve() == args.source.resolve():
             print("输出路径不能覆盖输入源码。", file=sys.stderr)
             return 2
+        if backend:
+            from .backend_c import lower_to_c
+            from .build import emit_c, build_executable
+            if args.emit_c:
+                if args.output == "-":
+                    source_text = args.source.read_bytes().decode("utf-8")
+                    sys.stdout.write(lower_to_c(source_text, str(args.source), args.check_borrows))
+                else:
+                    emit_c(args.source, output, args.check_borrows)
+                    print(f"C 已输出：{output}")
+            else:
+                build_executable(args.source, output, args.check_borrows, args.cc)
+                if args.run:
+                    return subprocess.call([str(output.resolve())])
+                print(f"可执行程序已输出：{output}")
+            return 0
         # bytes.decode 不把 CRLF 改为 LF，保证 AST offset 与文件原文一致。
         source_text = args.source.read_bytes().decode("utf-8")
         tree = parse_source(source_text, str(args.source))
@@ -75,7 +104,14 @@ def main(argv: list[str] | None = None) -> int:
             print(diagnostic.render(), file=sys.stderr)
         return 1
     except (OSError, UnicodeError) as error:
-        print(f"无法读取源码或写入 AST：{error}", file=sys.stderr)
+        print(f"无法读取源码或写入编译产物：{error}", file=sys.stderr)
+        return 2
+    except BuildError as error:
+        if args.diagnostic_format == "json":
+            print(json.dumps({"diagnostics": [{"code": "XE-BUILD-0001", "message": str(error)}]},
+                             ensure_ascii=False), file=sys.stderr)
+        else:
+            print(f"构建失败：{error}", file=sys.stderr)
         return 2
     except RecursionError:
         # 长二元链可能解析成功，但 JSON 嵌套超出宿主限制，也应是友好的诊断。

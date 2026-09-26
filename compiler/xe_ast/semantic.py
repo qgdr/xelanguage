@@ -381,8 +381,19 @@ class Checker:
                     self.fail(value.node, "循环内不能反复移动外层资源", "XE-MOVE-0003",
                               "使用借用，或在进入循环前转交给拥有迭代器")
                 if fields:
-                    if binding.type.name in self.drop_types:
-                        self.fail(value.node, "自定义 Drop 类型不能移出资源字段", "XE-OWN-0002")
+                    ancestor = binding.type
+                    for part in fields:
+                        if ancestor.name in self.drop_types:
+                            self.fail(value.node, "自定义 Drop 类型不能移出资源字段（包括嵌套字段）", "XE-OWN-0002")
+                        if ancestor.name == "tuple":
+                            ancestor = ancestor.args[int(part)]
+                        else:
+                            declaration = self.types.get(ancestor.name, {})
+                            field_node = next((f for f in declaration.get("fields", []) if f["name"] == part), None)
+                            if field_node:
+                                field_type = self.type_of(field_node["type"], self.generic_set(declaration))
+                                ancestor = substitute(field_type, {"$"+p["name"]: t for p, t in
+                                                      zip(declaration.get("generics", []), ancestor.args)})
                     binding.moved_fields.add(fields)
                 else:
                     binding.moved = True

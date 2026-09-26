@@ -8,8 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
-excompiler/parser/parser.out
-excompiler/parser/parsetab.py
+# Retired compiler paths (do not ignore compiler/main.py).
+/excompiler/
+/main.py
 **.ast.json
 **.ll
 **.o

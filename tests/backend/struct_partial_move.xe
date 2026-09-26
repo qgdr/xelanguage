@@ -1,0 +1,13 @@
+struct Trace { label: i32, }
+impl Drop for Trace { fn drop(self: Self@[mut]) { println("drop {}", self.label); } }
+struct Pair { first: Trace, second: Trace, text: String, }
+fn main() {
+    let pair << Pair {
+        .first << Trace { .label = 1; };
+        .second << Trace { .label = 2; };
+        .text << String::from("remaining");
+    };
+    let first << pair.first;
+    let text << pair.text;
+    println("{}", text@);
+} // first 先 drop 1；pair 只 drop second，不重复 drop first。
