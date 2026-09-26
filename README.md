@@ -32,7 +32,7 @@ fn main() {
 }
 ```
 
-- `name: Type` 中的 `:` 只表示名称与类型。
+- `name: Type` 中的 `:` 标注值的类型；`fn[T: Trait]` 中标注类型参数的能力约束。
 - `=` 表示复制，仅适用于 `Copy` 类型。
 - `<<` 和 `>>` 表示值传递；资源类型的源在传递后失效。
 - 默认模式下 `T@` / `value@` 是不检查借用的非拥有指针；开启 `--check-borrows` 后，
@@ -68,7 +68,7 @@ xe doc
 
 完整规范从 [`doc/00.md`](doc/00.md) 开始阅读。
 
-当前可固定的前端契约已标记为 [Bootstrap Syntax 0.1](doc/17.md)，其余语义按
+当前可固定的前端契约已标记为 [Bootstrap Syntax 0.2](doc/17.md)，其余语义按
 RESERVED / PROVISIONAL / DEFERRED 分阶段实现。
 
 `1> handle` 将成功负载传给 handle，`2> _ -> 0` 忽略失败并返回备用值。

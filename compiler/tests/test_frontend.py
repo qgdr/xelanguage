@@ -115,6 +115,44 @@ class ExpressionTests(unittest.TestCase):
 
 
 class DeclarationTests(unittest.TestCase):
+    def test_function_generics_follow_fn_and_inline_bounds_are_constraints(self):
+        tree = parse_source("pub fn[T: Measure, U] inspect(value: T@, other: U) -> i32 "
+                            "where U implements Copy { value.measure() }")
+        function = tree["items"][0]
+        self.assertTrue(function["public"])
+        self.assertEqual(function["name"], "inspect")
+        self.assertEqual([g["name"] for g in function["generics"]], ["T", "U"])
+        self.assertEqual([(c["target"]["path"]["parts"], c["trait"]["path"]["parts"])
+                          for c in function["constraints"]], [(["T"], ["Measure"]), (["U"], ["Copy"])])
+
+    def test_generic_trait_method_and_extern_prototype(self):
+        tree = parse_source('trait Mapper { fn[T: Copy] map(self: Self@, value: T) -> T; } '
+                            'extern "C" { fn[T] identity(value: T) -> T; }')
+        method = tree["items"][0]["methods"][0]
+        self.assertEqual(method["generics"][0]["name"], "T")
+        self.assertEqual(method["constraints"][0]["trait"]["path"]["parts"], ["Copy"])
+        self.assertIsNone(method["body"])
+        self.assertEqual(tree["items"][1]["functions"][0]["generics"][0]["name"], "T")
+
+    def test_old_function_generic_placement_reports_migration(self):
+        with self.assertRaises(Diagnostic) as caught:
+            parse_source("fn identity[T](value: T) -> T { value }")
+        self.assertIn("已移动到 fn 后", caught.exception.message)
+        self.assertIn("fn[T] identity", caught.exception.hint)
+
+    def test_generic_closures_not_declared_and_captures_unchanged(self):
+        with self.assertRaises(Diagnostic):
+            tail("fn[T: Copy](value: T) -> T { value }")
+        node = tail("fn[base](value: i32) -> i32 { base + value }")
+        self.assertEqual(node["kind"], "AnonymousFunction")
+        self.assertEqual(node["captures"][0]["name"], "base")
+
+    def test_function_generic_regions_and_duplicate_parameters(self):
+        function = parse_source("fn[region r, T] first(value: T@[r]) -> T@[r] { value }")["items"][0]
+        self.assertEqual(function["generics"][0]["category"], "region")
+        with self.assertRaises(Diagnostic):
+            parse_source("fn[T, T] bad(value: T) {}")
+
     def test_imports_and_extern(self):
         tree = parse_source('use crate::syntax::{Token, Node as AstNode}; '
                             'extern "C" { fn release(pointer: RawPtr[u8]); }')

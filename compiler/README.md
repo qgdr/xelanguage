@@ -1,7 +1,7 @@
 # 独立 Xe 前端：AST 与单文件语义检查
 
 这是新实现，不导入旧 excompiler，不使用 LLVM，前端自身只使用 Python 标准库。
-与仓库其余工具共用根目录 uv 项目和 .venv；源码按 [Bootstrap Syntax 0.1](../doc/17.md) 解析。
+与仓库其余工具共用根目录 uv 项目和 .venv；源码按 [Bootstrap Syntax 0.2](../doc/17.md) 解析。
 
 ## 从仓库根运行
 

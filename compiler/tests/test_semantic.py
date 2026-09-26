@@ -221,9 +221,9 @@ class SemanticTests(unittest.TestCase):
         self.assertEqual(check_source("fn f() { let x: Array[i32, 0] = []; }"), [])
 
     def test_generic_call_and_copy_constraint(self):
-        source = "fn same[T](x: T) -> T { x } fn f() { let x: i32 = same(1); }"
+        source = "fn[T] same(x: T) -> T { x } fn f() { let x: i32 = same(1); }"
         self.assertEqual(check_source(source), [])
-        self.assert_error('fn copy[T](x: T) -> T where T implements Copy { x } fn f() { copy(String::from("x")); }',
+        self.assert_error('fn[T: Copy] copy(x: T) -> T { x } fn f() { copy(String::from("x")); }',
                           "XE-OWN-0001")
 
     def test_partial_move_tracking(self):

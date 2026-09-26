@@ -112,18 +112,29 @@ class Parser:
         self.expect("]")
         return values
 
-    def generics(self) -> list[Node]:
+    def generics(self, inline_constraints: list[Node] | None = None) -> list[Node]:
         if not self.accept("["):
             return []
         def parameter() -> Node:
             start = self.current.start
             category = "region" if self.accept("region") else "type"
             name = self.expect("IDENT").text
+            target = self.node("NamedType", start,
+                               path=self.node("Path", start, parts=[name]), arguments=[])
+            if self.accept(":"):
+                if inline_constraints is None or category != "type":
+                    self.error("内联 Trait 约束目前只用于具名函数的类型泛型")
+                trait = self.type()
+                if trait["kind"] != "NamedType":
+                    self.error("泛型冒号后需要 Trait 名称或 Trait 类型应用")
+                inline_constraints.append(self.node("TraitConstraint", start, target=target, trait=trait))
             return self.node("GenericParameter", start, name=name, category=category)
         result = self.separated("]", parameter)
         if not result:
             self.error("泛型参数附件不能为空")
         self.expect("]")
+        if len({p["name"] for p in result}) != len(result):
+            self.error("泛型参数名称重复")
         return result
 
     def type(self) -> Node:
@@ -188,13 +199,17 @@ class Parser:
 
     def function(self, public: bool = False, prototype: bool = False) -> Node:
         start = self.expect("fn").start
+        inline_constraints = []
+        generics = self.generics(inline_constraints)
         name = self.expect("IDENT").text
-        generics = self.generics()
+        if self.current.kind == "[":
+            self.error("函数泛型附件已移动到 fn 后",
+                       f"改为 fn[T] {name}(...)；约束可写 fn[T: Trait] {name}(...)")
         self.expect("(")
         parameters = self.separated(")", self.parameter)
         self.expect(")")
         result = self.type() if self.accept("->") else None
-        constraints = self.constraints()
+        constraints = inline_constraints + self.constraints()
         if prototype and self.accept(";"):
             body = None
         else:

@@ -8,3 +8,6 @@ fn main() {
     let point << Point { .x = 42; };
     println("{}", point.measure());
 }
+
+// 内联 Trait 约束已经能解析，通用 Trait 检查仍待实现。
+fn[T: Measure] inspect(value: T@) -> i32 { value.measure() }

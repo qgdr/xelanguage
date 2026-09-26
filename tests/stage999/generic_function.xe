@@ -1,0 +1,18 @@
+// 具名函数：fn 后的附件是泛型声明。
+fn[T] identity(value: T) -> T { value }
+
+fn[T: Copy] duplicate(value: T) -> (T, T) { (value, value) }
+
+// 闭包可使用外层 T；它没有声明独立泛型。
+fn[T: Copy] apply_identity(value: T) -> T {
+    let callback = fn(item: T) -> T { item };
+    callback(value)
+}
+
+fn main() {
+    let number = identity(42);
+    let pair = duplicate(number);
+    let copied = apply_identity(number);
+    let text << identity(String::from("hello"));
+    println("{} {} {}", pair.0, copied, text@);
+}
