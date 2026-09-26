@@ -1,0 +1,2 @@
+struct Point { x: i32, }
+fn main() { let point << Point { .x = "bad"; }; }

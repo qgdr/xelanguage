@@ -1,0 +1,2 @@
+// 仅在 --check-borrows 模式下检查生命周期。
+fn invalid() -> i32@ { let value = 1; value@ }

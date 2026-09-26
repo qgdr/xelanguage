@@ -1,0 +1,15 @@
+struct Point { x: i32, y: i32, }
+impl Copy for Point;
+
+struct Message { text: String, point: Point, }
+
+fn main() {
+    // Copy 字段用 =，资源字段用 <<；初始化顺序可以不同于声明顺序。
+    let point = Point { .y = 20; .x = 10; };
+    let text << String::from("hello");
+    let message << Message { .point = point; .text << text; };
+    let empty: Empty << Empty {};
+    println("{} ({}, {})", message.text@, message.point.x, message.point.y);
+}
+
+struct Empty {}

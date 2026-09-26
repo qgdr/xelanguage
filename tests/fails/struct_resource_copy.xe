@@ -1,0 +1,2 @@
+struct Message { text: String, }
+fn main() { let message << Message { .text = String::from("bad"); }; }

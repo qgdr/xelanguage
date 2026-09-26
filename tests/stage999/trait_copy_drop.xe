@@ -1,0 +1,21 @@
+// 目前实现的 Trait：Copy 标记与 Drop 签名/资源抽取限制。
+struct Point { x: i32, y: i32, }
+impl Copy for Point;
+
+enum Direction { Left, Right, }
+impl Copy for Direction;
+
+struct Trace { label: i32, }
+impl Drop for Trace {
+    fn drop(self: Self@[mut]) { println("drop {}", self.label); }
+}
+
+fn main() {
+    let first = Point { .x = 1; .y = 2; };
+    let second = first;
+    let direction = Direction::Left;
+    let copied_direction = direction;
+    let trace << Trace { .label = second.x; };
+    println("{} {}", first.x, second.y);
+    // 这里只验收 AST 和静态检查，尚未生成或实际执行 drop。
+}

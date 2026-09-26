@@ -1,0 +1,2 @@
+struct Message { text: String, }
+impl Copy for Message;

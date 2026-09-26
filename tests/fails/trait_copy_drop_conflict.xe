@@ -1,0 +1,3 @@
+struct Trace { label: i32, }
+impl Copy for Trace;
+impl Drop for Trace { fn drop(self: Self@[mut]) {} }

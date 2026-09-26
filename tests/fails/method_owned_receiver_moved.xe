@@ -1,0 +1,7 @@
+struct Message { text: String, }
+impl Message { fn into_text(self: Self) -> String { self.text } }
+fn main() {
+    let message << Message { .text << String::from("hello"); };
+    let text << message.into_text();
+    println("{}", message.text@);
+}

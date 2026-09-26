@@ -1,0 +1,10 @@
+// 语法合法；通用 Trait 语义尚未实现，当前应报告 XE-SEM-0001。
+trait Measure { fn measure(self: Self@) -> i32; }
+struct Point { x: i32, }
+impl Measure for Point {
+    fn measure(self: Self@) -> i32 { self.x }
+}
+fn main() {
+    let point << Point { .x = 42; };
+    println("{}", point.measure());
+}

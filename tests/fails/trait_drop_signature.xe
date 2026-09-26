@@ -1,0 +1,3 @@
+struct Trace { label: i32, }
+// drop 不能接收拥有的 self。
+impl Drop for Trace { fn drop(self: Self) {} }

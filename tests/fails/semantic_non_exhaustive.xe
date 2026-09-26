@@ -1,0 +1,5 @@
+enum Token { End, Integer[i32], }
+fn main() {
+    let token << Token::End;
+    token ? { Token::End :> _ -> unit, };
+}

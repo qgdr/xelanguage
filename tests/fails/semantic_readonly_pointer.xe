@@ -1,0 +1,2 @@
+// 仅在 --check-borrows 模式下禁止通过共享指针写入。
+fn change(value: i32@) { value# = 2; }

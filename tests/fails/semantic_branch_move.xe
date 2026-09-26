@@ -1,0 +1,6 @@
+fn consume(value: String) {}
+fn main() {
+    let text << String::from("hello");
+    if true { consume(text); }
+    println("{}", text@);
+}

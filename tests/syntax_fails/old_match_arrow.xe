@@ -1,0 +1,5 @@
+enum Token { End, }
+fn main() {
+    let token << Token::End;
+    token ? { Token::End => _ -> (), };
+}

@@ -1,0 +1,3 @@
+struct Point { x: i32, }
+// Copy 是无方法的标记 Trait。
+impl Copy for Point { fn duplicate(self: Self@) {} }

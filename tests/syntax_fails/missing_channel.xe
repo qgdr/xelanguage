@@ -1,0 +1,2 @@
+fn get() -> i32? { 1 }
+fn main() { get()? 1> value -> value; }

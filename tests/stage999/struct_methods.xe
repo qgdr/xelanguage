@@ -1,0 +1,27 @@
+struct Counter { count: i32, }
+impl Copy for Counter;
+
+impl Counter {
+    // 没有 self 的是关联函数，通过 :: 调用。
+    fn new(count: i32) -> Self { Counter { .count = count; } }
+    fn get(self: Self@) -> i32 { self.count }
+    fn add(self: Self@[mut], amount: i32) { self.count = self.count + amount; }
+}
+
+struct Message { text: String, }
+impl Message {
+    fn len(self: Self@) -> usize { self.text.len() }
+    // 按值 self 接收所有权；普通类型可以移出资源字段。
+    fn into_text(self: Self) -> String { self.text }
+}
+
+fn main() {
+    var counter = Counter::new(10);
+    counter.add(2);
+    let pointer = counter@;
+    println("{} {}", counter.get(), pointer.get());
+    let message << Message { .text << String::from("hello"); };
+    println("{}", message.len());
+    let text << message.into_text();
+    println("{}", text@);
+}

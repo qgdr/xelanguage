@@ -1,0 +1,3 @@
+struct Counter { count: i32, }
+impl Counter { fn plus(self: Self@, n: i32) -> i32 { self.count + n } }
+fn main() { let counter << Counter { .count = 0; }; counter.plus("bad"); }
