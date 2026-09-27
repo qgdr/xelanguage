@@ -63,19 +63,20 @@ class BackendExecutionTests(unittest.TestCase):
 
     def test_field_initialization_order(self):
         self.assert_output('''struct Point { a: i32, b: i32, }
+        impl Copy for Point;
         fn mark(x: i32) -> i32 { println("mark {}", x); x }
         fn main() {
-            let p << Point { .b = mark(2); .a = mark(1); };
+            let p = Point { .b = mark(2); .a = mark(1); };
             println("{} {}", p.a, p.b);
         }''', "mark 2\nmark 1\n1 2\n")
 
     def test_resource_reassignment_and_field_replacement(self):
         self.assert_output('''struct S { text: String, }
         fn main() {
-            var s << S { .text << String::from("first"); };
+            let[mut] s << S { .text << String::from("first"); };
             s.text << String::from("second");
             println("{}", s.text@);
-            var text << String::from("hello");
+            let[mut] text << String::from("hello");
             text << text.clone();
             println("{}", text);
         }''', "second\nhello\n")
@@ -93,7 +94,7 @@ class BackendExecutionTests(unittest.TestCase):
         self.assert_output('''struct Trace { n: i32, }
         impl Drop for Trace { fn drop(self: Self@[mut]) { println("drop {}", self.n); } }
         fn main() {
-            var n = 0;
+            let[mut] n = 0;
             while n < 2 {
                 let trace << Trace { .n = n; };
                 n = n + 1;
@@ -104,10 +105,12 @@ class BackendExecutionTests(unittest.TestCase):
 
     def test_shadowing_and_struct_forward_declarations(self):
         self.assert_output('''struct Outer { inner: Inner, } struct Inner { n: i32, }
+        impl Copy for Outer;
+        impl Copy for Inner;
         fn main() {
             let x = 1;
             { let x = 2; println("{}", x); };
-            let value << Outer { .inner << Inner { .n = 3; }; };
+            let value = Outer { .inner = Inner { .n = 3; }; };
             println("{} {}", x, value.inner.n);
         }''', "2\n1 3\n")
 
@@ -172,13 +175,13 @@ class BackendExecutionTests(unittest.TestCase):
 
     def test_arithmetic_and_assignment_snapshot_order(self):
         self.assert_output('''fn change(x: i32@[mut]) -> i32 { x# = 2; 10 }
-        fn main() { var x = 1; let y = x + change(x@[mut]); println("{} {}", x, y); }''',
+        fn main() { let[mut] x = 1; let y = x + change(x@[mut]); println("{} {}", x, y); }''',
                            "2 11\n")
         self.assert_output('''fn main() {
-            var x = 1; var y = 2; var p = x@;
-            p# = { p = y@; 9 };
+            let[mut] x = 1; let[mut] y = 2; let[mut] p = x@[mut];
+            p# = { p = y@[mut]; 9 };
             println("{} {}", x, y);
-        }''', "9 2\n", checked=False)
+        }''', "9 2\n")
 
     def test_resource_temporaries_drop_at_statement_boundary(self):
         self.assert_output('''struct Trace { n: i32, }
@@ -233,18 +236,21 @@ class BackendFailureTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "XE-MOVE-0002")
 
     def test_unimplemented_features_report_language_diagnostic(self):
-        for source in ["fn[T] same(x: T) -> T { x } fn main() {}",
-                       "fn main() { let f = fn(x: i32) -> i32 { x }; f(1); }",
-                       "fn main() { let values = [1, 2]; }"]:
+        for source in ["fn main() { let n = 1; let f << fn[n](x: i32) -> i32 { x + n }; f(1); }"]:
             with self.subTest(source=source):
                 with self.assertRaises(Diagnostic) as caught:
                     lower_to_c(source)
                 self.assertEqual(caught.exception.code, "XE-BACKEND-0001")
 
+    def test_unused_generic_template_does_not_force_code_generation(self):
+        # 泛型以具体类型使用时才生成 C，不能为未实例化的 T 猜测布局。
+        generated = lower_to_c("fn[T] same(x: T) -> T { x } fn main() {}")
+        self.assertIn("int main(void)", generated)
+
     def test_recursive_value_layout_fails_cleanly(self):
         with self.assertRaises(Diagnostic) as caught:
             lower_to_c("struct Recursive { value: Recursive, } fn main() {}")
-        self.assertEqual(caught.exception.code, "XE-BACKEND-0001")
+        self.assertEqual(caught.exception.code, "XE-TYPE-0006")
         self.assertIn("按值递归", caught.exception.message)
 
     def test_invalid_program_preserves_existing_outputs(self):
@@ -289,7 +295,7 @@ class BackendFailureTests(unittest.TestCase):
                 status = main([str(source), "--emit-c", "-o", "-"])
             self.assertEqual(status, 0, err.getvalue())
             self.assertIn("int main(void)", out.getvalue())
-            source.write_text("fn main() { let values = [1]; }")
+            source.write_text("fn main() { let n = 1; let f << fn[n]() {}; f(); }")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 status = main([str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])

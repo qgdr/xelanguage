@@ -34,15 +34,17 @@ class Diagnostic(Exception):
     """可预期的源码错误；CLI 捕获并打印，不把 Python 回溯展示给语言使用者。"""
 
     def __init__(self, source: Source, start: int, end: int, message: str,
-                 code: str = "XE-PARSE-0001", hint: str | None = None) -> None:
+                 code: str = "XE-PARSE-0001", hint: str | None = None,
+                 severity: str = "error", inferred_type: str | None = None) -> None:
         super().__init__(message)
         self.source, self.start, self.end = source, start, end
         self.message, self.code, self.hint = message, code, hint
+        self.severity, self.inferred_type = severity, inferred_type
 
     def to_dict(self) -> dict[str, Any]:
-        return {"code": self.code, "message": self.message,
+        return {"code": self.code, "severity": self.severity, "message": self.message,
                 "file": self.source.filename, "span": self.source.span(self.start, self.end),
-                "hint": self.hint}
+                "hint": self.hint, "inferred_type": self.inferred_type}
 
     def render(self) -> str:
         position = self.source.position(self.start)
@@ -50,7 +52,7 @@ class Diagnostic(Exception):
         width = max(1, min(self.end - self.start, len(line) - position["column"] + 1))
         marker = " " * (position["column"] - 1) + "^" * width
         result = (f'{self.source.filename}:{position["line"]}:{position["column"]}: '
-                  f'{self.code}: {self.message}\n  {line}\n  {marker}')
+                  f'{self.severity} {self.code}: {self.message}\n  {line}\n  {marker}')
         if self.hint:
             result += f"\n提示：{self.hint}"
         return result

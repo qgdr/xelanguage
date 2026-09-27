@@ -33,19 +33,19 @@ def protect_source(source: Path, targets):
         raise BuildError("输出路径不能覆盖输入源码")
 
 
-def emit_c(source: Path, output: Path, check_borrows=False):
+def emit_c(source: Path, output: Path, check_borrows=True, warnings=None):
     protect_source(source, [output])
     text = source.read_bytes().decode("utf-8")
-    generated = lower_to_c(text, str(source), check_borrows)
+    generated = lower_to_c(text, str(source), check_borrows, warnings=warnings)
     atomic_text(output, generated)
     return output
 
 
-def build_executable(source: Path, output: Path, check_borrows=False,
-                     cc="cc", extra_flags=()):
+def build_executable(source: Path, output: Path, check_borrows=True,
+                     cc="cc", extra_flags=(), warnings=None):
     c_path = output.with_name(output.name + ".c")
     protect_source(source, [output, c_path])
-    emit_c(source, c_path, check_borrows)
+    emit_c(source, c_path, check_borrows, warnings=warnings)
     with tempfile.TemporaryDirectory(prefix=".xe-build-", dir=output.parent) as directory:
         executable = Path(directory) / "program"
         command = [cc, "-std=c11", "-O0", "-g",

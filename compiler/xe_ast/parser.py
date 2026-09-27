@@ -28,6 +28,9 @@ class Parser:
         self.tokens = lexer.scan()
         self.comments = lexer.comments
         self.index = 0
+        # [] 的实参保持语法树，不靠名字大小写猜测索引或泛型。
+        # 仅在附件内部识别不能作为普通值的类型后缀/函数类型。
+        self.attachment_depth = 0
 
     @property
     def current(self) -> Token:
@@ -102,7 +105,7 @@ class Parser:
             return []
         def modifier() -> Node:
             token = self.current
-            if token.kind not in {"IDENT", "region"}:
+            if token.kind not in {"IDENT", "region", "unsafe"}:
                 self.error("运算符修饰需要名称，例如 mut 或区域名")
             self.take()
             return self.node("Modifier", token.start, name=token.text)
@@ -146,13 +149,19 @@ class Parser:
             self.expect("->")
             node = self.node("FunctionType", start, parameters=parameters, result=self.type())
         elif self.accept("("):
-            first = self.type()
-            self.expect(",")
-            elements = [first]
-            if self.current.kind != ")":
-                elements += self.separated(")", self.type)
+            node = self.type()
+            if self.current.kind == ",":
+                self.error("元组类型使用 tuple[T, U]，圆括号只用于类型分组")
             self.expect(")")
+        elif self.accept("tuple"):
+            self.expect("[")
+            elements = self.separated("]", self.type)
+            if not elements:
+                self.error("空元组类型暂不支持", "使用 Unit 表示没有值")
+            self.expect("]")
             node = self.node("TupleType", start, elements=elements)
+        elif self.current.kind == "{":
+            self.error("旧的花括号元组类型已取消", "改为 tuple[T, U]；{} 只用于代码块")
         elif self.accept("None"):
             node = self.node("NoneTypeMarker", start)
         else:
@@ -177,15 +186,42 @@ class Parser:
                 node = self.node("MaybeType", start, value=node, error=error_type)
         return node
 
+    def binding_prefix(self) -> bool:
+        """公开声明使用 let / let[mut]；隐藏 var 别名归一为同一个 mutable 字段。
+
+        附件属于声明而非类型，只允许单个 mut。
+        """
+        if self.accept("var"):
+            return True
+        self.expect("let")
+        return self.mutable_attachment()
+
+    def mutable_attachment(self) -> bool:
+        """只在 let 后解析声明附件；参数不接受绑定可变性修饰。"""
+        if not self.accept("["):
+            return False
+        if self.current.kind != "IDENT" or self.current.text != "mut":
+            self.error("声明附件目前只允许 [mut]", "例如 let[mut] count: i32 = 0;")
+        self.take()
+        if self.current.kind != "]":
+            self.error("声明附件 [mut] 后需要 ]，不能重复或添加其他修饰", "例如 let[mut] count: i32 = 0;")
+        self.take()
+        return True
+
     def parameter(self, optional_type: bool = False, ignore: bool = False) -> Node:
         start = self.current.start
-        mutable = bool(self.accept("var")) if not ignore else False
+        if self.current.kind in {"let", "var"}:
+            self.error("参数只写名称和类型，不声明绑定可变性",
+                       "写 index: usize；需要重新赋值时在函数体内写 let[mut] index = index;")
         name = self.take() if ignore and self.current.kind == "_" else self.name()
+        if self.current.kind == "[":
+            self.error("参数名后不接受 [mut] 等附件，避免与索引混淆",
+                       "写 index: usize；可写借用使用 index: usize@[mut]")
         annotation = self.type() if self.accept(":") else None
         if annotation is None and not optional_type:
             self.error("函数参数必须标注类型", "例如 value: i32")
         return self.node("Parameter", start, name=name.text,
-                         type=annotation, mutable=mutable)
+                         type=annotation, mutable=False)
 
     def constraints(self) -> list[Node]:
         if not self.accept("where"):
@@ -250,10 +286,25 @@ class Parser:
             value = self.expression()
             self.expect(";")
             return self.node("Constant", start, public=public, name=name, type=annotation, value=value)
+        if self.accept("type"):
+            if self.current.kind == "[":
+                self.error("泛型类型别名暂不支持", "使用 type Name = ExistingType;")
+            name = self.expect("IDENT").text
+            if self.current.kind == "[":
+                self.error("泛型类型别名暂不支持", "使用 type Name = ExistingType;")
+            self.expect("=")
+            annotation = self.type()
+            self.expect(";")
+            return self.node("TypeAlias", start, public=public, name=name, type=annotation)
         if kind in {"struct", "enum", "trait"}:
             self.take()
-            name = self.expect("IDENT").text
+            # 声明附件说明本声明引入的未知量；使用处的 Name[T] 则代入类型。
+            # 与 fn[T] name 保持一致，不接受旧版 Name[T] 声明拼写。
             generics = self.generics()
+            name = self.expect("IDENT").text
+            if self.current.kind == "[":
+                self.error(f"{kind} 泛型声明附件需要放在关键字后",
+                           f"改为 {kind}[T] {name} {{ ... }}；使用时仍写 {name}[T]")
             members = []
             if kind == "struct" and self.accept(";"):
                 return self.node("Struct", start, public=public, name=name,
@@ -322,7 +373,34 @@ class Parser:
                 functions.append(item)
             self.expect("}")
             return self.node("Extern", start, abi=abi, functions=functions)
-        self.error("模块顶层需要 fn、struct、enum、trait、impl、use、const 或 extern 声明")
+        self.error("模块顶层需要 fn、struct、enum、trait、impl、use、const、type 或 extern 声明")
+
+    def tuple_targets(self) -> list[Node]:
+        self.expect("tuple")
+        self.expect("[")
+        def target():
+            start = self.current.start
+            name = self.take() if self.current.kind == "_" else self.expect("IDENT")
+            annotation = self.type() if self.accept(":") else None
+            return self.node("TupleBinding", start, name=name.text, type=annotation)
+        targets = self.separated("]", target)
+        if not targets:
+            self.error("解包目标不能为空", "例如 let tuple[first, second] = value;")
+        self.expect("]")
+        return targets
+
+    def destructure_targets(self, node: Node) -> list[Node]:
+        targets = []
+        for element in node["elements"]:
+            if element["kind"] == "TupleBinding":
+                targets.append(element)
+            elif element["kind"] == "Name" and len(element["path"]["parts"]) == 1:
+                targets.append(self.source.node("TupleBinding", self.start(element),
+                    element["span"]["end"]["offset"], name=element["path"]["parts"][0], type=None))
+            else:
+                self.error("元组解包目标只能是变量名或 _", "例如 tuple[first, _] << value;",
+                           token=Token("", "", self.start(element), element["span"]["end"]["offset"]))
+        return targets
 
     def block(self) -> Node:
         start = self.expect("{").start
@@ -332,7 +410,18 @@ class Parser:
                 self.error("代码块未结束，缺少 }")
             begin = self.current.start
             if self.current.kind in {"let", "var"}:
-                mutable = self.take().kind == "var"
+                mutable = self.binding_prefix()
+                if self.current.kind == "tuple":
+                    targets = self.tuple_targets()
+                    if self.current.kind not in {"=", "<<"}:
+                        self.error("元组解包声明需要 = 或 << 和右侧值",
+                                   "例如 let tuple[first, second] = value;")
+                    operator = self.take().kind
+                    value = self.expression()
+                    self.expect(";")
+                    statements.append(self.node("Destructure", begin, declare=True,
+                        mutable=mutable, operator=operator, targets=targets, value=value))
+                    continue
                 name = self.expect("IDENT").text
                 annotation = self.type() if self.accept(":") else None
                 operator, value = None, None
@@ -352,11 +441,18 @@ class Parser:
                 statements.append(self.node(kind.capitalize(), begin, value=value))
                 continue
             value = self.expression()
+            if self.current.kind == ",":
+                self.error("旧的花括号元组值已取消", "改为 tuple[a, b]；{} 只用于代码块")
             if self.current.kind in {"=", "<<", ">>"}:
                 operator = self.take().kind
                 right = self.expression()
                 self.expect(";")
                 target = value if operator != ">>" else right
+                if target["kind"] == "Tuple":
+                    statements.append(self.node("Destructure", begin, declare=False,
+                        mutable=False, operator=operator, targets=self.destructure_targets(target),
+                        value=value if operator == ">>" else right))
+                    continue
                 if not self.is_place(target):
                     self.error("赋值或值传递目标必须是变量、字段、索引或解引用位置")
                 statements.append(self.node("Assignment", begin, operator=operator,
@@ -451,17 +547,36 @@ class Parser:
         if self.accept("None"):
             return self.node("NoneValue", start)
         if self.current.kind == "fn":
+            if self.attachment_depth:
+                checkpoint = self.index
+                try:
+                    type_node = self.type()
+                    if self.current.kind in {",", "]"}:
+                        return type_node
+                except Diagnostic:
+                    pass
+                self.index = checkpoint
             return self.anonymous()
         if self.current.kind == "{":
             return self.block()
+        if self.accept("tuple"):
+            self.expect("[")
+            def element():
+                begin = self.current.start
+                if self.current.kind == "_" or (self.current.kind == "IDENT" and self.peek().kind == ":"):
+                    name = self.take().text
+                    annotation = self.type() if self.accept(":") else None
+                    return self.node("TupleBinding", begin, name=name, type=annotation)
+                return self.expression()
+            elements = self.separated("]", element)
+            if not elements:
+                self.error("空元组值暂不支持", "使用 unit 表示没有值")
+            self.expect("]")
+            return self.node("Tuple", start, elements=elements)
         if self.accept("("):
             expression = self.expression()
-            if self.accept(","):
-                elements = [expression]
-                if self.current.kind != ")":
-                    elements += self.separated(")", self.expression)
-                self.expect(")")
-                return self.node("Tuple", start, elements=elements)
+            if self.current.kind == ",":
+                self.error("元组值使用 tuple[a, b]，圆括号只用于表达式分组")
             self.expect(")")
             return self.node("Group", start, expression=expression)
         if self.accept("["):
@@ -515,17 +630,19 @@ class Parser:
                 if kind == "?":
                     self.error("连续匹配需要括号明确边界")
                 break
-            if 110 >= minimum and kind in {"(", "[", ".", "@", "#"}:
+            if 110 >= minimum and kind in {"(", "[", ".", "::", "@", "#"}:
                 if self.accept("("):
                     arguments = self.separated(")", self.expression)
                     self.expect(")")
                     left = self.node("Call", begin, callee=left, arguments=arguments)
-                elif self.accept("["):
-                    arguments = self.separated("]", self.expression)
-                    if not arguments:
-                        self.error("索引、泛型应用或枚举负载附件不能为空")
-                    self.expect("]")
+                elif self.current.kind == "[":
+                    arguments = self.bracket_arguments()
                     left = self.node("BracketApply", begin, object=left, arguments=arguments)
+                elif self.accept("::"):
+                    # 前面的 [] 修饰类型名称，后面的名称属于该具体类型。
+                    # 例如 Holder[i32]::new 或 Token[i32]::Value。
+                    member = self.expect("IDENT").text
+                    left = self.node("AssociatedAccess", begin, object=left, member=member)
                 elif self.accept("."):
                     field = self.take() if self.current.kind == "INTEGER" else self.name()
                     left = self.node("FieldAccess", begin, object=left, field=field.text)
@@ -537,25 +654,47 @@ class Parser:
                     self.expect("#")
                     left = self.node("Dereference", begin, operand=left)
                 continue
+            if self.attachment_depth and kind == "?" and (self.peek().kind in {",", "]"} or
+                    self.peek().kind == "[" and self.peek(2).kind != "@" and
+                    self.peek(2).text not in {"return", "panic"}):
+                self.take()
+                error_type = None
+                if self.accept("["):
+                    error_type = self.type()
+                    self.expect("]")
+                left = self.node("MaybeTypeAttachment", begin, operand=left, error=error_type)
+                continue
             if (110 >= minimum and kind == "?" and self.peek().kind == "["
-                    and self.peek(2).kind == "return"):
+                    and self.peek(2).text in {"return", "panic"}):
                 self.take()
                 self.expect("[")
-                self.expect("return")
+                strategy = self.take().text
                 self.expect("]")
-                left = self.node("Propagate", begin, operand=left)
+                # 两个策略都只求值一次；区别是失败时返回还是终止。
+                # 不把 panic 注册为关键字，普通 panic(...) 调用仍保持不变。
+                left = self.node("Propagate" if strategy == "return" else "Unwrap",
+                                 begin, operand=left)
                 continue
-            if (allow_struct and kind == "{" and left["kind"] in {"Name", "BracketApply"}
-                    and self.peek().kind in {".", "}"}):
+            if allow_struct and kind == "{" and left["kind"] in {"Name", "BracketApply"}:
                 self.take()
                 fields = []
                 while self.current.kind != "}":
-                    field_start = self.expect(".").start
-                    name = self.expect("IDENT").text
-                    if self.current.kind not in {"=", "<<"}:
-                        self.error("字段初始化需要 = 或 <<，不用 :")
-                    operator = self.take().kind
-                    value = self.expression()
+                    field_start = self.current.start
+                    if self.accept("."):
+                        name = self.expect("IDENT").text
+                        if self.current.kind not in {"=", "<<"}:
+                            self.error("字段初始化需要 = 或 <<，通用转送写 value >> .field;，不用 :")
+                        operator = self.take().kind
+                        value = self.expression()
+                    else:
+                        # >> 同普通语句一样按值类型复制或移动。这里只允许
+                        # 目标为 .field，不引入新的临时 self 或赋值表达式。
+                        value = self.expression()
+                        if not self.accept(">>"):
+                            self.error("结构体初始化需要 .field = value;、.field << value; 或 value >> .field;")
+                        operator = ">>"
+                        self.expect(".")
+                        name = self.expect("IDENT").text
                     self.expect(";")
                     fields.append(self.node("FieldInitialization", field_start,
                                             name=name, operator=operator, value=value))
@@ -564,8 +703,10 @@ class Parser:
                 continue
             if kind == "as" and 90 >= minimum:
                 self.take()
-                strategy = self.modifiers()
-                left = self.node("Cast", begin, operand=left, modifiers=strategy, type=self.type())
+                if self.current.kind == "[":
+                    self.error("as 不接受转换策略附件；可能失败的转换使用 T::try_from(value)",
+                               "成功取值并在失败时终止：T::try_from(value)?[panic]")
+                left = self.node("Cast", begin, operand=left, modifiers=[], type=self.type())
                 continue
             if kind in COMPARE and 60 >= minimum:
                 operands, operators = [left], []
@@ -601,7 +742,20 @@ class Parser:
 
     def can_start_expression(self) -> bool:
         return self.current.kind in (LITERALS | PATH_START |
-            {"None", "(", "[", "{", "fn", "if", "while", "for", "unsafe", "not", "+", "-"})
+            {"None", "(", "[", "{", "tuple", "fn", "if", "while", "for", "unsafe", "not", "+", "-"})
+
+    def bracket_arguments(self) -> list[Node]:
+        """共享 [] 附件解析；普通表达式与管道目标使用完全相同的类型附件。"""
+        self.expect("[")
+        self.attachment_depth += 1
+        try:
+            arguments = self.separated("]", self.expression)
+        finally:
+            self.attachment_depth -= 1
+        if not arguments:
+            self.error("索引、泛型应用或枚举负载附件不能为空")
+        self.expect("]")
+        return arguments
 
     def handler(self) -> Node:
         """在明确的 handler 位置做有界语法前瞻，不通过函数的类型猜调用含义。"""
@@ -615,6 +769,11 @@ class Parser:
             self.expect("]")
             self.expect("->")
             return self.node("HandlerBinding", start, parameters=parameters, body=self.expression())
+        postfix_binding = (self.peek().kind == "[" and self.peek(2).text == "mut"
+                           and self.peek(3).kind == "]" and self.peek(4).kind in {":", "->"})
+        if self.current.kind in {"IDENT", "_", "self"} and postfix_binding:
+            self.error("处理参数名后不接受 [mut] 附件",
+                       "写 value -> { let[mut] value = value; ... }")
         if self.current.kind in {"IDENT", "_", "self"} and self.peek().kind in {":", "->"}:
             parameters = [self.parameter(optional_type=True, ignore=True)]
             self.expect("->")
@@ -625,6 +784,19 @@ class Parser:
             target = self.primary(True)
         elif self.current.kind in PATH_START:
             target = self.node("Name", start, path=self.path())
+            # 先选择具体实例/关联函数/函数字段，再由管道调用它。
+            # 这里只解析选择，不把 foo(...) 的直接调用混入目标语法。
+            while self.current.kind in {"[", "::", "."}:
+                if self.current.kind == "[":
+                    target = self.node("BracketApply", start, object=target,
+                                       arguments=self.bracket_arguments())
+                elif self.accept("::"):
+                    target = self.node("AssociatedAccess", start, object=target,
+                                       member=self.expect("IDENT").text)
+                else:
+                    self.expect(".")
+                    field = self.take() if self.current.kind == "INTEGER" else self.name()
+                    target = self.node("FieldAccess", start, object=target, field=field.text)
             if self.current.kind == "(":
                 self.error("管道后不能直接写函数调用",
                            "直接写函数名；额外参数用 value -> foo(value, extra)。"
@@ -633,28 +805,47 @@ class Parser:
             self.error("管道后需要处理函数或参数绑定", "例如 foo、value -> value 或 _ -> 0")
         return self.node("FunctionTarget", start, target=target)
 
-    def selector(self) -> Node:
+    def selector(self, nested: bool = False) -> Node:
         start = self.current.start
-        choices = [self.simple_selector()]
+        choices = [self.simple_selector(nested)]
         while self.accept("|"):
-            choices.append(self.simple_selector())
+            choices.append(self.simple_selector(nested))
         return choices[0] if len(choices) == 1 else self.node("OrSelector", start, choices=choices)
 
-    def simple_selector(self) -> Node:
+    def simple_selector(self, nested: bool = False) -> Node:
         start = self.current.start
         if self.accept("_"):
             return self.node("WildcardSelector", start)
+        if self.current.kind in {"-", "+"} and self.peek().kind in {"INTEGER", "FLOAT"}:
+            sign = self.take().kind
+            value = self.literal()
+            # 模式仅选择常量，不执行一般表达式。把数值符号归入选择常量，
+            # 与表达式的一元 +/- 保持相同数值含义，复用现有 LiteralSelector。
+            value = self.node("Literal", start, literal_kind=value["literal_kind"],
+                              raw=sign + value["raw"],
+                              value=-value["value"] if sign == "-" else value["value"])
+            return self.node("LiteralSelector", start, value=value)
         if self.current.kind in LITERALS:
             value = self.literal()
             return self.node("LiteralSelector", start, value=value)
-        if self.accept("("):
-            elements = self.separated(")", self.selector)
-            self.expect(")")
+        if nested:
+            # 一个 ? 只选择一层。负载可按直接常量筛选，但不偷偷深入
+            # 下一层枚举/元组；把负载传给处理参数，再显式写第二个 ?。
+            self.error("模式匹配一次只能选择一层，不能嵌套枚举或元组选择器",
+                       "负载过滤只写字面量或 _；需要深入时在 :> 后对负载再写一次 ?")
+        if self.accept("tuple"):
+            self.expect("[")
+            elements = self.separated("]", lambda: self.selector(nested=True))
+            if not elements:
+                self.error("空元组选择器暂不支持")
+            self.expect("]")
             return self.node("TupleSelector", start, elements=elements)
+        if self.current.kind == "{":
+            self.error("旧的花括号元组选择器已取消", "改为 tuple[selector, ...]")
         path = self.path()
         filters = None
         if self.accept("["):
-            filters = self.separated("]", self.selector)
+            filters = self.separated("]", lambda: self.selector(nested=True))
             if not filters:
                 self.error("无负载选择器不要写空 []")
             self.expect("]")

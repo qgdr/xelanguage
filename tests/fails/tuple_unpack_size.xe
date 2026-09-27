@@ -1,0 +1,6 @@
+fn foo() -> tuple[i32, i32] { tuple[10, 20] }
+
+fn main() {
+    // 一个接收位置不能解包两个成员；需要 let tuple[a, b] = foo();。
+    let tuple[a] = foo(); // XE-TYPE-0001
+}

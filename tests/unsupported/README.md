@@ -4,6 +4,10 @@
 但当前语义阶段报告明确的能力边界，不伪装成已支持。
 
 trait_dispatch.xe 验证自定义 Trait 声明、方法签名及实现体的 AST；
-当前通用 Trait 检查/分派未完成，make check-borrows 报 XE-SEM-0001。
+当前通用 Trait 检查/分派未完成，make check-safety 报 XE-SEM-0001。
 已支持的 Copy/Drop 正例见 tests/stage999/trait_copy_drop.xe，
 违例见 tests/fails/trait_*.xe。
+
+泛型 Holder 的具体实例、显式函数代入和字段转送已可编译运行，原 generic_holder.xe
+已迁移到 ../stage999/generic_holder.xe。泛型 Copy 实现、自定义泛型 Drop、
+通用 Trait 约束与分派仍有能力边界，详见 ../../doc/22.md。

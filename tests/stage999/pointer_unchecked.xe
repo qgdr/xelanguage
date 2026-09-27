@@ -1,12 +1,11 @@
-// 默认模式（不开 --check-borrows）：只使用无修饰指针。
-// 此例不承诺借用安全；资源移动检查仍开启。
-fn increment(value: i32@) {
+// 历史文件名保留；当前版本检查写权限，但普通可写指针不要求独占。
+fn increment(value: i32@[mut]) {
     value# = value# + 1;
 }
 
 fn main() {
-    var value: i32 = 41;
-    let pointer: i32@ = value@;
+    let[mut] value: i32 = 41;
+    let pointer: i32@[mut] = value@[mut];
     increment(pointer);
     println("{}", value); // 42
 }

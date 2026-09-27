@@ -8,8 +8,9 @@ fn main() {
     let point = Point { .y = 20; .x = 10; };
     let text << String::from("hello");
     let message << Message { .point = point; .text << text; };
-    let empty: Empty << Empty {};
+    let empty: Empty = Empty {}; // 空结构体也要显式声明 Copy，才可用复制赋值。
     println("{} ({}, {})", message.text@, message.point.x, message.point.y);
 }
 
 struct Empty {}
+impl Copy for Empty;

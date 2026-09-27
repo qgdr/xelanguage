@@ -9,9 +9,9 @@ fn main()
 
     println("{} {}", hello, world);
 
-    var target = [1, 2, 3, 4, 5];
+    let[mut] target = [1, 2, 3, 4, 5];
     let source = [1, 1, 1, 1, 1];
-    var target_tail: SliceMut[i32] << target.slice_mut(3..);
+    let[mut] target_tail: SliceMut[i32] = target.slice_mut(3..);
     let source_tail: Slice[i32] = source.slice(3..);
     target_tail.copy_from(source_tail); // target == [1, 2, 3, 1, 1]
 }

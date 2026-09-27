@@ -1,6 +1,6 @@
 fn main()
 {
-    var text: String << String::from("hello");
+    let[mut] text: String << String::from("hello");
 
     println("before = {}", text@); // 显式借用，因此 text 仍可修改。
     text.push_str(", world!");

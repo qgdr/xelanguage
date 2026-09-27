@@ -1,0 +1,30 @@
+// 枚举载荷、借用分支和拥有管道使用同一套函数参数规则。
+enum Token {
+    End,
+    Identifier[String],
+    Integer[i64],
+}
+
+fn length(token: Token@) -> usize {
+    token ?[@] {
+        Token::End :> _ -> 0,
+        Token::Identifier :> text: String@ -> text.len(),
+        Token::Integer :> number: i64@ -> 1,
+    }
+}
+
+fn keep(text: String) -> String { text }
+
+fn main() {
+    let token: Token << Token::Identifier[String::from("hello")];
+    println("length {}", length(token@));
+
+    // 按值匹配把载荷所有权交给处理器，资源可继续沿管道转交。
+    let text: String << token ? {
+        Token::Identifier :> keep,
+        Token::Integer :> _ -> String::from("integer"),
+        Token::End :> _ -> String::from("end"),
+    };
+    let size = text |> value: String -> value.len();
+    println("size {}", size);
+}

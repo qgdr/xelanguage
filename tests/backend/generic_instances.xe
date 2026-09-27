@@ -1,0 +1,24 @@
+// 声明附件列出未知量，使用附件选择具体类型实例。
+struct[T] Holder { value: T, }
+enum[T] Token { Value[T], Empty, }
+
+fn[T] identity(value: T) -> T { value }
+fn[T: Copy] duplicate(value: T) -> tuple[T, T] { tuple[value, value] }
+fn[T] wrap(value: T) -> Holder[T] {
+    Holder[T] { value >> .value; }
+}
+
+fn main() {
+    let pair = duplicate(identity(21));
+    // Holder 没有声明 Copy，即使 T = i32 也必须转移整体。
+    let number << wrap[i32](pair.0 + pair.1);
+    let text << wrap[String](identity(String::from("hello")));
+    let token << Token[String]::Value[String::from("payload")];
+    let payload << token ? {
+        Token::Value :> value -> value,
+        Token::Empty :> _ -> String::from("empty"),
+    };
+    let[mut] value = 7;
+    let readonly: i32@ = identity[i32@](value@[mut]);
+    println("{} {} {} {}", number.value, text.value@, payload@, readonly#);
+}

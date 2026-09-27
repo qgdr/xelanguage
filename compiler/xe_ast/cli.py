@@ -27,10 +27,13 @@ def main(argv: list[str] | None = None) -> int:
     actions.add_argument("--build", action="store_true", help="生成 C 并编译可执行程序")
     actions.add_argument("--run", action="store_true", help="构建并运行程序")
     parser.add_argument("--cc", default="cc", help="系统 C 编译器路径（默认 cc）")
-    parser.add_argument("--check-borrows", action="store_true", help="检查/后端动作启用基础借用与生命周期检查")
+    parser.add_argument("--check-safety", "--check-borrows", dest="check_borrows", action="store_true",
+                        help="兼容选项；始终检查类型、写权限和所有权，指针风险只警告")
     args = parser.parse_args(argv)
     if args.check_borrows and not (args.check or args.emit_c or args.build or args.run):
-        parser.error("--check-borrows 必须用于检查或后端动作；AST 阶段不检查借用")
+        parser.error("--check-safety 必须用于检查或后端动作；AST 阶段不检查可变性或借用")
+    # 暂停开放不检查模式；旧旗标保留以免已有构建命令失效。
+    args.check_borrows = True
     if args.check and args.output is not None:
         parser.error("--check 不写 AST，请移除 -o；诊断 JSON 使用 --diagnostic-format json")
     backend = args.emit_c or args.build or args.run
@@ -42,6 +45,16 @@ def main(argv: list[str] | None = None) -> int:
                   Path("target/debug") / args.source.stem if args.build or args.run else
                   Path("target/ast") / (args.source.name + ".ast.json"))
     source_text = ""
+    warnings = []
+    def report_warnings():
+        if not warnings:
+            return
+        if args.diagnostic_format == "json":
+            print(json.dumps({"diagnostics": [w.to_dict() for w in warnings]}, ensure_ascii=False),
+                  file=sys.stderr)
+        else:
+            for warning in warnings:
+                print(warning.render(), file=sys.stderr)
     try:
         if output is not None and output.resolve() == args.source.resolve():
             print("输出路径不能覆盖输入源码。", file=sys.stderr)
@@ -52,30 +65,37 @@ def main(argv: list[str] | None = None) -> int:
             if args.emit_c:
                 if args.output == "-":
                     source_text = args.source.read_bytes().decode("utf-8")
-                    sys.stdout.write(lower_to_c(source_text, str(args.source), args.check_borrows))
+                    sys.stdout.write(lower_to_c(source_text, str(args.source), args.check_borrows, warnings=warnings))
                 else:
-                    emit_c(args.source, output, args.check_borrows)
+                    emit_c(args.source, output, args.check_borrows, warnings=warnings)
                     print(f"C 已输出：{output}")
             else:
-                build_executable(args.source, output, args.check_borrows, args.cc)
+                build_executable(args.source, output, args.check_borrows, args.cc, warnings=warnings)
                 if args.run:
+                    report_warnings()
                     return subprocess.call([str(output.resolve())])
                 print(f"可执行程序已输出：{output}")
+            report_warnings()
             return 0
         # bytes.decode 不把 CRLF 改为 LF，保证 AST offset 与文件原文一致。
         source_text = args.source.read_bytes().decode("utf-8")
         tree = parse_source(source_text, str(args.source))
         if args.check:
             from .semantic import Checker
-            diagnostics = Checker(Source(source_text, str(args.source)), tree, args.check_borrows).check()
+            checker = Checker(Source(source_text, str(args.source)), tree, args.check_borrows)
+            diagnostics = checker.check()
+            warnings = checker.warnings
             if args.diagnostic_format == "json":
-                print(json.dumps({"diagnostics": [d.to_dict() for d in diagnostics]}, ensure_ascii=False),
-                      file=sys.stderr if diagnostics else sys.stdout)
+                print(json.dumps({"diagnostics": [d.to_dict() for d in [*diagnostics, *warnings]],
+                                  "inferred_types": list(checker.inferred_types.values())}, ensure_ascii=False),
+                      file=sys.stderr if diagnostics or warnings else sys.stdout)
             elif diagnostics:
                 for diagnostic in diagnostics:
                     print(diagnostic.render(), file=sys.stderr)
             else:
                 print(f"语义检查通过：{args.source}")
+            if args.diagnostic_format != "json":
+                report_warnings()
             return 1 if diagnostics else 0
         payload = document(Source(source_text, str(args.source)), tree)
         rendered = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"

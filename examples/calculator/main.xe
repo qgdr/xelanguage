@@ -1,0 +1,327 @@
+//! Xe Calculator：一个完整的、小型表达式解释器。
+//!
+//! 处理流程：字符 -> Token -> 按优先级解析 -> 有检查的整数结果。
+//! 不保存 source 的内部指针；扫描器只保存位置，source 由调用者显式传入。
+//! 示例暂为单文件，避免假装尚未实现的模块加载已经可用。
+
+// 这是计算器的产品限制，不是 Xe 的 i64 限制。
+// 较小的范围让每一次运算都能先检查，再计算，而不会触发机器整数溢出。
+const LIMIT: i64 = 1_000_000_000_000;
+const MAX_DEPTH: usize = 64;
+
+struct ParseError {
+    position: usize,
+    message: str,
+}
+// 复制错误只复制位置与静态文本视图，不创建第二份资源。
+impl Copy for ParseError;
+
+fn error_at(position: usize, message: str) -> ParseError {
+    ParseError { .position = position; .message = message; }
+}
+
+enum Token {
+    End,
+    Number[i64],
+    Name[usize, usize],
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LeftParen,
+    RightParen,
+}
+
+// 所有负载均可复制：解析器可以观察当前 Token，而不消耗扫描状态。
+impl Copy for Token;
+
+struct Lexer {
+    offset: usize,
+    start: usize,
+}
+// 扫描器只有两个位置下标；复制状态必须由 API 明确允许。
+impl Copy for Lexer;
+
+fn is_space(byte: u8) -> bool {
+    byte == b' ' or byte == b'\t' or byte == b'\n' or byte == b'\r'
+}
+
+fn is_digit(byte: u8) -> bool { b'0' <= byte <= b'9' }
+
+fn is_letter(byte: u8) -> bool {
+    b'a' <= byte <= b'z' or b'A' <= byte <= b'Z' or byte == b'_'
+}
+
+impl Lexer {
+    fn next(self: Self@[mut], source: str) -> Token?[ParseError] {
+        // and 短路：到达结尾后不会继续读取 byte_at。
+        while self.offset < source.len() and is_space(source.byte_at(self.offset)) {
+            self.offset = self.offset + 1;
+        }
+        self.start = self.offset;
+        if self.offset == source.len() { return Token::End; }
+
+        let first: u8 = source.byte_at(self.offset);
+        if is_digit(first) {
+            let[mut] number: i64 = 0;
+            while self.offset < source.len() and is_digit(source.byte_at(self.offset)) {
+                let digit: i64 = (source.byte_at(self.offset) as i64) - 48;
+                // 先检查，再乘；不能先溢出，然后试图检查结果。
+                if number > (LIMIT - digit) / 10 {
+                    return Maybe::No[error_at(self.start, "integer exceeds calculator limit")];
+                }
+                number = number * 10 + digit;
+                self.offset = self.offset + 1;
+            }
+            return Token::Number[number];
+        }
+
+        if is_letter(first) {
+            while self.offset < source.len() {
+                let byte = source.byte_at(self.offset);
+                if not (is_letter(byte) or is_digit(byte)) { break; }
+                self.offset = self.offset + 1;
+            }
+            // 名称只保存来源位置，不需要分配字符串或猜测借用区域。
+            return Token::Name[self.start, self.offset];
+        }
+
+        self.offset = self.offset + 1;
+        first ? {
+            b'+' :> _ -> Token::Plus,
+            b'-' :> _ -> Token::Minus,
+            b'*' :> _ -> Token::Star,
+            b'/' :> _ -> Token::Slash,
+            b'(' :> _ -> Token::LeftParen,
+            b')' :> _ -> Token::RightParen,
+            _ :> _ -> Maybe::No[error_at(self.start, "unexpected character")],
+        }
+    }
+}
+
+fn name_equals(source: str, start: usize, end: usize, expected: str) -> bool {
+    if end - start != expected.len() { return false; }
+    let[mut] index: usize = 0;
+    while index < expected.len() {
+        if source.byte_at(start + index) != expected.byte_at(index) { return false; }
+        index = index + 1;
+    }
+    true
+}
+
+fn lookup_name(source: str, start: usize, end: usize) -> i64?[ParseError] {
+    if name_equals(source, start, end, "answer") { return 42; }
+    if name_equals(source, start, end, "year") { return 2026; }
+    Maybe::No[error_at(start, "unknown constant")]
+}
+
+fn within_limit(value: i64, position: usize) -> i64?[ParseError] {
+    if value < -LIMIT or value > LIMIT {
+        Maybe::No[error_at(position, "arithmetic result exceeds calculator limit")]
+    } else {
+        value
+    }
+}
+
+fn multiply(left: i64, right: i64, position: usize) -> i64?[ParseError] {
+    let magnitude_left = if left < 0 { -left } else { left };
+    let magnitude_right = if right < 0 { -right } else { right };
+    if magnitude_right != 0 and magnitude_left > LIMIT / magnitude_right {
+        return Maybe::No[error_at(position, "arithmetic result exceeds calculator limit")];
+    }
+    left * right
+}
+
+struct Parser {
+    lexer: Lexer,
+    current: Token,
+    depth: usize,
+}
+// Parser 的所有字段都已声明 Copy；这里明确选择允许复制解析状态。
+impl Copy for Parser;
+
+impl Parser {
+    fn new(source: str) -> Self?[ParseError] {
+        let[mut] lexer = Lexer { .offset = 0; .start = 0; };
+        let first: Token = lexer.next(source)?[return];
+        Parser { .lexer = lexer; .current = first; .depth = 0; }
+    }
+
+    fn advance(self: Self@[mut], source: str) -> Unit?[ParseError] {
+        self.current = self.lexer.next(source)?[return];
+        unit
+    }
+
+    // primary := integer | name | '(' sum ')'
+    fn primary(self: Self@[mut], source: str) -> i64?[ParseError] {
+        self.current ? {
+            Token::Number :> value: i64 -> {
+                self.advance(source)?[return];
+                value
+            },
+            Token::Name :> [start: usize, end: usize] -> {
+                self.advance(source)?[return];
+                lookup_name(source, start, end)?[return]
+            },
+            Token::LeftParen :> _ -> {
+                if self.depth >= MAX_DEPTH {
+                    return Maybe::No[error_at(self.lexer.start, "expression nesting is too deep")];
+                }
+                self.depth = self.depth + 1;
+                self.advance(source)?[return];
+                let value: i64 = self.sum(source)?[return];
+                let closed: bool = self.current ? {
+                    Token::RightParen :> _ -> true,
+                    _ :> _ -> false,
+                };
+                if not closed {
+                    return Maybe::No[error_at(self.lexer.start, "expected closing parenthesis")];
+                }
+                self.advance(source)?[return];
+                self.depth = self.depth - 1;
+                value
+            },
+            _ :> _ -> Maybe::No[error_at(self.lexer.start, "expected number, name or parenthesis")],
+        }
+    }
+
+    // unary := ('+' | '-') unary | primary
+    fn unary(self: Self@[mut], source: str) -> i64?[ParseError] {
+        self.current ? {
+            Token::Minus :> _ -> {
+                if self.depth >= MAX_DEPTH {
+                    return Maybe::No[error_at(self.lexer.start, "expression nesting is too deep")];
+                }
+                self.depth = self.depth + 1;
+                self.advance(source)?[return];
+                let value = self.unary(source)?[return];
+                self.depth = self.depth - 1;
+                -value
+            },
+            Token::Plus :> _ -> {
+                if self.depth >= MAX_DEPTH {
+                    return Maybe::No[error_at(self.lexer.start, "expression nesting is too deep")];
+                }
+                self.depth = self.depth + 1;
+                self.advance(source)?[return];
+                let value = self.unary(source)?[return];
+                self.depth = self.depth - 1;
+                value
+            },
+            _ :> _ -> self.primary(source)?[return],
+        }
+    }
+
+    // product := unary (('*' | '/') unary)*
+    fn product(self: Self@[mut], source: str) -> i64?[ParseError] {
+        let[mut] left: i64 = self.unary(source)?[return];
+        while true {
+            let position = self.lexer.start;
+            self.current ? {
+                Token::Star :> _ -> {
+                    self.advance(source)?[return];
+                    let right: i64 = self.unary(source)?[return];
+                    left = multiply(left, right, position)?[return];
+                },
+                Token::Slash :> _ -> {
+                    self.advance(source)?[return];
+                    let right: i64 = self.unary(source)?[return];
+                    if right == 0 {
+                        return Maybe::No[error_at(position, "division by zero")];
+                    }
+                    left = left / right;
+                },
+                _ :> _ -> { break; },
+            };
+        }
+        left
+    }
+
+    // sum := product (('+' | '-') product)*
+    // 先解析 product，所以 1 + 2 * 3 自然得到 7，无需额外的优先级魔法。
+    fn sum(self: Self@[mut], source: str) -> i64?[ParseError] {
+        let[mut] left: i64 = self.product(source)?[return];
+        while true {
+            let position = self.lexer.start;
+            self.current ? {
+                Token::Plus :> _ -> {
+                    self.advance(source)?[return];
+                    let right: i64 = self.product(source)?[return];
+                    left = within_limit(left + right, position)?[return];
+                },
+                Token::Minus :> _ -> {
+                    self.advance(source)?[return];
+                    let right: i64 = self.product(source)?[return];
+                    left = within_limit(left - right, position)?[return];
+                },
+                _ :> _ -> { break; },
+            };
+        }
+        left
+    }
+}
+
+fn evaluate(source: str) -> i64?[ParseError] {
+    let[mut] parser: Parser = Parser::new(source)?[return];
+    let value: i64 = parser.sum(source)?[return];
+    let finished: bool = parser.current ? {
+        Token::End :> _ -> true,
+        _ :> _ -> false,
+    };
+    if not finished {
+        return Maybe::No[error_at(parser.lexer.start, "unexpected token after expression")];
+    }
+    value
+}
+
+fn show(source: str) {
+    evaluate(source)?
+        1> value: i64 -> println("{} = {}", source, value)
+        2> error: ParseError -> println("{} -> error at byte {}: {}", source, error.position, error.message);
+}
+
+// 文件拥有者和文本拥有者都有清晰作用域，函数退出时自动关闭/回收。
+// source 与 line 只借用 text；扫描器保存下标，不保存可能悬空的内部地址。
+fn run_file(path: str) -> Unit?[io::Error] {
+    let file: File << File::open(path)?[return];
+    let text: String << file.read_to_string()?[return];
+    let source: str = text.as_str();
+    let[mut] start: usize = 0;
+    let[mut] index: usize = 0;
+    while index < source.len() {
+        if source.byte_at(index) == b'\n' {
+            // 边界来自 UTF-8 换行字节，切片失败说明实现逻辑有错，故显式终止。
+            let line: str = source.slice_bytes(start..index)?[panic];
+            if line.len() > 0 { show(line); }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    if start < source.len() {
+        let line: str = source.slice_bytes(start..source.len())?[panic];
+        show(line);
+    }
+}
+
+fn main() {
+    println("Xe calculator: arithmetic, names, precedence and diagnostics");
+    show("1 + 2 * 3");
+    show("(1 + 2) * 3");
+    show("20 / 3");
+    show("20 - 5 - 3");
+    show("-2 * (3 + 4)");
+    show("answer + year");
+    show(" 12 + 30 ");
+    show("1 / 0");
+    show("1 + )");
+    show("(1 + 2");
+    show("unknown + 1");
+    show("1 @ 2");
+    show("1 2");
+    show("1000000000000 * 2");
+    show("");
+    println("Expressions loaded from examples/calculator/input.calc:");
+    run_file("examples/calculator/input.calc")?
+        1> _ -> {}
+        2> error: io::Error -> eprintln("cannot read expression file: {}", error);
+}

@@ -1,0 +1,36 @@
+// 嵌套枚举拥有堆字符串；只清理当前变体，忽略的资源也必须清理。
+enum Inner { Text[String], Empty, }
+enum Outer { Pair[Inner, String], Empty, }
+struct Holder { value: Outer, }
+
+fn emit(inner: Inner) {
+    inner ? {
+        Inner::Text :> text: String -> { println("{}", text); },
+        Inner::Empty :> _ -> {},
+    };
+}
+
+fn consume(value: Outer) {
+    value ? {
+        Outer::Pair :> [inner: Inner, text: String] -> {
+            inner |> emit;
+            println("{}", text);
+        },
+        Outer::Empty :> _ -> {},
+    };
+}
+
+fn main() {
+    let holder << Holder {
+        .value << Outer::Pair[Inner::Text[String::from("left")], String::from("right")];
+    };
+    holder.value ? { _ :> consume, };
+
+    // 内层和外层的忽略绑定各自接收并清理所有活动载荷。
+    let ignored << Outer::Pair[Inner::Text[String::from("unused")], String::from("unused")];
+    ignored ? { Outer::Pair :> _ -> {}, Outer::Empty :> _ -> {}, };
+
+    // 留到 block 末尾自动释放：没有执行匹配也不会泄漏。
+    let remaining << Outer::Pair[Inner::Text[String::from("kept")], String::from("kept")];
+    println("finished");
+}

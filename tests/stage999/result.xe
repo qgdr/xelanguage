@@ -27,3 +27,14 @@ fn file_size_or_zero(path: str) -> usize {
             0
         }
 }
+
+// 从仓库根运行时读取 README；审核在临时目录运行时验证失败恢复。
+// 两种情况都能正常退出，文件/字符串的所有权在相应分支内回收。
+fn main() {
+    let path: str = "README.md";
+    print_file_size(path);
+    println("size or fallback: {}", file_size_or_zero(path));
+    read_file(path)?
+        1> text: String -> println("read {} bytes", text.len())
+        2> failed;
+}

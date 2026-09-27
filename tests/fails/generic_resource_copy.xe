@@ -1,0 +1,10 @@
+// 每个具体实例重新检查；T 为 String 时不能用 = 偷偷复制资源。
+fn[T] duplicate(value: T) -> T {
+    let copied: T = value; // XE-OWN-0001，诊断提示 String 实例和首次使用位置。
+    copied
+}
+
+fn main() {
+    let text << duplicate(String::from("hello"));
+    println("{}", text@);
+}

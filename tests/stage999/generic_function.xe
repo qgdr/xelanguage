@@ -1,7 +1,7 @@
 // 具名函数：fn 后的附件是泛型声明。
 fn[T] identity(value: T) -> T { value }
 
-fn[T: Copy] duplicate(value: T) -> (T, T) { (value, value) }
+fn[T: Copy] duplicate(value: T) -> tuple[T, T] { tuple[value, value] }
 
 // 闭包可使用外层 T；它没有声明独立泛型。
 fn[T: Copy] apply_identity(value: T) -> T {

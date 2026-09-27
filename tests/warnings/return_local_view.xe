@@ -1,0 +1,8 @@
+// XE-PTR-0001：视图复制的是地址和长度，不延长底层 String 的生命周期。
+// 不执行返回视图的读取，只验收 warning、unsafe 传播和编译成功。
+fn invalid_view() -> str {
+    let owner: String << String::from("hello");
+    owner.as_str()
+}
+
+fn main() { let view: str = invalid_view(); }

@@ -1,0 +1,6 @@
+// 解包不提供额外的资源所有权：普通指针仍然不能交出它指向的 String。
+fn inspect(pointer: tuple[String, i32]@) {
+    let tuple[text, number] << pointer#; // XE-MOVE-0002
+}
+
+fn main() {}

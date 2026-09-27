@@ -1,0 +1,19 @@
+// 用户结构体显式 Copy；普通指针和视图描述符都使用 @。
+struct Point { x: i64, y: i64, }
+impl Copy for Point;
+
+fn main() {
+    let point = Point { .x = 10; .y = 20; };
+    let copied = point;
+    let pair: tuple[i64, i64] = tuple[point.x, copied.y];
+    let singleton: tuple[f32] = tuple[-1.5];
+
+    let text: str = "hello";
+    let descriptor: str@[unsafe] = text@; // 显式风险注记，不改变指针布局或写权限。
+    let byte: u8@ = descriptor.data();    // 字节与描述符的地址不是同一含义。
+    let small: i32 = 3;
+    let wide: i64 = small as i64;
+
+    println("{} {} {} {} {}", pair.0, pair.1, singleton.0, descriptor, wide);
+    println("{}", byte#); // UTF-8 首字节 104。
+}

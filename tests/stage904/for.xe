@@ -13,7 +13,7 @@ fn main() {
         println("the value address is: {:p}", value);
     }
 
-    var mutable_values = [1, 2, 3];
+    let[mut] mutable_values = [1, 2, 3];
     for value: i32@[mut] in mutable_values.iter_mut() {
         value# = value# * 2;
     }

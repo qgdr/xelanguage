@@ -1,3 +1,4 @@
 struct Counter { count: i32, }
+impl Copy for Counter;
 impl Counter { fn add(self: Self@[mut], n: i32) { self.count = self.count + n; } }
-fn main() { let counter << Counter { .count = 0; }; counter.add(1); }
+fn main() { let counter = Counter { .count = 0; }; counter.add(1); }

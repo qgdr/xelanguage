@@ -17,5 +17,5 @@ fn main() {
     let copied_direction = direction;
     let trace << Trace { .label = second.x; };
     println("{} {}", first.x, second.y);
-    // make run ... --check-borrows 对应的后端会实际执行 drop，最后输出 drop 1。
+    // make run ... --check-safety 对应的后端会实际执行 drop，最后输出 drop 1。
 }

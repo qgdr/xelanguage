@@ -2,6 +2,7 @@ struct Person{
     age : i32,
     name : str
 }
+impl Copy for Person;
 
 fn main()
 {

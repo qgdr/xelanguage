@@ -16,7 +16,7 @@ impl Message {
 }
 
 fn main() {
-    var counter = Counter::new(10);
+    let[mut] counter = Counter::new(10);
     counter.add(2);
     let pointer = counter@;
     println("{} {}", counter.get(), pointer.get());

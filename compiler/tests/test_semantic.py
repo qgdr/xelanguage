@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.cli import main
-from compiler.xe_ast.semantic import check_source
+from compiler.xe_ast.semantic import Checker, check_source
+from compiler.xe_ast.source import Source
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -17,6 +18,14 @@ FAILURES = {
     "struct_duplicate_field": "XE-INIT-0002",
     "struct_field_type": "XE-TYPE-0001",
     "struct_resource_copy": "XE-OWN-0001",
+    "struct_copy_not_declared": "XE-OWN-0001",
+    "generic_resource_copy": "XE-OWN-0001",
+    "generic_unresolved_enum": "XE-GENERIC-0001",
+    "pointer_weakened_write": "XE-MUT-0001",
+    "type_alias_cycle": "XE-TYPE-0007",
+    "type_alias_resource_copy": "XE-OWN-0001",
+    "tuple_unpack_borrow_resource": "XE-MOVE-0002",
+    "tuple_unpack_size": "XE-TYPE-0001",
     "method_readonly_receiver": "XE-BORROW-0004",
     "method_owned_receiver_moved": "XE-MOVE-0001",
     "method_argument_type": "XE-TYPE-0001",
@@ -26,7 +35,6 @@ FAILURES = {
     "trait_drop_signature": "XE-OWN-0002",
     "trait_copy_method": "XE-OWN-0001",
     "String": "XE-MOVE-0001",
-    "borrow_alias": "XE-BORROW-0002",
     "borrow_match_custom_drop": "XE-OWN-0002",
     "borrow_match_move": "XE-MOVE-0002",
     "borrow_move_resource": "XE-MOVE-0002",
@@ -44,7 +52,7 @@ FAILURES = {
     "none_error_result": "XE-RESULT-0001",
     "pointer_owned_match": "XE-MOVE-0002",
     "result_unhandled": "XE-PARSE-0001",
-    "str_pointer": "XE-TYPE-0003",
+    "str_pointer": "XE-MUT-0001",
     "semantic_unknown_name": "XE-NAME-0001",
     "semantic_argument_type": "XE-TYPE-0001",
     "semantic_argument_count": "XE-CALL-0001",
@@ -52,12 +60,13 @@ FAILURES = {
     "semantic_immutable_assignment": "XE-MUT-0001",
     "semantic_non_exhaustive": "XE-MATCH-0003",
     "semantic_branch_move": "XE-MOVE-0001",
-    "semantic_return_local_borrow": "XE-BORROW-0003",
     "semantic_readonly_pointer": "XE-MUT-0001",
     "semantic_format_count": "XE-FORMAT-0001",
 }
 
 SYNTAX_FAILURES = {
+    "empty_binding_modifier": ("XE-PARSE-0001", 1, 17, "声明附件目前只允许 [mut]"),
+    "unknown_binding_modifier": ("XE-PARSE-0001", 1, 17, "声明附件目前只允许 [mut]"),
     "invalid_character": ("XE-LEX-0001", 1, 25, "无法识别的字符"),
     "missing_argument_comma": ("XE-PARSE-0001", 1, 32, "需要 )"),
     "missing_channel": ("XE-PARSE-0001", 2, 37, "必须处理 1> 和 2>"),
@@ -79,10 +88,23 @@ class SemanticTests(unittest.TestCase):
         self.assertIn("example.xe:", errors[0].render())
         return errors
 
+    def pointer_check(self, source, filename="example.xe"):
+        """警告不是编译失败；分别检查错误和风险，不能只断言“通过”。"""
+        checker = Checker(Source(source, filename), parse_source(source, filename))
+        errors = checker.check()
+        self.assertEqual(errors, [], "\n".join(error.render() for error in errors))
+        return checker
+
+    def assert_pointer_warning(self, source, code):
+        checker = self.pointer_check(source)
+        self.assertIn(code, [warning.code for warning in checker.warnings])
+        self.assertTrue(all(warning.severity == "warning" for warning in checker.warnings))
+        return checker
+
     def test_all_modern_positive_examples(self):
         for path in sorted((ROOT / "tests/stage999").glob("*.xe")):
             with self.subTest(path=path.name):
-                errors = check_source(path.read_text(), str(path), path.stem != "pointer_unchecked")
+                errors = check_source(path.read_text(), str(path))
                 self.assertEqual(errors, [], "\n".join(e.render() for e in errors))
 
     def test_all_failure_examples_have_intended_error(self):
@@ -97,6 +119,21 @@ class SemanticTests(unittest.TestCase):
                 errors = check_source(text, str(path), True)
                 self.assertTrue(errors, path)
                 self.assertEqual(errors[0].code, code, errors[0].render())
+
+    def test_pointer_alias_fixture_is_legal_without_warning(self):
+        path = ROOT / "tests/stage999/pointer_alias.xe"
+        checker = self.pointer_check(path.read_text(), str(path))
+        self.assertEqual(checker.warnings, [])
+
+    def test_pointer_warning_fixtures_compile_but_report_risk(self):
+        expectations = {"return_local_pointer": "XE-PTR-0001",
+                        "return_local_view": "XE-PTR-0001",
+                        "owner_moved_pointer": "XE-PTR-0002"}
+        for name, code in expectations.items():
+            path = ROOT / "tests/warnings" / (name + ".xe")
+            with self.subTest(path=name):
+                checker = self.pointer_check(path.read_text(), str(path))
+                self.assertIn(code, [warning.code for warning in checker.warnings])
 
     def test_new_syntax_failure_files(self):
         paths = sorted((ROOT / "tests/syntax_fails").glob("*.xe"))
@@ -119,9 +156,9 @@ class SemanticTests(unittest.TestCase):
             source = (ROOT / "tests/fails" / (name + ".xe")).read_text()
             self.assert_error(source, "XE-MOVE-0002", checked=False)
 
-    def test_readonly_check_is_optional(self):
+    def test_readonly_check_is_always_enabled(self):
         source = "fn write(p: i32@) { p# = 1; }"
-        self.assertEqual(check_source(source), [])
+        self.assertEqual(check_source(source)[0].code, "XE-MUT-0001")
         self.assert_error(source, "XE-MUT-0001")
 
     def test_multiple_functions_report_independent_errors(self):
@@ -146,23 +183,24 @@ class SemanticTests(unittest.TestCase):
         self.assert_error('fn f(a: String, b: String) {} fn main() { let x << String::from("x"); f(x, x); }',
                           "XE-MOVE-0001")
 
-    def test_argument_borrow_conflict(self):
-        self.assert_error("fn f(a: i32@[mut], b: i32@) {} fn main() { var x = 1; f(x@[mut], x@); }",
-                          "XE-BORROW-0002")
+    def test_pointer_arguments_can_alias_without_warning(self):
+        checker = self.pointer_check("fn f(a: i32@[mut], b: i32@) {} fn main() { let[mut] x = 1; f(x@[mut], x@); }")
+        self.assertEqual(checker.warnings, [])
 
-    def test_receiver_borrow_lasts_through_argument_evaluation(self):
+    def test_pointer_receiver_and_argument_can_alias(self):
         source = '''struct S { n: i32, }
+        impl Copy for S;
         impl S { fn update(self: Self@[mut], x: Self@) {} }
-        fn f() { var s << S { .n = 0; }; s.update(s@); }'''
-        self.assert_error(source, "XE-BORROW-0002")
+        fn f() { let[mut] s = S { .n = 0; }; s.update(s@); }'''
+        self.assertEqual(self.pointer_check(source).warnings, [])
 
     def test_return_local_view(self):
-        self.assert_error('fn f() -> str { let x << String::from("x"); x.as_str() }',
-                          "XE-BORROW-0003")
+        self.assert_pointer_warning('fn f() -> str { let x << String::from("x"); x.as_str() }',
+                                    "XE-PTR-0001")
 
-    def test_last_use_ends_shared_loan(self):
-        source = 'fn main() { var x = 1; let p = x@; println("{}", p#); let q << x@[mut]; q# = 2; }'
-        self.assertEqual(check_source(source, check_borrows=True), [])
+    def test_shared_and_writable_pointer_do_not_need_loan_boundaries(self):
+        source = 'fn main() { let[mut] x = 1; let p = x@; let q = x@[mut]; q# = 2; println("{}", p#); }'
+        self.assertEqual(self.pointer_check(source).warnings, [])
 
     def test_invalid_return_and_condition(self):
         self.assert_error('fn f() -> i32 { "hello" }', "XE-TYPE-0001")
@@ -195,18 +233,18 @@ class SemanticTests(unittest.TestCase):
     def test_unsupported_features_are_not_silent_success(self):
         self.assert_error("use other; fn main() {}", "XE-SEM-0001")
 
-    def test_block_assignment_cannot_leak_local_pointer(self):
-        self.assert_error('fn f() { var p: i32@; { let x = 1; p = x@; }; println("{}", p#); }',
-                          "XE-BORROW-0003")
+    def test_block_assignment_reports_pointer_to_expired_storage(self):
+        self.assert_pointer_warning('fn f() { let[mut] p: i32@; { let x = 1; p = x@; }; println("{}", p#); }',
+                                    "XE-PTR-0001")
 
     def test_temporary_resource_view(self):
-        self.assert_error('fn f() -> str { String::from("x").as_str() }', "XE-BORROW-0003")
+        self.assert_pointer_warning('fn f() -> str { String::from("x").as_str() }', "XE-PTR-0003")
 
-    def test_owned_parameter_cannot_return_its_field_view(self):
-        self.assert_error('struct S { text: String, } fn f(s: S) -> str { s.text.as_str() }',
-                          "XE-BORROW-0003")
-        self.assertEqual(check_source("fn f(x: i32@) -> i32@ { x }", check_borrows=True), [])
-        self.assert_error("fn f(x: i32) -> i32@ { x@ }", "XE-BORROW-0003")
+    def test_returned_pointer_distinguishes_external_and_owned_parameter_storage(self):
+        self.assert_pointer_warning('struct S { text: String, } fn f(s: S) -> str { s.text.as_str() }',
+                                    "XE-PTR-0001")
+        self.assertEqual(self.pointer_check("fn f(x: i32@) -> i32@ { x }").warnings, [])
+        self.assert_pointer_warning("fn f(x: i32) -> i32@ { x@ }", "XE-PTR-0001")
 
     def test_signed_minimum_literal(self):
         self.assertEqual(check_source("fn f() { let x: i8 = -128; }"), [])
@@ -280,8 +318,15 @@ class CheckCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pointer.xe"
             path.write_text("fn f(p: i32@) { p# = 1; }")
-            self.assertEqual(self.run_cli([str(path), "--check"])[0], 0)
+            self.assertEqual(self.run_cli([str(path), "--check"])[0], 1)
             self.assertEqual(self.run_cli([str(path), "--check", "--check-borrows"])[0], 1)
             status, out, err = self.run_cli([str(path), "--check", "--diagnostic-format", "json"])
+            self.assertEqual(status, 1)
+            self.assertEqual(json.loads(err)["diagnostics"][0]["code"], "XE-MUT-0001")
+            path.write_text("fn f(p: i32@[mut]) { p# = 1; }")
+            status, out, err = self.run_cli([str(path), "--check", "--diagnostic-format", "json"])
             self.assertEqual(status, 0, err)
-            self.assertEqual(json.loads(out), {"diagnostics": []})
+            result = json.loads(out)
+            self.assertEqual(result["diagnostics"], [])
+            self.assertTrue(result["inferred_types"])
+            self.assertFalse(any(entry["unsafe"] for entry in result["inferred_types"]))

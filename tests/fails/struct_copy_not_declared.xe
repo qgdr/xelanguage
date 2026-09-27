@@ -1,0 +1,3 @@
+// XE-OWN-0001：用户结构体即使只有整数，也必须显式实现 Copy 才能用 =。
+struct Point { x: i32, }
+fn main() { let point = Point { .x = 1; }; }

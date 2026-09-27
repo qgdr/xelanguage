@@ -9,7 +9,7 @@ from .source import Diagnostic, Source
 
 KEYWORDS = set("""let var const fn return if else while for in break continue
 struct enum trait impl where implements pub use as crate self super region extern unsafe
-true false unit None not and or""".split())
+true false unit None not and or tuple type""".split())
 SYMBOLS = sorted(("::", ":>", "|>", "<<", ">>", "..=", "..", "->",
                   "==", "!=", "<=", ">=", "(", ")", "[", "]", "{", "}",
                   ";", ",", ".", ":", "@", "#", "?", "+", "-", "*", "/",

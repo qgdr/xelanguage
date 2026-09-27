@@ -155,14 +155,14 @@ class DeclarationTests(unittest.TestCase):
 
     def test_imports_and_extern(self):
         tree = parse_source('use crate::syntax::{Token, Node as AstNode}; '
-                            'extern "C" { fn release(pointer: RawPtr[u8]); }')
+                            'extern "C" { fn release(pointer: u8@[unsafe]); }')
         self.assertEqual(tree["items"][0]["names"][1]["alias"], "AstNode")
         self.assertEqual(tree["items"][1]["kind"], "Extern")
 
     def test_traits_impl_and_generics(self):
         tree = parse_source("""
         trait Display { fn show(self: Self@); }
-        struct Node[T] { value: T, }
+        struct[T] Node { value: T, }
         impl[T] Display for Node[T] where T implements Display {
             fn show(self: Self@) {}
         }
@@ -217,6 +217,14 @@ class DeclarationTests(unittest.TestCase):
         node = tail("token ? { Token::Integer[0] | Token::Integer[1] :> _ -> 0, "
                     "_ :> _ -> 1, }")
         self.assertEqual(node["arms"][0]["selector"]["kind"], "OrSelector")
+
+    def test_nested_selector_requires_explicit_second_match(self):
+        with self.assertRaises(Diagnostic) as caught:
+            tail("outer ? { Outer::Wrap[Inner::Number[0]] :> _ -> 0, }")
+        self.assertIn("一层", caught.exception.message)
+        node = tail("outer ? { Outer::Wrap :> inner -> inner ? { "
+                    "Inner::Number :> number -> number, Inner::End :> _ -> 0, }, }")
+        self.assertEqual(node["arms"][0]["handler"]["body"]["kind"], "Branch")
 
     def test_all_target_examples(self):
         paths = sorted((ROOT / "tests/stage999").glob("*.xe"))

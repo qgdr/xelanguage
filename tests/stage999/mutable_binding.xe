@@ -1,0 +1,22 @@
+// 参数只描述输入；局部重新赋值通过函数体内的可变绑定表达。
+fn advance(index: i32) -> i32 {
+    let[mut] index = index;
+    index = index + 1;
+    index
+}
+
+fn main() {
+    let start: i32 = 1;
+    let[mut] count: i32 = advance(start);
+    count = count + 1;
+    println("{} {}", start, count); // 1 3
+
+    // 声明附件和指针附件彼此独立；写权限始终验证，旧旗标仅为兼容。
+    let pointer: i32@[mut] = count@[mut];
+    pointer# = 9;
+    println("{}", count); // 普通指针不独占 count，可以直接读取拥有者。
+
+    let[mut] text: String << String::from("hello");
+    text.push_str(", world");
+    println("{}", text);
+}

@@ -3,14 +3,15 @@ fn increment(value: i32@[mut]) {
 }
 
 fn main() {
-    var value: i32 = 41;
+    let[mut] value: i32 = 41;
 
     let read: i32@ = value@;
     println("value = {}, address = {:p}", read, read);
-    // read 的最后一次使用已经结束，共享借用在这里结束。
+    // 保留 read 也可以建立可写指针，普通指针不要求独占。
 
-    let write: i32@[mut] << value@[mut];
+    let write: i32@[mut] = value@[mut];
     increment(write);
+    increment(write); // 同一地址可以重复传参。
 
-    println("{}", value); // 42
+    println("{} {}", value, read#); // 43 43
 }

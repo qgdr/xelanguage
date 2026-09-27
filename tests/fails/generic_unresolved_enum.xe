@@ -1,0 +1,9 @@
+enum[T] Event {
+    Value[T],
+    End,
+}
+
+fn main() {
+    // 没有上下文指定 T；需要 Event[i32]::Value[42] 或 Event[i32] 类型注解。
+    let value << Event::Value[42]; // XE-GENERIC-0001
+}

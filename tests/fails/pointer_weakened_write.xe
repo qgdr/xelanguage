@@ -1,0 +1,7 @@
+// 地址可以从可写降为只读，但不能通过新指针恢复写权限。
+fn main() {
+    let[mut] value = 42;
+    let writable: i32@[mut] = value@[mut];
+    let readonly: i32@ = writable;
+    readonly# = 0; // XE-MUT-0001
+}

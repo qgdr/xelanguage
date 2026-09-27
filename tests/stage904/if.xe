@@ -1,5 +1,5 @@
 fn main() {
-    var number = 3;
+    let[mut] number = 3;
 
     if number < 5 {
         println("condition was true");
@@ -7,7 +7,7 @@ fn main() {
         println("condition was false");
     }
 
-    var condition = 1 < number < 5; // true
+    let[mut] condition = 1 < number < 5; // true
     condition = 1 < number < 3;     // false
 
     number = 6;

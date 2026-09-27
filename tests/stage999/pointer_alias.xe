@@ -1,0 +1,12 @@
+fn main() {
+    let[mut] value: i32 = 1;
+    let shared: i32@ = value@;
+
+    // 普通指针可以存在别名；写权限不代表独占。
+    let writable: i32@[mut] = value@[mut];
+    increase(writable);
+    increase(writable); // 复制地址，可重复传参，不需要“再次借用”。
+    println("{}", shared#); // 3
+}
+
+fn increase(pointer: i32@[mut]) { pointer# = pointer# + 1; }

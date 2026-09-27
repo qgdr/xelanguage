@@ -1,0 +1,10 @@
+// XE-PTR-0002：指针没有资源所有权，资源转交后指向旧存储的地址可能失效。
+// 只检查和编译，不运行：风险出现后不应依赖指针所指内容。
+fn consume(text: String) { println("{}", text); }
+
+fn main() {
+    let owner: String << String::from("hello");
+    let pointer: String@ = owner@;
+    consume(owner);
+    let saved: String@ = pointer; // 风险跟着地址传播，saved 推导为 unsafe。
+}

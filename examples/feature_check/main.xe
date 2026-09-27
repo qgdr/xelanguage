@@ -1,0 +1,286 @@
+//! Xe Feature Check：用 Xe 编写的交互式语言功能验收工具。
+//!
+//! check 执行这份程序中的已编译测试，不解析或类型检查其他 Xe 文件。
+//! 每个检查都比较实际结果与预期结果；资源检查还观察析构次数。
+//! 所有命令从标准输入读取，因此可以交互运行，也可以接收管道输入。
+
+type Pair = tuple[i32, bool];
+type handler = fn(i32) -> i32;
+type ReadNumber = i32@;
+type Text = String;
+
+// 一个小的 Copy 类型：复制之后可以单独修改副本，不会移动原对象。
+struct Point { x: i32, y: i32, }
+impl Copy for Point;
+impl Point {
+    fn new(x: i32, y: i32) -> Self { Self { .x = x; .y = y; } }
+    fn total(self: Self@) -> i32 { self.x + self.y }
+    fn shift(self: Self@[mut], amount: i32) { self.x = self.x + amount; }
+}
+
+// 这个类型拥有 String，必须通过 << 转移。外层的 counter 活得更久，
+// Drop 只在资源结束时更新它；不保存任何已结束局部变量的地址。
+struct Tracked { counter: i32@[mut], weight: i32, text: String, }
+impl Drop for Tracked {
+    fn drop(self: Self@[mut]) { self.counter# = self.counter# + self.weight; }
+}
+
+enum Message { Text[String], Number[i32], Empty, }
+enum Input { Line[String], End, Error, }
+
+fn next(value: i32) -> i32 { value + 1 }
+fn twice(value: i32) -> i32 { value * 2 }
+fn[T] identity(value: T) -> T { value }
+fn[T: Copy] duplicate(value: T) -> tuple[T, T] { tuple[value, value] }
+
+// 辅助函数修改计数器，让求值次数和求值顺序可以被结果观察到。
+fn tick(counter: i32@[mut]) -> i32 {
+    counter# = counter# + 1;
+    counter#
+}
+fn flag(counter: i32@[mut]) -> bool { tick(counter); true }
+fn decimal_pair(first: i32, second: i32) -> i32 { first * 10 + second }
+fn read_number(pointer: ReadNumber) -> i32 { pointer# }
+
+fn check_numeric() -> bool {
+    let wide: i64 = 4_000_000_000;
+    let narrow: i8 = -12;
+    let real: f64 = 1.5;
+    wide + 42 == 4_000_000_042 and narrow as i64 == -12
+        and 20 / 3 == 6 and 20 % 3 == 2 and real * 2.0 == 3.0
+}
+
+fn check_comparison_chain() -> bool {
+    let[mut] calls = 0;
+    let ascending = tick(calls@[mut]) < tick(calls@[mut]) < tick(calls@[mut]);
+    let first_count = calls;
+    calls = 0;
+    // 第一项比较失败后，第三次 tick 不应运行。
+    let descending = tick(calls@[mut]) > tick(calls@[mut]) > tick(calls@[mut]);
+    ascending and first_count == 3 and not descending and calls == 2
+}
+
+fn check_short_circuit() -> bool {
+    let[mut] calls = 0;
+    let skipped_and = false and flag(calls@[mut]);
+    let skipped_or = true or flag(calls@[mut]);
+    let executed = true and flag(calls@[mut]);
+    not skipped_and and skipped_or and executed and calls == 1
+}
+
+fn check_evaluation_order() -> bool {
+    let[mut] value = 1;
+    // 第一个实参先保存 1，第二个实参才把 value 改成 2。
+    // C 自身不保证实参求值顺序，Xe 后端需要保留这个语言约定。
+    let result = decimal_pair(value, tick(value@[mut]));
+    result == 12 and value == 2
+}
+
+fn check_struct_and_copy() -> bool {
+    let original = Point::new(20, 21);
+    let[mut] copied = original;
+    copied.shift(1);
+    original.total() == 41 and copied.total() == 42
+}
+
+fn check_resources_and_drop() -> bool {
+    let[mut] drops = 0;
+    let ignored_drops_immediately = {
+        let first << Tracked { .counter = drops@[mut]; .weight = 1;
+            .text << Text::from("kept"); };
+        let tuple[kept, _] << tuple[first,
+            Tracked { .counter = drops@[mut]; .weight = 2;
+                .text << Text::from("ignored"); }];
+        // _ 仍然拥有第二个资源，因此解包时就应该析构它。
+        kept.text.len() == 4 and drops == 2
+    };
+    // kept 离开内部作用域后再析构，counter 应为 2 + 1。
+    ignored_drops_immediately and drops == 3
+}
+
+fn check_generics() -> bool {
+    let tuple[first, second] = duplicate[i32](21);
+    let owned << identity[String](Text::from("generic"));
+    first + second == 42 and identity[bool](true) and owned.len() == 7
+}
+
+fn check_tuples_and_aliases() -> bool {
+    let source: Pair = tuple[42, true];
+    let tuple[number: i32, accepted: bool] = identity[Pair](source);
+    let[mut] tuple[left, right] = tuple[1, 2];
+    tuple[left, right] = tuple[right, left];
+    tuple[3, 4] >> tuple[left, right];
+    let callback: handler = next;
+    number == 42 and accepted and callback(41) == 42 and left == 3 and right == 4
+}
+
+fn check_owning_enum() -> bool {
+    let message << Message::Text[Text::from("owned")];
+    // 未使用 ?[@]，所以 String 负载转移给分支参数并在那里析构。
+    message ? {
+        Message::Text :> text -> text.len() == 5,
+        Message::Number :> _ -> false,
+        Message::Empty :> _ -> false,
+    }
+}
+
+fn check_pointer_enum() -> bool {
+    let[mut] message << Message::Number[1];
+    message ?[@[mut]] {
+        Message::Number :> number: i32@[mut] -> { number# = 42; },
+        Message::Text :> _ -> {},
+        Message::Empty :> _ -> {},
+    };
+    // 只借用负载，原枚举仍然拥有它，可以再次观察。
+    message ?[@] {
+        Message::Number :> number: i32@ -> number# == 42,
+        Message::Text :> _ -> false,
+        Message::Empty :> _ -> false,
+    }
+}
+
+fn checked_byte(value: i64) -> u8?[ConversionError] { u8::try_from(value) }
+fn optional_number(accepted: bool) -> i32? { if accepted { 42 } else { None } }
+fn check_results_and_conversion() -> bool {
+    let maximum = checked_byte(255)?[panic];
+    let overflow_rejected = checked_byte(256)? 1> _ -> false 2> _ -> true;
+    let negative_rejected = checked_byte(-1)? 1> _ -> false 2> _ -> true;
+    let found = optional_number(true)? 1> n -> n 2> _ -> 0;
+    let missing = optional_number(false)? {
+        Maybe::Yes :> _ -> false,
+        Maybe::None :> _ -> true,
+    };
+    maximum == 255 and overflow_rejected and negative_rejected and found == 42 and missing
+}
+
+fn check_arrays_slices_and_loops() -> bool {
+    let source = [1, 2, 3];
+    let[mut] target = [0, 0, 0];
+    let source_slice = source.slice(..);
+    let[mut] target_slice = target.slice_mut(..);
+    target_slice.copy_from(source_slice);
+    target[1] = 5;
+    let[mut] sum = 0;
+    for value: i32@ in target { sum = sum + value#; }
+    let[mut] range_sum = 0;
+    for value in 1..=3 { range_sum = range_sum + value; }
+    let[mut] slice_sum = 0;
+    for value: i32@ in source.slice(1..3) { slice_sum = slice_sum + value#; }
+    sum == 9 and range_sum == 6 and slice_sum == 5 and source[1] == 2
+}
+
+fn check_functions_and_pipeline() -> bool {
+    let callback: handler = twice;
+    let anonymous: handler = fn(value: i32) -> i32 { value + 1 };
+    let result = 20 |> anonymous |> callback;
+    callback(21) == 42 and result == 42 and (if true { next } else { twice })(41) == 42
+}
+
+fn check_string_and_utf8() -> bool {
+    let[mut] owned << Text::from("你好");
+    owned.push_str("abc");
+    let cloned << owned.clone();
+    let view = owned.as_str();
+    let chinese = view.slice_bytes(0..6)?[panic];
+    let split_character_rejected = view.slice_bytes(1..3)? 1> _ -> false 2> _ -> true;
+    // len 是 UTF-8 字节数；两个汉字占 6 字节，abc 占 3 字节。
+    owned.len() == 9 and cloned.as_str() == "你好abc" and chinese == "你好"
+        and split_character_rejected and view.byte_at(6) == b'a'
+}
+
+fn check_pointer_permissions() -> bool {
+    let[mut] value = 41;
+    let writable: i32@[mut] = value@[mut];
+    writable# = writable# + 1;
+    // 可以把可写地址传给只读参数；复制地址不会复制或移动 value。
+    let readonly: ReadNumber = writable;
+    read_number(readonly) == 42 and value == 42
+}
+
+fn check_resource_array() -> bool {
+    let[mut] words << [Text::from("old"), Text::from("kept")];
+    words[0] << Text::from("new");
+    let[mut] total: usize = 0;
+    for word: String@ in words { total = total + word.len(); }
+    // 被替换的 old 立即释放；new/kept 在函数结束时释放。
+    total == 7 and words[0].as_str() == "new" and words[1].as_str() == "kept"
+}
+
+fn report(name: str, passed: bool, failures: i32@[mut]) {
+    if passed { println("PASS {}", name); }
+    else { println("FAIL {}", name); failures# = failures# + 1; }
+}
+
+fn run_checks() -> i32 {
+    let[mut] failures = 0;
+    report("numeric", check_numeric(), failures@[mut]);
+    report("comparison-chain", check_comparison_chain(), failures@[mut]);
+    report("short-circuit", check_short_circuit(), failures@[mut]);
+    report("evaluation-order", check_evaluation_order(), failures@[mut]);
+    report("struct-copy-methods", check_struct_and_copy(), failures@[mut]);
+    report("resource-drop", check_resources_and_drop(), failures@[mut]);
+    report("generics", check_generics(), failures@[mut]);
+    report("tuple-alias", check_tuples_and_aliases(), failures@[mut]);
+    report("enum-owning", check_owning_enum(), failures@[mut]);
+    report("enum-pointer", check_pointer_enum(), failures@[mut]);
+    report("maybe-conversion", check_results_and_conversion(), failures@[mut]);
+    report("array-slice-range", check_arrays_slices_and_loops(), failures@[mut]);
+    report("function-pipeline", check_functions_and_pipeline(), failures@[mut]);
+    report("string-utf8", check_string_and_utf8(), failures@[mut]);
+    report("pointer-permissions", check_pointer_permissions(), failures@[mut]);
+    report("resource-array", check_resource_array(), failures@[mut]);
+    println("summary: {} passed, {} failed", 16 - failures, failures);
+    failures
+}
+
+fn help() {
+    println("commands: help | check | echo | quit");
+    println("echo reads and prints the next line; EOF exits normally.");
+}
+
+// readline 的外层结果处理 IO 错误；内层 optional 区分一行与 EOF。
+// 空字符串是一条有效的空行，不是 EOF。读取出的 String 始终被拥有，
+// 使用完命令或回显文本后由作用域自动释放。
+fn read_input() -> Input {
+    let optional << std::io::readline()? 1> line -> line 2> error -> {
+        eprintln("input error: {}", error@);
+        return Input::Error;
+    };
+    optional ? {
+        Maybe::Yes :> line -> Input::Line[line],
+        Maybe::None :> _ -> Input::End,
+    }
+}
+
+fn main() -> i32 {
+    println("Xe feature check: compiled language capabilities");
+    help();
+    let[mut] status = 0;
+    while true {
+        let command << read_input()? {
+            Input::Line :> line -> line,
+            Input::End :> _ -> { return status; },
+            Input::Error :> _ -> { return 3; },
+        };
+        let view = command.as_str();
+        if view == "" { continue; }
+        if view == "help" { help(); continue; }
+        if view == "check" {
+            if run_checks() != 0 { status = 1; }
+            continue;
+        }
+        if view == "echo" {
+            let text << read_input()? {
+                Input::Line :> line -> line,
+                Input::End :> _ -> { return status; },
+                Input::Error :> _ -> { return 3; },
+            };
+            println("{}", text@);
+            continue;
+        }
+        if view == "quit" { return status; }
+        eprintln("unknown command: {}", command@);
+        return 2;
+    }
+    status
+}

@@ -1,18 +1,19 @@
-"""单文件语义检查：名称、类型、初始化、移动、分支合并和基础借用检查。
+"""单文件语义检查：名称、类型、初始化、所有权和普通指针风险提示。
 
 这是 AST 上的参考检查器，不生成代码。每个函数至多报告一个主错误，继续检查其他函数。
-借用使用保守的最后引用位置分析；它不是完整 Rust 区域求解器。不能证明的复杂规则应报错，
-不能用 Unknown/Any 吞掉错误。标准库接口在 builtin_call/method 中有明确白名单。
+地址来源分析只产生 warning，不把普通指针当作独占借用，也不证明内存安全。
+类型、写权限和资源所有权错误仍然阻止编译。标准库接口有明确白名单。
 """
 from copy import deepcopy
 from dataclasses import dataclass, field
 import string
 from typing import Any
 from .source import Source, Diagnostic
+from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
 from .typesys import (
     Type, NUMERIC, PRIMITIVES, STANDARD, UNIT, NEVER, BOOL, STR, I32, USIZE,
-    INT_LITERAL, UNKNOWN, NONE, STRING, FILE, IO_ERROR,
-    ptr, maybe, callable_type, substitute,
+    INT_LITERAL, UNKNOWN, NONE, STRING, FILE, IO_ERROR, CONVERSION_ERROR,
+    ptr, maybe, callable_type, substitute, has_unsafe, mark_unsafe, merge_unsafe,
 )
 
 Node = dict[str, Any]
@@ -28,6 +29,8 @@ class Value:
     borrowed: bool = False
     access_uid: int | None = None
     literal: Any = None
+    # 对被指向的存储位置的写权限，与指针变量自身是否可重绑无关。
+    writable: bool | None = None
 
 
 @dataclass
@@ -52,6 +55,12 @@ class Signature:
     result: Type
     generics: set[str] = field(default_factory=set)
     self_type: Type | None = None
+    # None 表示尚未分析/外部函数，保守依赖所有借用输入。
+    # 本地函数检查后记录返回结果依赖的参数位置，包含错误路径。
+    borrow_parameters: frozenset[int] | None = None
+    unsafe_result: bool = False
+    type_substitutions: dict[str, Type] = field(default_factory=dict)
+    instance_context: str | None = None
 
 
 def names_used(node: Any) -> dict[str, int]:
@@ -76,9 +85,15 @@ def names_used(node: Any) -> dict[str, int]:
 
 
 class Checker:
-    def __init__(self, source: Source, tree: Node, check_borrows: bool = False):
-        self.source, self.tree, self.check_borrows = source, tree, check_borrows
+    def __init__(self, source: Source, tree: Node, check_borrows: bool = True):
+        # 旧参数仅为调用兼容保留；写权限和所有权始终检查，不再切换借用模式。
+        self.source, self.tree, self.check_borrows = source, tree, True
         self.types: dict[str, Node] = {}
+        # 透明别名单独保存，不能让后端把它们当成新的数据布局。
+        self.aliases: dict[str, Node] = {}
+        self.alias_types: dict[str, Type] = {}
+        self._alias_stack: list[str] = []
+        self.destructure_types: dict[int, Type] = {}
         self.functions: dict[str, Signature] = {}
         self.methods: dict[tuple[str, str], Signature] = {}
         self.constants: dict[str, Value] = {}
@@ -94,10 +109,202 @@ class Checker:
         self.loop_depths: list[int] = []
         self.position = 0
         self.diagnostics: list[Diagnostic] = []
+        self.warnings: list[Diagnostic] = []
+        self.inferred_types: dict[int, dict[str, Any]] = {}
+        self._warning_keys: set[tuple] = set()
+        self._report_warnings = True
+        self.invalid_roots: dict[int, str] = {}
         # 调用参数中的临时借用也须互斥，不能因为没赋给名字就逃过检查。
         self.temporary_loans: list[tuple[int, bool]] = []
         # 输入所携带的外部区域，区别于“参数变量本身”的栈存储。
         self.parameter_roots: set[int] = set()
+        self.return_origins: set[tuple[int, bool]] = set()
+        self.function_unsafe_return = False
+        # 泛型声明是模板，不是可以直接生成机器码的函数。每个具体类型组合
+        # 只复制一次 AST；调用侧表让后端找到这份已经重新检查的具体函数。
+        self.call_targets: dict[int, str] = {}
+        self.generic_instances: dict[tuple, str] = {}
+        self.implementation_constraints: dict[int, list[Node]] = {}
+        self.instance_limit = 256
+        self.type_substitutions: dict[str, Type] = {}
+
+    @staticmethod
+    def has_variable(type_):
+        return type_.name.startswith("$") or any(Checker.has_variable(t) for t in type_.args)
+
+    def type_node(self, type_, span):
+        """把已解析的具体类型放回复制的 AST；原始源码 AST 始终不修改。"""
+        if type_.name == "ptr":
+            modifiers = [{"kind": "Modifier", "span": span, "name": name}
+                         for name in (["mut"] if type_.mutable else []) + (["unsafe"] if type_.unsafe else [])]
+            return {"kind": "PointerType", "span": span,
+                    "target": self.type_node(type_.args[0], span), "modifiers": modifiers}
+        if type_.name == "maybe":
+            error = None if type_.args[1] == NONE else self.type_node(type_.args[1], span)
+            return {"kind": "MaybeType", "span": span,
+                    "value": self.type_node(type_.args[0], span), "error": error}
+        if type_.name == "fn":
+            return {"kind": "FunctionType", "span": span,
+                    "parameters": [self.type_node(t, span) for t in type_.args[:-1]],
+                    "result": self.type_node(type_.args[-1], span)}
+        if type_.name == "tuple":
+            return {"kind": "TupleType", "span": span,
+                    "elements": [self.type_node(t, span) for t in type_.args]}
+        if type_.name.isdigit():
+            return {"kind": "Literal", "span": span, "value": int(type_.name), "literal_kind": "integer"}
+        return {"kind": "NamedType", "span": span,
+                "path": {"kind": "Path", "span": span, "parts": type_.name.split("::")},
+                "arguments": [self.type_node(t, span) for t in type_.args]}
+
+    def expression_type(self, node):
+        """[] 在类型应用位置内使用类型语法，不把 i32@ 当作取变量地址。"""
+        kind, span = node["kind"], node["span"]
+        if kind in {"NamedType", "PointerType", "MaybeType", "TupleType", "FunctionType"}:
+            return self.type_of(node)
+        if kind == "Name":
+            if len(node["path"]["parts"]) == 1:
+                name = node["path"]["parts"][0]
+                if "$" + name in self.type_substitutions:
+                    return self.type_substitutions["$" + name]
+                if name == "Self" and self.self_type is not None:
+                    return self.self_type
+            return self.type_of({"kind": "NamedType", "span": span,
+                                 "path": node["path"], "arguments": []})
+        if kind == "Group":
+            return self.expression_type(node["expression"])
+        if kind == "MaybeTypeAttachment":
+            error = self.type_of(node["error"]) if node.get("error") else NONE
+            return maybe(self.expression_type(node["operand"]), error)
+        if kind == "Borrow":
+            modifiers = {m["name"] for m in node["modifiers"]}
+            if modifiers - {"mut", "unsafe"}:
+                self.fail(node, "类型参数中的指针附件只支持 mut / unsafe")
+            return ptr(self.expression_type(node["operand"]), "mut" in modifiers, "unsafe" in modifiers)
+        if kind == "BracketApply" and node["object"]["kind"] == "Name":
+            return self.type_of({"kind": "NamedType", "span": span, "path": node["object"]["path"],
+                "arguments": [self.type_node(self.expression_type(a), a["span"])
+                              if a["kind"] != "Literal" else a for a in node["arguments"]]})
+        if kind == "Tuple":
+            return Type("tuple", tuple(self.expression_type(n) for n in node["elements"]))
+        if kind == "Literal" and isinstance(node["value"], int) and node["value"] >= 0:
+            return Type(str(node["value"]))
+        self.fail(node, "这里需要具体类型参数（例如 i32、String、i32@ 或 Holder[i32]）",
+                  "XE-GENERIC-0001")
+
+    def specialize_node(self, node, substitutions, self_type=None):
+        """递归替换类型及类型限定路径，不替换同名的普通值变量。"""
+        if isinstance(node, list):
+            return [self.specialize_node(n, substitutions, self_type) for n in node]
+        if not isinstance(node, dict):
+            return node
+        if node.get("kind") == "NamedType":
+            parts = node["path"]["parts"]
+            target = substitutions.get("$" + parts[0]) if len(parts) == 1 else None
+            if parts == ["Self"]:
+                target = self_type
+            if target is not None:
+                return self.type_node(target, node["span"])
+        result = {key: self.specialize_node(value, substitutions, self_type)
+                  for key, value in node.items()}
+        # T::try_from 和 Self::new 的 T/Self 是类型限定名，不能留下模板名。
+        if node.get("kind") == "Name":
+            parts = node["path"]["parts"]
+            target = substitutions.get("$" + parts[0])
+            if parts[0] == "Self":
+                target = self_type
+            if target is not None and len(parts) > 1:
+                owner = self.type_expression(target, node["span"])
+                for member in parts[1:]:
+                    owner = {"kind": "AssociatedAccess", "span": node["span"],
+                             "object": owner, "member": member}
+                return owner
+            # 普通 Name T 可能是同名值变量/数组索引，不能盲替换。具体实例
+            # 保存 type_substitutions，仅在 expression_type 的类型上下文读取。
+        return result
+
+    def type_expression(self, type_, span):
+        if type_.name == "ptr":
+            return {"kind": "Borrow", "span": span, "operand": self.type_expression(type_.args[0], span),
+                    "modifiers": self.type_node(type_, span)["modifiers"]}
+        if type_.name == "tuple":
+            return {"kind": "Tuple", "span": span,
+                    "elements": [self.type_expression(t, span) for t in type_.args]}
+        if type_.name == "maybe" or type_.name == "fn":
+            return self.type_node(type_, span)
+        result = {"kind": "Name", "span": span,
+                  "path": {"kind": "Path", "span": span, "parts": type_.name.split("::")}}
+        if type_.args:
+            result = {"kind": "BracketApply", "span": span, "object": result,
+                      "arguments": [self.type_expression(t, span) for t in type_.args]}
+        return result
+
+    def unify_generic(self, pattern, actual, substitutions, node):
+        # 不返回的表达式没有可观察值，不能据此把未知 T 定成 Never。
+        # 后续实参仍可推导 T；只有这种实参时要求显式填写具体类型。
+        if actual == NEVER:
+            return
+        if pattern.name.startswith("$"):
+            actual = self.default(actual)
+            previous = substitutions.get(pattern.name)
+            if previous is not None and previous != actual:
+                self.fail(node, f"泛型 {pattern.name[1:]} 被推导为 {previous} 和 {actual}", "XE-GENERIC-0001")
+            substitutions[pattern.name] = actual
+        elif pattern.name == actual.name and len(pattern.args) == len(actual.args):
+            for p, a in zip(pattern.args, actual.args):
+                self.unify_generic(p, a, substitutions, node)
+
+    def explicit_substitutions(self, signature, arguments, node):
+        generics = signature.node.get("generics", [])
+        if len(arguments) != len(generics):
+            self.fail(node, f"需要 {len(generics)} 个函数类型参数，实际为 {len(arguments)} 个", "XE-GENERIC-0001")
+        return {"$" + g["name"]: self.expression_type(a) for g, a in zip(generics, arguments)}
+
+    def instantiate(self, signature, substitutions, node):
+        if not signature.generics:
+            return signature
+        missing = sorted(g for g in signature.generics if "$" + g not in substitutions)
+        if missing:
+            self.fail(node, "无法推导泛型 " + ", ".join(missing) + "；请显式填写函数类型参数", "XE-GENERIC-0001")
+        for constraint in signature.node.get("constraints", []) + self.implementation_constraints.get(id(signature), []):
+            trait = constraint["trait"]
+            if trait["kind"] != "NamedType" or trait["path"]["parts"] != ["Copy"]:
+                self.fail(constraint, "目前泛型约束只支持 Copy", "XE-SEM-0001")
+            target = substitute(self.type_of(constraint["target"], signature.generics, signature.self_type), substitutions)
+            if not self.copyable(target):
+                self.fail(node, f"{target} 不满足 Copy 约束", "XE-OWN-0001")
+        # unsafe 是调用处的地址风险，不是实例身份。缓存不能把首次调用的
+        # 风险留在签名内，污染下一次安全地址的调用；显式模板注记仍保留。
+        def canonical(type_):
+            return Type(type_.name, tuple(canonical(t) for t in type_.args), type_.mutable, type_.identity)
+        substitutions = {name: canonical(type_) for name, type_ in substitutions.items()}
+        def depth(type_):
+            return 1 + max((depth(t) for t in type_.args), default=0)
+        if any(depth(t) > 64 for t in substitutions.values()):
+            self.fail(node, "泛型类型嵌套超过 64 层；可能存在不断增加类型层数的递归实例化",
+                      "XE-GENERIC-0002")
+        key = (id(signature.node), tuple((g, substitutions["$" + g]) for g in sorted(signature.generics)))
+        if key in self.generic_instances:
+            return self.functions[self.generic_instances[key]]
+        if len(self.generic_instances) >= self.instance_limit:
+            self.fail(node, f"泛型实例超过 {self.instance_limit} 个；可能存在不断增加类型层数的递归实例化",
+                      "XE-GENERIC-0002", "检查递归调用是否将 T 改成 Holder[T] 等越来越大的类型")
+        concrete_self = substitute(signature.self_type, substitutions) if signature.self_type else None
+        concrete_node = self.specialize_node(signature.node, substitutions, concrete_self)
+        name = f"__xe_generic_{len(self.generic_instances) + 1}"
+        while name in self.functions:
+            name += "_"
+        concrete_node["name"], concrete_node["generics"], concrete_node["constraints"] = name, [], []
+        concrete = Signature(concrete_node, [substitute(t, substitutions) for t in signature.parameters],
+                             substitute(signature.result, substitutions), self_type=concrete_self,
+                             borrow_parameters=frozenset() if concrete_node["body"] is not None else None,
+                             type_substitutions=substitutions)
+        position = node["span"]["start"]
+        arguments = ", ".join(f"{g} = {substitutions['$' + g]}" for g in sorted(signature.generics))
+        concrete.instance_context = (f"检查 {signature.node['name']} 的具体实例（{arguments}）；"
+            f"首次使用于 {self.source.filename}:{position['line']}:{position['column']}")
+        self.generic_instances[key] = name
+        self.functions[name] = concrete
+        return concrete
 
     def fail(self, node: Node, message: str, code="XE-TYPE-0001", hint=None):
         span = node["span"]
@@ -107,8 +314,84 @@ class Checker:
     def offset(self, node: Node):
         return node["span"]["start"]["offset"]
 
+    def record_type(self, node, type_, name=None):
+        """语义侧表单独输出；原始 AST 仍只描述源码，不伪造 unsafe 附件。"""
+        entry = {"kind": node["kind"], "span": node["span"],
+                 "type": str(type_), "unsafe": has_unsafe(type_)}
+        if name is not None:
+            entry["name"] = name
+        previous = self.inferred_types.get(id(node))
+        if previous and previous.get("unsafe") and not entry["unsafe"]:
+            return
+        self.inferred_types[id(node)] = entry
+
+    def warn_pointer(self, value, message, code="XE-PTR-0001"):
+        """风险注记不改变 ABI，不升级为错误，也不延长对象的生存时间。"""
+        if self.carries_borrow(value.type):
+            value.type = mark_unsafe(value.type)
+            self.record_type(value.node, value.type)
+            if value.access_uid is not None:
+                binding = self.by_uid(value.access_uid)
+                if binding and self.carries_borrow(binding.type):
+                    self.mark_binding_unsafe(binding)
+        span = value.node["span"]
+        key = (code, span["start"]["offset"], span["end"]["offset"], message)
+        if self._report_warnings and key not in self._warning_keys:
+            self._warning_keys.add(key)
+            self.warnings.append(Diagnostic(self.source, key[1], key[2], message, code,
+                "已自动标记 unsafe；仍可编译。请确保访问时地址、对象及边界有效。",
+                severity="warning", inferred_type=str(value.type)))
+        return value
+
+    def mark_binding_unsafe(self, binding):
+        binding.type = mark_unsafe(binding.type)
+        self.record_type(binding.node, binding.type, binding.name)
+        # C 后端的声明侧表也更新；风险不改变底层类型或布局。
+        if hasattr(self, "binding_types"):
+            self.binding_types[id(binding.node)] = binding.type
+
+    def invalidate_storage(self, uid, node, reason):
+        """移动、替换或作用域结束可能使地址失效；别名本身并不是错误。"""
+        self.invalid_roots[uid] = reason
+        for binding in self.bindings().values():
+            if (binding.uid != uid and binding.initialized and not binding.moved
+                    and binding.last_use >= self.offset(node)
+                    and any(root == uid for root, _ in binding.origins)
+                    and self.carries_borrow(binding.type)):
+                self.mark_binding_unsafe(binding)
+                self.warn_pointer(Value(binding.type, node, origins=binding.origins),
+                    f"{binding.name} 指向的存储{reason}，后续访问可能失效", "XE-PTR-0002")
+
     def generic_set(self, node):
         return {p["name"] for p in node.get("generics", [])}
+
+    def resolve_alias(self, name):
+        if name in self.alias_types:
+            return self.alias_types[name]
+        declaration = self.aliases[name]
+        if name in self._alias_stack:
+            cycle = " -> ".join(self._alias_stack[self._alias_stack.index(name):] + [name])
+            self.fail(declaration, f"类型别名循环引用：{cycle}", "XE-TYPE-0007",
+                      "透明别名必须最终指向已定义的具体类型")
+        if len(self._alias_stack) >= 128:
+            self.fail(declaration, "类型别名引用链过深，请缩短别名链", "XE-TYPE-0007")
+        self._alias_stack.append(name)
+        # 别名只在模块作用域解析，不能捕获调用位置的 Self 或泛型参数。
+        saved = self.generic_names, self.self_type, self.type_substitutions
+        self.generic_names, self.self_type, self.type_substitutions = set(), None, {}
+        try:
+            result = self.type_of(declaration["type"], set())
+            self.alias_types[name] = result
+            return result
+        finally:
+            self.generic_names, self.self_type, self.type_substitutions = saved
+            self._alias_stack.pop()
+
+    def associated_owner(self, name, node):
+        """给后端及关联调用解析源码中的类型限定名称，别名返回具体类型。"""
+        return self.type_of({"kind": "NamedType", "span": node["span"],
+            "path": {"kind": "Path", "span": node["span"], "parts": name.split("::")},
+            "arguments": []})
 
     def type_of(self, node: Node | None, generics=None, self_type=None) -> Type:
         if node is None:
@@ -124,15 +407,26 @@ class Checker:
                 return self_type
             if name in generics:
                 return Type("$" + name)
+            if name in self.aliases:
+                if node["arguments"]:
+                    self.fail(node, f"类型别名 {name} 不接受类型附件；泛型别名暂不支持", "XE-GENERIC-0001")
+                return self.resolve_alias(name)
+            if name in IO_TYPE_ALIASES:
+                if node["arguments"]:
+                    self.fail(node, f"{name} 不接受类型参数", "XE-GENERIC-0001")
+                return IO_TYPE_ALIASES[name]
             if name not in PRIMITIVES | STANDARD and name not in self.types:
                 self.fail(node, f"未知类型 {name}", "XE-NAME-0001")
+            if name in self.types and self.types[name]["kind"] == "Trait":
+                self.fail(node, f"{name} 是 Trait 约束，不是具体值类型；动态 Trait 对象尚未设计",
+                          "XE-SEM-0001")
             args = []
             for arg in node["arguments"]:
                 if arg["kind"] == "Literal":
                     args.append(Type(str(arg["value"])))
                 else:
                     args.append(self.type_of(arg, generics, self_type))
-            arities = {"Array": 2, "Vec": 1, "Slice": 1, "SliceMut": 1, "RawPtr": 1,
+            arities = {"Array": 2, "Vec": 1, "Slice": 1, "SliceMut": 1,
                        "Box": 1, "Map": 2, "Set": 1, "Range": 1, "Iterator": 1}
             arity = len(self.types[name].get("generics", [])) if name in self.types else arities.get(name, 0)
             if len(args) != arity:
@@ -142,23 +436,22 @@ class Checker:
             return Type(name, tuple(args))
         if kind == "PointerType":
             base = self.type_of(node["target"], generics, self_type)
-            if base.name == "ptr" and self.check_borrows:
-                self.fail(node, "检查模式下的多级指针区域投影尚未实现", "XE-SEM-0001")
-            if base == STR:
-                self.fail(node, "str 已经是地址与长度视图，禁止 str@", "XE-TYPE-0003")
             modifiers = [m["name"] for m in node["modifiers"]]
             if len(modifiers) != len(set(modifiers)):
                 self.fail(node, "借用修饰符重复")
-            if any(m not in {"mut"} | set(generics) for m in modifiers):
+            if any(m not in {"mut", "unsafe"} | set(generics) for m in modifiers):
                 self.fail(node, "未知借用修饰符")
-            if modifiers and not self.check_borrows:
-                self.fail(node, "借用修饰需要开启 --check-borrows", "XE-BORROW-0001")
-            return ptr(base, "mut" in modifiers)
+            return ptr(base, "mut" in modifiers, "unsafe" in modifiers)
         if kind == "MaybeType":
-            error = self.type_of(node["error"], generics, self_type) if node["error"] else NONE
+            # None 是无负载结果标记，只在问号的错误附件内具有类型语法身份。
+            # 它不是普通存储类型，不能通过 fn(x: None) 引入伪造的值类型。
+            error_node = node["error"]
+            error = (NONE if error_node is None or error_node["kind"] == "NoneTypeMarker"
+                     else self.type_of(error_node, generics, self_type))
             return maybe(self.type_of(node["value"], generics, self_type), error)
         if kind == "NoneTypeMarker":
-            return NONE
+            self.fail(node, "None 不是普通值类型；仅作为 T? / T?[None] 的无负载标记",
+                      "XE-RESULT-0001")
         if kind == "FunctionType":
             return callable_type([self.type_of(p, generics, self_type) for p in node["parameters"]],
                                  self.type_of(node["result"], generics, self_type))
@@ -167,28 +460,46 @@ class Checker:
         self.fail(node, f"尚未支持的类型结构 {kind}", "XE-SEM-0001")
 
     def copyable(self, type_: Type, visited=None) -> bool:
-        if type_.name in PRIMITIVES | {"$integer", "fn", "None"}:
+        if type_.name in PRIMITIVES | {"$integer", "fn", "None", "ConversionError"}:
             return True
         if type_.name in self.copy_generics:
             return True
         if type_.name == "ptr":
-            return not type_.mutable or not self.check_borrows
+            # 指针复制的是地址，不是所指对象；可写指针也不是独占借用。
+            # 可写/unsafe 注记只控制访问权限或提示风险，不能改变 Copy。
+            return True
         if type_.name in {"tuple", "Array", "maybe"}:
             return all(self.copyable(arg, visited) for arg in type_.args
                        if not arg.name.isdigit())
-        if type_.name in {"Slice", "RawPtr", "Range"}:
+        if type_.name in {"Slice", "SliceMut", "Range"}:
             return True
-        if type_.name in self.copy_types and type_.name not in self.drop_types:
+        # 当前集合只记录已验证的非泛型用户类型。不能用名字命中把
+        # Holder[i32] 的 Copy 承诺错误地推广到 Holder[String]。
+        if (not type_.args and type_.name in self.copy_types
+                and type_.name not in self.drop_types):
             return True
         return False
 
-    def carries_borrow(self, type_: Type) -> bool:
+    def carries_borrow(self, type_: Type, visited=None) -> bool:
         if type_.name in {"ptr", "str", "Slice", "SliceMut", "closure"}:
             return True
         if type_.name in {"maybe", "tuple", "Array"}:
-            return any(self.carries_borrow(t) for t in type_.args)
-        # 用户结构体是否有借用字段由构造 Value.origins 同样跟踪。
-        return type_.name in self.types
+            return any(self.carries_borrow(t, visited) for t in type_.args)
+        if type_.name not in self.types:
+            return type_.name.startswith("$") and type_ not in {INT_LITERAL, UNKNOWN}
+        visited = (visited or set()) | {type_.name}
+        declaration = self.types[type_.name]
+        substitutions = {"$" + p["name"]: t for p, t in
+                         zip(declaration.get("generics", []), type_.args)}
+        fields = ([f["type"] for f in declaration.get("fields", [])] +
+                  [t for v in declaration.get("variants", []) for t in v["payload"]])
+        # 纯值结构体/枚举不因经过 self 指针而变成借用值。递归检查真实字段；
+        # 指针在递归之前返回 True，visited 仅防止非法按值循环导致 Python 递归。
+        for field in fields:
+            field_type = substitute(self.type_of(field, self.generic_set(declaration)), substitutions)
+            if field_type.name not in visited and self.carries_borrow(field_type, visited):
+                return True
+        return False
 
     def signature(self, node, self_type=None, extra_generics=None):
         if any(p["category"] == "region" for p in node.get("generics", [])):
@@ -201,25 +512,67 @@ class Checker:
     def collect(self):
         seen = set()
         for node in self.tree["items"]:
-            if node["kind"] in {"Struct", "Enum", "Trait", "Function", "Constant"}:
+            if node["kind"] in {"Struct", "Enum", "Trait", "Function", "Constant", "TypeAlias"}:
                 name = node["name"]
                 if name in seen:
                     self.fail(node, f"顶层名称 {name} 重复", "XE-NAME-0002")
                 seen.add(name)
                 if node["kind"] in {"Struct", "Enum", "Trait"}:
                     self.types[name] = node
+                if node["kind"] == "TypeAlias":
+                    if name in PRIMITIVES | STANDARD | {"Self", "None", "Maybe"}:
+                        self.fail(node, f"类型别名不能重定义内建类型名称 {name}", "XE-NAME-0002")
+                    self.aliases[name] = node
+        for external in self.tree["items"]:
+            if external["kind"] == "Extern":
+                for function in external["functions"]:
+                    if function["name"] in seen:
+                        self.fail(function, f"顶层名称 {function['name']} 重复", "XE-NAME-0002")
+                    seen.add(function["name"])
+        for name in self.aliases:
+            self.resolve_alias(name)
         for node in self.tree["items"]:
             if node["kind"] == "Impl" and node["trait"]:
                 if node["trait"]["kind"] != "NamedType" or node["target"]["kind"] != "NamedType":
                     self.fail(node, "此阶段 impl 仅支持命名类型", "XE-SEM-0001")
                 trait = "::".join(node["trait"]["path"]["parts"])
                 target = "::".join(node["target"]["path"]["parts"])
+                if target in self.aliases:
+                    target = self.resolve_alias(target).name
                 if trait not in {"Drop", "Copy"}:
                     self.fail(node, "通用 Trait 实现检查尚未实现", "XE-SEM-0001")
                 if trait == "Drop":
+                    if node.get("generics") or self.generic_set(self.types.get(target, {})):
+                        self.fail(node, "泛型类型的自定义 Drop 实现尚未支持；具体字段仍会自动析构", "XE-SEM-0001")
                     self.drop_types.add(target)
                 if trait == "Copy":
                     self.copy_types.add(target)
+        # 用户 struct/enum 一律需要显式 Copy；字段看起来简单也不自动
+        # 改变公开复制承诺。内建类型的规则由 copyable() 统一定义。
+        # 注册后先检查 impl 目标，避免 `impl Copy for String;` 绕过后面的
+        # 用户字段检查，把一个内建资源错误地变成可重复释放的 Copy 值。
+        copy_implementations = set()
+        for implementation in self.tree["items"]:
+            if (implementation["kind"] != "Impl" or not implementation["trait"]
+                    or implementation["trait"]["kind"] != "NamedType"
+                    or implementation["trait"]["path"]["parts"] != ["Copy"]):
+                continue
+            target_node = implementation["target"]
+            name = "::".join(target_node["path"]["parts"])
+            alias_target = self.resolve_alias(name) if name in self.aliases else None
+            if alias_target:
+                name = alias_target.name
+            declaration = self.types.get(name)
+            if declaration is None or declaration["kind"] not in {"Struct", "Enum"}:
+                self.fail(implementation, "Copy 只能显式实现于用户结构体或枚举；内建类型的复制规则由语言定义",
+                          "XE-OWN-0001")
+            if (declaration.get("generics") or implementation.get("generics") or target_node["arguments"]
+                    or alias_target and alias_target.args):
+                self.fail(implementation, "泛型类型的条件 Copy 实现尚未完成，不能把一个实例的承诺推广到所有实例",
+                          "XE-SEM-0001")
+            if name in copy_implementations:
+                self.fail(implementation, f"{name} 的 Copy 实现重复", "XE-OWN-0001")
+            copy_implementations.add(name)
         for node in self.tree["items"]:
             kind = node["kind"]
             if kind == "Function":
@@ -236,8 +589,8 @@ class Checker:
                     if target.name not in self.types or len(node["methods"]) != 1 or node["methods"][0]["name"] != "drop":
                         self.fail(node, "Drop 仅用于用户类型，且必须定义唯一的 drop 方法", "XE-OWN-0002")
                     drop = self.signature(node["methods"][0], target, self.generic_set(node))
-                    if drop.parameters != [ptr(target, self.check_borrows)] or drop.result != UNIT:
-                        self.fail(node, "drop 签名必须为 fn drop(self: Self@[mut])；默认模式使用 Self@", "XE-OWN-0002")
+                    if len(drop.parameters) != 1 or not self.compatible(drop.parameters[0], ptr(target, self.check_borrows)) or drop.result != UNIT:
+                        self.fail(node, "drop 签名必须为 fn drop(self: Self@[mut])", "XE-OWN-0002")
                 if trait == "Copy" and node["methods"]:
                     self.fail(node, "Copy 是无方法标记 Trait", "XE-OWN-0001")
                 for method in node["methods"]:
@@ -245,6 +598,7 @@ class Checker:
                     if key in self.methods:
                         self.fail(method, "方法名称重复", "XE-NAME-0002")
                     self.methods[key] = self.signature(method, target, self.generic_set(node))
+                    self.implementation_constraints[id(self.methods[key])] = node.get("constraints", [])
             elif kind == "Use":
                 self.fail(node, "当前语义阶段只检查单文件，尚未加载 use 依赖", "XE-SEM-0001",
                           "将相关声明放在同一文件，或等待模块加载阶段")
@@ -269,7 +623,48 @@ class Checker:
                 payloads = ([f["type"] for f in node.get("fields", [])] +
                             [t for v in node.get("variants", []) for t in v["payload"]])
                 if any(not self.copyable(self.type_of(t, self.generic_set(node))) for t in payloads):
-                    self.fail(node, "含资源字段的类型不能实现 Copy", "XE-OWN-0001")
+                    self.fail(node, "实现 Copy 的类型要求所有字段和枚举负载都实现 Copy", "XE-OWN-0001")
+        self.validate_layouts()
+
+    def validate_layouts(self):
+        """按值递归会要求无限存储；在前端给出源码位置，不留给 C 报错。
+
+        @、Box、Vec 等间接容器不展开目标存储。这里检查声明之间的直接
+        布局依赖；尚未实现的泛型实例布局仍由泛型阶段负责。
+        """
+        declarations = {name: node for name, node in self.types.items()
+                        if node["kind"] in {"Struct", "Enum"}}
+
+        def dependencies(type_):
+            if type_.name in declarations:
+                yield type_.name
+            elif type_.name in {"maybe", "tuple", "Array"}:
+                for argument in type_.args:
+                    yield from dependencies(argument)
+
+        graph = {}
+        for name, node in declarations.items():
+            fields = ([f["type"] for f in node.get("fields", [])] +
+                      [t for v in node.get("variants", []) for t in v["payload"]])
+            graph[name] = [(target, field) for field in fields
+                           for target in dependencies(self.type_of(field, self.generic_set(node)))]
+        done, visiting = set(), []
+
+        def visit(name):
+            if name in done:
+                return
+            visiting.append(name)
+            for target, field in graph[name]:
+                if target in visiting:
+                    cycle = " -> ".join(visiting[visiting.index(target):] + [target])
+                    self.fail(field, f"按值递归需要无限存储：{cycle}", "XE-TYPE-0006",
+                              "用 T@ 借用指向另一对象，或使用间接拥有容器")
+                visit(target)
+            visiting.pop()
+            done.add(name)
+
+        for name in declarations:
+            visit(name)
 
     def check(self) -> list[Diagnostic]:
         try:
@@ -282,18 +677,48 @@ class Checker:
                         self.fail(node, "当前 const 只支持可复制值；资源请在函数内创建", "XE-SEM-0001")
         except Diagnostic as error:
             return [error]
-        for signature in list(self.functions.values()) + list(self.methods.values()):
+        def concrete_signatures():
+            return [s for s in list(self.functions.values()) + list(self.methods.values()) if not s.generics]
+        signatures = concrete_signatures()
+        # 本地函数的输入依赖从空集合开始，只增不减，迭代至稳定。这样互递归
+        # 的纯静态错误消息不会被错误归因到 self。外部函数无函数体，始终保守。
+        # 这里只计算有限参数依赖，不推导生命周期；最终一遍执行所有逃逸诊断。
+        for signature in signatures:
+            if signature.node["body"] is not None:
+                signature.borrow_parameters = frozenset()
+        # 函数数量不能界定传播轮数：单个递归函数可以轮换许多参数，
+        # 每一轮才发现下一项来源。摘要只增加参数索引，而参数总数有限，
+        # 因此以真正稳定为终止条件既会终止，也不会遗漏晚发现的借用。
+        self._report_warnings = False
+        while True:
+            previous = [(signature.borrow_parameters, signature.unsafe_result) for signature in signatures]
+            for signature in signatures:
+                if signature.node["body"] is not None:
+                    try:
+                        self.check_function(signature)
+                    except Diagnostic:
+                        # 不把探测阶段的错误当作成功；最终遍仍会报告它。
+                        pass
+            signatures = concrete_signatures()
+            if previous == [(signature.borrow_parameters, signature.unsafe_result) for signature in signatures]:
+                break
+        self._report_warnings = True
+        self.inferred_types.clear()
+        for signature in signatures:
             if signature.node["body"] is None:
                 continue
             try:
                 self.check_function(signature)
             except Diagnostic as error:
+                if signature.instance_context:
+                    error.hint = signature.instance_context + ("。" + error.hint if error.hint else "")
                 self.diagnostics.append(error)
         return self.diagnostics
 
     def check_function(self, signature):
         self.scopes = [{}]
         self.generic_names, self.self_type = signature.generics, signature.self_type
+        self.type_substitutions = signature.type_substitutions
         self.copy_generics = set()
         for constraint in signature.node.get("constraints", []):
             if constraint["trait"]["kind"] == "NamedType" and constraint["trait"]["path"]["parts"] == ["Copy"]:
@@ -304,15 +729,41 @@ class Checker:
         self.last_uses = names_used(signature.node["body"])
         self.loop_depths, self.temporary_loans = [], []
         self.parameter_roots = set()
-        for parameter, type_ in zip(signature.node["parameters"], signature.parameters):
+        self.return_origins = set()
+        self.invalid_roots = {}
+        self.function_unsafe_return = False
+        parameter_sources = {}
+        for index, (parameter, type_) in enumerate(zip(signature.node["parameters"], signature.parameters)):
             binding = self.declare(parameter["name"], type_, parameter, parameter["mutable"], parameter=True)
             if self.carries_borrow(type_):
                 self.uid += 1
                 self.parameter_roots.add(self.uid)
+                parameter_sources[self.uid] = index
                 binding.origins = ((self.uid, type_.mutable),)
         result = self.block(signature.node["body"], signature.result, lift=True)
         self.convert(result, signature.result, lift=True)
         self.escape(result, function_exit=True)
+        signature.unsafe_result = signature.unsafe_result or has_unsafe(result.type) or self.function_unsafe_return
+        self.return_origins.update(result.origins)
+        signature.borrow_parameters = (signature.borrow_parameters or frozenset()) | frozenset(
+            parameter_sources[uid] for uid, _ in self.return_origins if uid in parameter_sources)
+
+    def call_origins(self, signature, values):
+        """只传播实际返回依赖；没有摘要时保守取全部输入来源。"""
+        if not self.carries_borrow(signature.result):
+            return ()
+        return tuple(origin for index, value in enumerate(values)
+                     if signature.borrow_parameters is None or index in signature.borrow_parameters
+                     for origin in value.origins)
+
+    def call_result_type(self, signature, values, result=None):
+        result = result or signature.result
+        # 函数值没有捕获地址，也可能携带“调用会返回风险指针”的签名信息。
+        if (self.carries_borrow(result) or result.name == "fn") and (signature.unsafe_result or any(
+                has_unsafe(value.type) for index, value in enumerate(values)
+                if signature.borrow_parameters is None or index in signature.borrow_parameters)):
+            return mark_unsafe(result)
+        return result
 
     def declare(self, name, type_, node, mutable=False, initialized=True, origins=(), parameter=False):
         if name in self.scopes[-1]:
@@ -321,6 +772,7 @@ class Checker:
         binding = Binding(self.uid, name, type_, node, mutable, initialized,
                           origins=origins, last_use=self.last_uses.get(name, -1), parameter=parameter)
         self.scopes[-1][name] = binding
+        self.record_type(node, type_, name)
         return binding
 
     def lookup(self, name, node, read=True, partial=False):
@@ -349,21 +801,14 @@ class Checker:
                 binding.moved = any(b.moved for b in states)
                 binding.moved_fields = set().union(*(b.moved_fields for b in states))
                 binding.origins = tuple(set().union(*(set(b.origins) for b in states)))
+                for state in states:
+                    binding.type = merge_unsafe(binding.type, state.type)
+                self.record_type(binding.node, binding.type, binding.name)
 
-    def loan(self, origins, node, exclude=None):
-        if not self.check_borrows:
-            return
-        position = self.offset(node)
-        active = list(self.temporary_loans)
-        for binding in self.bindings().values():
-            if (binding.uid != exclude and binding.initialized and not binding.moved
-                    and binding.last_use >= position):
-                active.extend(binding.origins)
-        for uid, mutable in origins:
-            for other_uid, other_mutable in active:
-                if uid == other_uid and (mutable or other_mutable):
-                    self.fail(node, "该对象仍存在冲突的共享/可写借用", "XE-BORROW-0002",
-                              "先结束已有借用的最后一次使用，再建立新的借用")
+    def loan(self, origins, node, exclude=None, position=None):
+        # 兼容内部调用点。普通指针允许读写别名，不建立独占 loan。
+        # 保留地址来源仅用于风险告警；写权限由 mutable_place 单独检查。
+        return
 
     def consume(self, value: Value):
         if self.copyable(value.type) or value.type == NEVER:
@@ -397,14 +842,16 @@ class Checker:
                     binding.moved_fields.add(fields)
                 else:
                     binding.moved = True
+                self.invalidate_storage(uid, value.node, "已移动或部分移动")
 
     def escape(self, value, leaving=None, function_exit=False):
-        if not self.check_borrows:
-            return
         leaving = leaving or set()
         for uid, _ in value.origins:
             if uid in leaving or (function_exit and uid not in self.parameter_roots):
-                self.fail(value.node, "返回的借用/视图可能超过其所有者生命周期", "XE-BORROW-0003")
+                self.warn_pointer(value, "地址或视图可能超过所指存储的生存时间", "XE-PTR-0001")
+                break
+        if function_exit and has_unsafe(value.type):
+            self.function_unsafe_return = True
 
     def default(self, type_):
         return I32 if type_ == INT_LITERAL else type_
@@ -412,38 +859,71 @@ class Checker:
     def unresolved(self, type_):
         return type_ == UNKNOWN or any(self.unresolved(t) for t in type_.args)
 
-    def compatible(self, actual, expected):
+    def compatible(self, actual, expected, pointer_weakening=True):
         if actual == NEVER or actual == expected or actual == UNKNOWN or expected == UNKNOWN:
             return True
-        if actual == INT_LITERAL and expected.name in NUMERIC - {"f32", "f64"}:
+        if actual == INT_LITERAL and expected.name in NUMERIC:
             return True
+        if actual.name == expected.name == "ptr":
+            # 仅能丢掉当前这一级的写权限。指向类型必须完全相同；
+            # 不递归降权，否则 T@[mut]@ -> T@@ 可经二级指针洗白写能力。
+            return actual.args == expected.args and (actual.mutable == expected.mutable or
+                    pointer_weakening and actual.mutable and not expected.mutable)
         if actual.name == expected.name and len(actual.args) == len(expected.args):
-            return actual.mutable == expected.mutable and all(
-                self.compatible(a, b) for a, b in zip(actual.args, expected.args))
+            return actual.identity == expected.identity and actual.mutable == expected.mutable and all(
+                self.compatible(a, b, pointer_weakening=False) for a, b in zip(actual.args, expected.args))
         return False
 
     def convert(self, value, target, lift=False):
         if value.type == NEVER:
             return value
-        if lift and target.name == "maybe" and value.type.name != "maybe":
+        if lift and target.name == "maybe" and not self.compatible(value.type, target):
             if value.type == NONE:
                 if target.args[1] != NONE:
                     self.fail(value.node, "None 不能代替具体错误；使用 Maybe::No[error]", "XE-RESULT-0001")
             else:
-                self.convert(value, target.args[0])
-            return Value(target, value.node, value.place, value.origins, value.borrowed, value.access_uid)
+                value = self.convert(value, target.args[0])
+            lifted = mark_unsafe(target) if has_unsafe(value.type) else target
+            return Value(lifted, value.node, value.place, value.origins, value.borrowed, value.access_uid,
+                         writable=value.writable)
         if not self.compatible(value.type, target):
             self.fail(value.node, f"类型不匹配：需要 {target}，实际为 {value.type}", "XE-TYPE-0001")
         if value.type == INT_LITERAL and target.name in NUMERIC:
             literal = value.literal
-            if isinstance(literal, int) and target.name not in {"isize", "usize"}:
-                bits = int(target.name[1:])
+            if isinstance(literal, int) and target.name in {"f32", "f64"}:
+                import math
+                import struct
+                try:
+                    rounded = float(literal)
+                    if target.name == "f32":
+                        rounded = struct.unpack("f", struct.pack("f", rounded))[0]
+                    exact = math.isfinite(rounded) and rounded == literal
+                except (OverflowError, struct.error):
+                    exact = False
+                if not exact:
+                    self.fail(value.node, f"整数字面量不能被 {target} 精确表示", "XE-TYPE-0004")
+            elif isinstance(literal, int):
+                import struct
+                bits = struct.calcsize("P") * 8 if target.name in {"isize", "usize"} else int(target.name[1:])
                 low = -(1 << (bits-1)) if target.name[0] == "i" else 0
                 high = (1 << (bits-1))-1 if target.name[0] == "i" else (1 << bits)-1
                 if not low <= literal <= high:
                     self.fail(value.node, f"整数超出 {target} 范围", "XE-TYPE-0004")
-        return Value(target, value.node, value.place, value.origins, value.borrowed,
-                     value.access_uid, value.literal)
+        # origins 既描述访问路径，也描述结果携带的借用。复制出纯整数等值后，
+        # 访问已结束，不得把原 self 指针借用附到整数变量/后续调用的实参上。
+        origins = value.origins if self.carries_borrow(target) else ()
+        if (value.borrowed and value.place and value.node["kind"] == "BracketApply"
+                and self.copyable(target)):
+            owner = self.by_uid(value.place[0])
+            if owner and owner.type.name != "ptr":
+                # x[i]@ 借用元素描述符，因此依赖数组存储；但复制 x[i] 的
+                # str/指针等 Copy 值只保留元素实际携带的数据来源。
+                # owner.origins 不能简单删去 owner uid：自指向元素也可能
+                # 真实依赖同一数组，赋值时记录的这类来源仍须保留。
+                origins = tuple(set(o for o in origins if o[0] != owner.uid) |
+                                set(owner.origins)) if self.carries_borrow(target) else ()
+        return Value(merge_unsafe(target, value.type), value.node, value.place, origins, value.borrowed,
+                     value.access_uid, value.literal, value.writable)
 
     def common(self, values, node):
         usable = [v for v in values if v.type != NEVER]
@@ -453,8 +933,13 @@ class Checker:
         for value in usable[1:]:
             if type_ == INT_LITERAL:
                 type_ = value.type
+            elif type_.name == value.type.name == "ptr" and type_.args == value.type.args:
+                # 两个分支权限不同，共同结果取较小权限，与分支顺序无关。
+                type_ = ptr(type_.args[0], type_.mutable and value.type.mutable,
+                            has_unsafe(type_) or has_unsafe(value.type))
             elif not self.compatible(value.type, type_):
                 self.fail(node, f"分支/元素类型不一致：{type_} 与 {value.type}", "XE-TYPE-0001")
+            type_ = merge_unsafe(type_, value.type)
         origins = tuple(set().union(*(set(v.origins) for v in usable)))
         return Value(type_, node, origins=origins)
 
@@ -482,16 +967,21 @@ class Checker:
                     self.fail(statement, "不能确定枚举的成功/错误类型，请添加完整类型注解")
                 if statement["operator"] == "=" and not self.copyable(value.type):
                     self.fail(statement, f"{value.type} 不能复制，必须使用 <<", "XE-OWN-0001")
+                if statement["operator"] == "<<" and value.type != NEVER and self.copyable(value.type):
+                    self.fail(statement, f"{value.type} 是 Copy 值，使用 =；<< 只用于转移所有权", "XE-OWN-0001")
                 if statement["operator"] == "<<":
                     self.consume(value)
                 self.declare(statement["name"], value.type, statement, statement["mutable"], origins=value.origins)
             elif kind == "Assignment":
                 self.assignment(statement)
+            elif kind == "Destructure":
+                terminated = self.destructure(statement).type == NEVER
             elif kind == "Return":
                 value = self.infer(statement["value"], self.result, lift=True) if statement["value"] else Value(UNIT, statement)
                 value = self.convert(value, self.result, lift=True)
                 self.consume(value)
                 self.escape(value, function_exit=True)
+                self.return_origins.update(value.origins)
                 terminated = True
             elif kind in {"Break", "Continue"}:
                 if not self.loop_depths:
@@ -514,6 +1004,8 @@ class Checker:
             result = Value(UNIT, node)
         local_ids = {b.uid for b in self.scopes[-1].values()}
         self.scope_escape(result, node, local_ids)
+        for uid in local_ids:
+            self.invalid_roots[uid] = "已离开作用域"
         self.scopes.pop()
         return result
 
@@ -523,7 +1015,10 @@ class Checker:
         for scope in self.scopes[:-1]:
             for binding in scope.values():
                 if binding.initialized and not binding.moved and binding.last_use >= node["span"]["end"]["offset"]:
-                    self.escape(Value(binding.type, binding.node, origins=binding.origins), local_ids)
+                    escaped = Value(binding.type, binding.node, origins=binding.origins)
+                    self.escape(escaped, local_ids)
+                    if has_unsafe(escaped.type):
+                        self.mark_binding_unsafe(binding)
 
     def place(self, node, read=True):
         if node["kind"] == "Group":
@@ -536,7 +1031,7 @@ class Checker:
 
     def mutable_place(self, value):
         if value.borrowed:
-            return not self.check_borrows or any(mutable for _, mutable in value.origins)
+            return value.writable if value.writable is not None else any(mutable for _, mutable in value.origins)
         if value.place:
             binding = self.by_uid(value.place[0])
             return bool(binding and binding.mutable)
@@ -552,36 +1047,144 @@ class Checker:
         if not initializing and not self.mutable_place(target):
             self.fail(target_node, "不能修改不可变绑定或只读指针", "XE-MUT-0001")
         value = self.convert(self.infer(source_node, target.type), target.type)
+        # 写入发生在右侧求值完成之后。仍活跃的共享借用不能被写操作绕过，
+        # 但仅在右侧最后一次使用的借用可以在真正写入前结束。
+        write_origins = (target.origins if target.borrowed else
+                         ((target.place[0], True),) if target.place else ())
+        write_origins = tuple((uid, True) for uid, _ in write_origins)
+        saved_loans = list(self.temporary_loans)
+        if not self.copyable(target.type):
+            # 替换资源会回收旧值；新资源不能携带指向旧资源的视图。
+            self.temporary_loans.extend(value.origins)
+        try:
+            self.loan(write_origins, node, exclude=target.access_uid,
+                      position=node["span"]["end"]["offset"])
+        finally:
+            self.temporary_loans = saved_loans
+        if target.borrowed and value.origins:
+            target_roots = {uid for uid, _ in target.origins}
+            foreign = [uid for uid, _ in value.origins if uid not in target_roots]
+            if binding is None and foreign:
+                if any(uid not in self.parameter_roots for uid in foreign):
+                    self.warn_pointer(value, "写入外部对象的地址或视图可能在局部存储结束后失效", "XE-PTR-0001")
         if operator == "=" and not self.copyable(value.type):
             self.fail(source_node, "资源不能用 = 复制，使用 <<", "XE-OWN-0001")
-        if value.place == target.place and value.place and operator != "=":
+        if operator == "<<" and value.type != NEVER and self.copyable(value.type):
+            self.fail(source_node, "Copy 值使用 =；<< 只用于转移所有权", "XE-OWN-0001")
+        if value.place == target.place and value.place and operator != "=" and not self.copyable(value.type):
             self.fail(node, "不能把资源传递给自身", "XE-MOVE-0001")
         if operator != "=":
             self.consume(value)
         if target.place and not target.borrowed:
             self.loan(((target.place[0], True),), node, exclude=target.access_uid)
         if binding and not target.borrowed:
+            if not initializing and not self.copyable(target.type):
+                self.invalidate_storage(binding.uid, node, "已被替换，旧资源可能已析构")
             binding.initialized, binding.moved = True, False
             binding.origins = value.origins
+            binding.type = merge_unsafe(binding.type, value.type)
+            self.record_type(binding.node, binding.type, binding.name)
             if target.place[1]:
                 binding.moved_fields.discard(target.place[1])
             else:
                 binding.moved_fields.clear()
+            # 新值已建立。旧别名已附上 unsafe；新取址不应继承旧资源风险。
+            self.invalid_roots.pop(binding.uid, None)
+        elif binding and target.borrowed and value.origins:
+            # 经指针写入本地视图也会影响所有者；让块退出检查发现外层变量逃逸。
+            binding.origins = tuple(set(binding.origins + value.origins))
+
+    def destructure(self, node):
+        targets = node["targets"]
+        names = [target["name"] for target in targets if target["name"] != "_"]
+        if len(set(names)) != len(names):
+            self.fail(node, "元组解包目标名称重复（_ 可以重复）", "XE-NAME-0002")
+        annotations, destinations = [], []
+        for target in targets:
+            annotation = self.type_of(target["type"]) if target.get("type") else None
+            binding = None
+            if not node["declare"] and target["name"] != "_":
+                binding = self.lookup(target["name"], target, read=False)
+                if binding.initialized and not binding.mutable:
+                    self.fail(target, "不能修改不可变绑定", "XE-MUT-0001")
+                if annotation is not None and annotation != binding.type:
+                    self.fail(target, f"解包目标类型注解与变量类型 {binding.type} 不符", "XE-TYPE-0001")
+                annotation = binding.type
+            annotations.append(annotation)
+            destinations.append((binding, bool(binding and binding.initialized)))
+        expected = Type("tuple", tuple(annotation or UNKNOWN for annotation in annotations))
+        value = self.infer(node["value"], expected)
+        if value.type == NEVER:
+            return value
+        if value.type.name != "tuple":
+            self.fail(node["value"], f"元组解包需要 tuple 值，实际为 {value.type}", "XE-TYPE-0001")
+        if len(value.type.args) != len(targets):
+            self.fail(node, f"元组解包需要 {len(targets)} 个元素，实际为 {len(value.type.args)} 个", "XE-TYPE-0001")
+        # 解包建立独立成员值，因此每个指针可分别降为只读；整个 tuple
+        # 容器仍不协变，原始源类型保持不变并且只消费一次。
+        element_types = [self.convert(Value(element, node["value"], origins=value.origins),
+            annotation or self.default(element)).type
+            for annotation, element in zip(annotations, value.type.args)]
+        if any(self.unresolved(element) for element in element_types):
+            self.fail(node, "不能确定元组元素类型，请添加成员类型注解", "XE-TYPE-0001")
+        if node["operator"] == "=" and not self.copyable(value.type):
+            self.fail(node["value"], f"{value.type} 不能复制，必须使用 <<", "XE-OWN-0001")
+        if node["operator"] == "<<" and self.copyable(value.type):
+            self.fail(node["value"], f"{value.type} 是 Copy 值，使用 =；<< 只用于转移所有权", "XE-OWN-0001")
+        # 先完成整个 RHS 并转交所有权，然后建立或替换目标；交换也据此工作。
+        self.consume(value)
+        for target, element_type, destination in zip(targets, element_types, destinations):
+            if has_unsafe(value.type) and self.carries_borrow(element_type):
+                element_type = mark_unsafe(element_type)
+            self.destructure_types[id(target)] = element_type
+            self.record_type(target, element_type, target["name"])
+            origins = value.origins if self.carries_borrow(element_type) else ()
+            if target["name"] == "_":
+                continue
+            if node["declare"]:
+                self.declare(target["name"], element_type, target, node["mutable"], origins=origins)
+            else:
+                binding, initialized = destination
+                if initialized and not self.copyable(binding.type):
+                    self.invalidate_storage(binding.uid, node, "已被替换，旧资源可能已析构")
+                binding.initialized, binding.moved = True, False
+                binding.moved_fields.clear()
+                binding.origins = origins
+                binding.type = merge_unsafe(binding.type, element_type)
+                self.record_type(binding.node, binding.type, binding.name)
+                self.invalid_roots.pop(binding.uid, None)
+        return value
 
     def infer(self, node, expected=None, lift=False) -> Value:
+        value = self._infer(node, expected, lift)
+        invalid = [self.invalid_roots[uid] for uid, _ in value.origins if uid in self.invalid_roots]
+        if invalid and self.carries_borrow(value.type):
+            self.warn_pointer(value, "所指存储" + invalid[0] + "，地址或视图可能失效", "XE-PTR-0002")
+        self.record_type(node, value.type)
+        return value
+
+    def _infer(self, node, expected=None, lift=False) -> Value:
         kind = node["kind"]
         self.position = self.offset(node)
+        value_expected = expected.args[0] if expected and expected.name == "maybe" and lift else expected
         if kind == "Literal":
             category = node["literal_kind"]
             type_ = {"INTEGER": INT_LITERAL, "FLOAT": Type("f64"), "STRING": STR,
                      "CHAR": Type("char"), "BYTE": Type("u8"), "true": BOOL,
                      "false": BOOL, "unit": UNIT}[category]
             value = Value(type_, node, literal=node["value"])
-            numeric_expected = expected.args[0] if expected and expected.name == "maybe" and lift else expected
+            numeric_expected = value_expected
             if type_ == INT_LITERAL and numeric_expected and numeric_expected.name in NUMERIC:
                 return self.convert(value, numeric_expected)
+            if category == "FLOAT" and numeric_expected and numeric_expected.name in {"f32", "f64"}:
+                if numeric_expected.name == "f32" and abs(node["value"]) > 3.4028234663852886e38:
+                    self.fail(node, "浮点字面量超出 f32 有限范围", "XE-TYPE-0004")
+                return Value(numeric_expected, node, literal=node["value"])
             return value
         if kind == "NoneValue":
+            if expected is None or expected.name != "maybe":
+                self.fail(node, "None 只能用于可选结果的返回位置；不是普通变量值",
+                          "XE-RESULT-0001")
             return Value(NONE, node)
         if kind == "Name":
             name = "::".join(node["path"]["parts"])
@@ -592,12 +1195,36 @@ class Checker:
                 return Value(binding.type, node, (binding.uid, ()), binding.origins,
                              access_uid=binding.uid)
             if name in self.functions:
-                signature = self.functions[name]
+                signature = self.functions[self.call_targets.get(id(node), name)]
                 if signature.generics:
-                    self.fail(node, "泛型函数作为一等函数尚未实现；当前支持直接调用推导", "XE-SEM-0001")
-                return Value(callable_type(signature.parameters, signature.result), node)
+                    self.fail(node, "泛型函数值需要具体类型附件；直接调用或管道目标才可从实参推导",
+                              "XE-GENERIC-0001", f"例如 {name}[i32]")
+                result_type = self.call_result_type(signature, [])
+                external_address = signature.node["body"] is None and self.carries_borrow(result_type)
+                if external_address:
+                    result_type = mark_unsafe(result_type)
+                value = Value(callable_type(signature.parameters, result_type), node)
+                if external_address:
+                    self.warn_pointer(value, "外部函数值返回的地址或视图有效性无法由本编译器确认", "XE-PTR-0003")
+                return value
             if name in self.constants:
                 return self.constants[name]
+            io_signature = io_function(name)
+            if io_signature is not None:
+                if io_signature.formatted:
+                    self.fail(node, "格式化输出目前需要直接调用；异构格式化函数值尚未支持",
+                              "XE-SEM-0001", '可包装成固定签名：fn(text: str) { println("{}", text); }')
+                return Value(callable_type(io_signature.parameters, io_signature.result), node)
+            if "::" in name:
+                resolved = self.signature_target(node)
+                if resolved:
+                    signature, substitutions = resolved
+                    concrete = self.instantiate(signature, substitutions, node)
+                    if concrete.node["name"] in self.functions:
+                        self.call_targets[id(node)] = concrete.node["name"]
+                    parameters = [substitute(t, substitutions) for t in signature.parameters]
+                    result = self.call_result_type(concrete, [], substitute(signature.result, substitutions))
+                    return Value(callable_type(parameters, result), node)
             variant = self.variant(name, expected, node, optional=True)
             if variant is not None:
                 owner, payload = variant
@@ -607,37 +1234,64 @@ class Checker:
             self.fail(node, f"未定义名称 {name}", "XE-NAME-0001")
         if kind == "Group":
             return self.infer(node["expression"], expected, lift)
+        if kind == "Cast":
+            value = self.infer(node["operand"])
+            source = self.default(value.type)
+            self.convert(value, source)
+            target = self.type_of(node["type"])
+            mods = [m["name"] for m in node["modifiers"]]
+            if mods:
+                # AST 可以由工具直接传入，因此除了解析器也须验证旧节点。
+                self.fail(node, "as 不接受转换策略附件；使用 T::try_from(value)")
+            if source.name not in NUMERIC or target.name not in NUMERIC:
+                self.fail(node, "as 只用于数值转换；指针使用 @、# 或地址 API")
+            integers = NUMERIC - {"f32", "f64"}
+            def bits(t):
+                import struct
+                return struct.calcsize("P") * 8 if t.name in {"isize", "usize"} else int(t.name[1:])
+            lossless = source == target or source.name == "f32" and target.name == "f64"
+            if source.name in integers and target.name in integers:
+                lossless = (source.name[0] == target.name[0] and bits(target) >= bits(source)
+                            or source.name[0] == "u" and target.name[0] == "i" and bits(target) > bits(source))
+            elif source.name in integers and target.name in {"f32", "f64"}:
+                lossless = bits(source) - (source.name[0] == "i") <= (24 if target.name == "f32" else 53)
+            if not lossless:
+                self.fail(node, "该转换可能丢失信息；使用 T::try_from(value) 并处理转换错误")
+            return Value(target, node)
         if kind == "Block":
             return self.block(node, expected, lift)
         if kind == "Borrow":
             value = self.place(node["operand"])
-            if self.check_borrows and value.type.name == "ptr":
-                self.fail(node, "检查模式下的多级指针区域投影尚未实现", "XE-SEM-0001")
             if value.place is None:
                 self.fail(node, "只能对有存储位置的变量、字段或解引用取地址", "XE-BORROW-0001")
-            if value.type == STR:
-                self.fail(node, "str 已经是视图，禁止取 str@", "XE-TYPE-0003")
             mods = [m["name"] for m in node["modifiers"]]
-            if mods and not self.check_borrows:
-                self.fail(node, "借用修饰需要 --check-borrows", "XE-BORROW-0001")
-            if any(m != "mut" and m not in self.generic_names for m in mods) or len(mods) != len(set(mods)):
+            if any(m not in {"mut", "unsafe"} and m not in self.generic_names for m in mods) or len(mods) != len(set(mods)):
                 self.fail(node, "未知或重复的借用修饰")
             mutable = "mut" in mods
             if mutable and not self.mutable_place(value):
-                self.fail(node, "可写借用需要 var 存储或已有可写指针", "XE-MUT-0001")
+                self.fail(node, "可写借用需要 let[mut] 存储或已有可写指针", "XE-MUT-0001")
             origins = value.origins if value.borrowed else ((value.place[0], mutable),)
+            if not origins:
+                # 借用元素访问也必须有拥有者，不能因纯值没有自带视图来源
+                # 而漏掉数组存储的生命周期。
+                origins = ((value.place[0], mutable),)
             origins = tuple((uid, mutable) for uid, _ in origins)
             self.loan(origins, node, exclude=value.access_uid if value.borrowed else None)
-            return Value(ptr(value.type, mutable), node, origins=origins)
+            return Value(ptr(value.type, mutable, "unsafe" in mods), node, origins=origins)
         if kind == "Dereference":
             pointer = self.infer(node["operand"])
             if pointer.type.name != "ptr":
                 self.fail(node, "# 只能解引用指针")
+            if has_unsafe(pointer.type):
+                self.warn_pointer(pointer, "正在解引用带 unsafe 风险注记的指针", "XE-PTR-0003")
             self.loan(pointer.origins, node, exclude=pointer.access_uid)
             root = pointer.origins[0][0] if pointer.origins else None
-            return Value(pointer.type.args[0], node,
+            target_type = pointer.type.args[0]
+            if has_unsafe(pointer.type) and self.carries_borrow(target_type):
+                target_type = mark_unsafe(target_type)
+            return Value(target_type, node,
                          (root, ()) if root is not None else None, pointer.origins,
-                         True, pointer.access_uid)
+                         True, pointer.access_uid, writable=pointer.type.mutable)
         if kind == "FieldAccess":
             value = self.place(node["object"])
             base = value.type.args[0] if value.type.name == "ptr" else value.type
@@ -655,21 +1309,50 @@ class Checker:
                 field_type = self.type_of(fields[node["field"]]["type"], self.generic_set(definition))
                 field_type = substitute(field_type, {"$"+p["name"]: t for p, t in
                                         zip(definition.get("generics", []), base.args)})
-            place = (value.place[0], value.place[1] + (node["field"],)) if value.place else None
+            root_place = value.place
+            if value.type.name == "ptr":
+                root_place = (value.origins[0][0], ()) if value.origins else None
+            place = (root_place[0], root_place[1] + (node["field"],)) if root_place else None
             if place:
                 self.loan(value.origins if borrowed else ((place[0], False),), node, exclude=value.access_uid)
                 binding = self.by_uid(place[0])
                 if binding and any(place[1][:len(m)] == m for m in binding.moved_fields):
                     self.fail(node, "该字段已经移动", "XE-MOVE-0001")
             origins = value.origins if borrowed or self.carries_borrow(field_type) else ()
-            return Value(field_type, node, place, origins, borrowed, value.access_uid)
+            if has_unsafe(value.type) and self.carries_borrow(field_type):
+                field_type = mark_unsafe(field_type)
+            return Value(field_type, node, place, origins, borrowed, value.access_uid,
+                         writable=value.type.mutable if value.type.name == "ptr" else value.writable)
         if kind == "BracketApply":
             return self.bracket(node, expected)
+        if kind == "AssociatedAccess":
+            variant = self.variant_expression(node, expected, optional=True)
+            if variant:
+                owner, payload = variant
+                if payload:
+                    self.fail(node, "有负载的枚举变体必须用 [] 构造", "XE-TYPE-0005")
+                return Value(owner, node)
+            resolved = self.signature_target(node)
+            if resolved:
+                signature, substitutions = resolved
+                concrete = self.instantiate(signature, substitutions, node)
+                if concrete.node["name"] in self.functions:
+                    self.call_targets[id(node)] = concrete.node["name"]
+                parameters = [substitute(t, substitutions) for t in signature.parameters]
+                result = self.call_result_type(concrete, [], substitute(signature.result, substitutions))
+                return Value(callable_type(parameters, result), node)
+            self.fail(node, "未知关联名称", "XE-NAME-0001")
         if kind == "StructLiteral":
             name_node = node["constructor"]
-            if name_node["kind"] != "Name":
-                self.fail(node, "显式泛型结构体构造尚未支持", "XE-SEM-0001")
-            name = "::".join(name_node["path"]["parts"])
+            named = "::".join(name_node["path"]["parts"]) if name_node["kind"] == "Name" else None
+            if named in self.types and self.types[named].get("generics"):
+                if value_expected is None or value_expected.name != named:
+                    self.fail(name_node, f"泛型结构体 {named} 需要具体类型附件或上下文类型",
+                              "XE-GENERIC-0001", f"例如 {named}[i32] {{ ... }}")
+                constructed = value_expected
+            else:
+                constructed = self.expression_type(name_node)
+            name = constructed.name
             definition = self.types.get(name)
             if not definition or definition["kind"] != "Struct":
                 self.fail(node, f"{name} 不是已声明结构体", "XE-NAME-0001")
@@ -677,32 +1360,58 @@ class Checker:
             names = [f["name"] for f in node["fields"]]
             if len(set(names)) != len(names) or set(names) != set(fields):
                 self.fail(node, "结构体必须恰好初始化所有字段", "XE-INIT-0002")
-            origins = []
+            origins, unsafe_fields = [], False
+            substitutions = {"$" + p["name"]: t for p, t in zip(definition.get("generics", []), constructed.args)}
             for field in node["fields"]:
-                type_ = self.type_of(fields[field["name"]]["type"], self.generic_set(definition))
+                type_ = substitute(self.type_of(fields[field["name"]]["type"], self.generic_set(definition)), substitutions)
                 value = self.convert(self.infer(field["value"], type_), type_)
                 if field["operator"] == "=" and not self.copyable(value.type):
                     self.fail(field, "资源字段必须使用 <<", "XE-OWN-0001")
+                if field["operator"] == "<<" and value.type != NEVER and self.copyable(value.type):
+                    self.fail(field, "Copy 字段使用 =；<< 只用于转移所有权", "XE-OWN-0001")
                 self.consume(value)
                 origins.extend(value.origins)
-            return Value(Type(name), node, origins=tuple(origins))
+                unsafe_fields = unsafe_fields or has_unsafe(value.type)
+            result_type = mark_unsafe(constructed) if unsafe_fields else constructed
+            return Value(result_type, node, origins=tuple(origins))
         if kind in {"Array", "Tuple"}:
-            elem_expected = expected.args[0] if expected and expected.name == "Array" else None
-            values = [self.infer(n, elem_expected) for n in node["elements"]]
-            for value in values:
-                self.consume(value)
+            elem_expected = value_expected.args[0] if value_expected and value_expected.name == "Array" else None
+            if kind == "Tuple" and value_expected and value_expected.name == "tuple":
+                if len(node["elements"]) != len(value_expected.args):
+                    self.fail(node, "元组元素数量与类型注解不符")
+                values = []
+                for element, element_type in zip(node["elements"], value_expected.args):
+                    value = self.infer(element, None if element_type == UNKNOWN else element_type)
+                    if value.type == NEVER:
+                        return Value(NEVER, node)
+                    value = self.convert(value, element_type) if element_type != UNKNOWN else value
+                    self.consume(value)
+                    values.append(value)
+            else:
+                values = []
+                for element in node["elements"]:
+                    value = self.infer(element, elem_expected)
+                    if value.type == NEVER:
+                        return Value(NEVER, node)
+                    self.consume(value)
+                    values.append(value)
             if kind == "Tuple":
                 type_ = Type("tuple", tuple(self.default(v.type) for v in values))
             else:
-                if not values and (expected is None or expected.name != "Array"):
+                if not values and (value_expected is None or value_expected.name != "Array"):
                     self.fail(node, "空数组需要显式 Array[T, 0] 类型注解")
-                common = self.common(values, node) if values else Value(expected.args[0], node)
+                common = self.common(values, node) if values else Value(value_expected.args[0], node)
                 type_ = Type("Array", (self.default(common.type), Type(str(len(values)))))
             return Value(type_, node, origins=tuple(set().union(*(set(v.origins) for v in values))))
+        if kind == "TupleBinding":
+            self.fail(node, "_ 和成员类型注解只用于元组解包目标，不是元组值", "XE-SEM-0001")
         if kind == "Call":
             return self.call(node, expected)
         if kind == "Unary":
-            value = self.infer(node["operand"], BOOL if node["operator"] == "not" else None)
+            operand_expected = BOOL if node["operator"] == "not" else None
+            if value_expected and value_expected.name in {"f32", "f64"}:
+                operand_expected = value_expected
+            value = self.infer(node["operand"], operand_expected)
             if node["operator"] == "not":
                 self.convert(value, BOOL)
                 return Value(BOOL, node)
@@ -710,7 +1419,7 @@ class Checker:
                 self.fail(node, "一元正负号需要数值")
             result = Value(value.type, node, literal=(-value.literal if node["operator"] == "-" and
                                                      value.literal is not None else value.literal))
-            target = expected.args[0] if expected and expected.name == "maybe" and lift else expected
+            target = value_expected
             return self.convert(result, target) if target and target.name in NUMERIC else result
         if kind == "ComparisonChain":
             values = [self.infer(operand) for operand in node["operands"]]
@@ -719,7 +1428,7 @@ class Checker:
                 self.fail(node, "该类型的比较 Trait 检查尚未实现", "XE-SEM-0001")
             return Value(BOOL, node)
         if kind == "Binary":
-            left = self.infer(node["left"], expected)
+            left = self.infer(node["left"], value_expected)
             if node["operator"] in {"and", "or"}:
                 self.convert(left, BOOL)
                 before = deepcopy(self.scopes)
@@ -729,7 +1438,7 @@ class Checker:
                 self.merge({}, [self.bindings(), right_states])
                 self.convert(right, BOOL)
                 return Value(BOOL, node)
-            right = self.infer(node["right"], left.type if left.type != INT_LITERAL else expected)
+            right = self.infer(node["right"], left.type if left.type != INT_LITERAL else value_expected)
             common = self.common([left, right], node)
             if common.type.name not in NUMERIC | {"$integer"}:
                 self.fail(node, "算术运算需要数值")
@@ -767,8 +1476,22 @@ class Checker:
                 self.fail(node, "?[return] 需要结果值及返回结果的外层函数", "XE-RESULT-0002")
             if value.type.args[1] != self.result.args[1]:
                 self.fail(node, "传播错误类型必须与外层函数相同", "XE-RESULT-0002")
+            if self.carries_borrow(value.type.args[1]):
+                error = Value(value.type.args[1], node, origins=value.origins)
+                self.escape(error, function_exit=True)
+                self.return_origins.update(error.origins)
             self.consume(value)
-            return Value(value.type.args[0], node, origins=value.origins)
+            return Value(value.type.args[0], node,
+                         origins=value.origins if self.carries_borrow(value.type.args[0]) else ())
+        if kind == "Unwrap":
+            value = self.infer(node["operand"])
+            if value.type.name != "maybe":
+                self.fail(node, "?[panic] 需要 T? 或 T?[E] 结果值", "XE-RESULT-0002")
+            # panic 无继续执行路径，不参与正常分支的状态合并。
+            # 成功时传递负载所有权，与 ?[return] 相同，不能从指针移出资源。
+            self.consume(value)
+            return Value(value.type.args[0], node,
+                         origins=value.origins if self.carries_borrow(value.type.args[0]) else ())
         if kind == "AnonymousFunction":
             return self.anonymous(node)
         if kind == "Unsafe":
@@ -777,6 +1500,10 @@ class Checker:
 
     def variant(self, name, expected, node, optional=False):
         parts = name.split("::")
+        alias_owner = self.resolve_alias(parts[0]) if len(parts) == 2 and parts[0] in self.aliases else None
+        if alias_owner:
+            parts[0] = alias_owner.name
+            expected = alias_owner
         if len(parts) == 2 and parts[0] == "Maybe":
             result = expected if expected and expected.name == "maybe" else maybe(UNKNOWN, UNKNOWN)
             if parts[1] == "Yes":
@@ -789,6 +1516,9 @@ class Checker:
             declaration = self.types[parts[0]]
             for variant in declaration.get("variants", []):
                 if variant["name"] == parts[1]:
+                    if declaration.get("generics") and not (expected and expected.name == parts[0]):
+                        self.fail(node, f"泛型枚举 {parts[0]} 需要具体类型附件或上下文类型",
+                                  "XE-GENERIC-0001", f"例如 {parts[0]}[i32]::{parts[1]}，或给接收变量标注完整类型")
                     result = expected if expected and expected.name == parts[0] else Type(parts[0])
                     bindings = {"$"+p["name"]: t for p, t in zip(declaration.get("generics", []), result.args)}
                     return result, [substitute(self.type_of(t, self.generic_set(declaration)), bindings)
@@ -797,18 +1527,76 @@ class Checker:
             self.fail(node, f"未知枚举变体 {name}", "XE-NAME-0001")
         return None
 
+    def variant_expression(self, node, expected=None, optional=False):
+        if node["kind"] == "Name":
+            return self.variant("::".join(node["path"]["parts"]), expected, node, optional)
+        if node["kind"] == "AssociatedAccess":
+            owner = self.expression_type(node["object"])
+            return self.variant(owner.name + "::" + node["member"], owner, node, optional)
+        if not optional:
+            self.fail(node, "此处需要枚举变体名称", "XE-TYPE-0005")
+        return None
+
+    def signature_target(self, node):
+        """解析函数名或类型关联函数，返回模板及由类型限定名确定的代入。"""
+        if node["kind"] == "Name":
+            name = "::".join(node["path"]["parts"])
+            if any(name in scope for scope in self.scopes):
+                return None
+            if name in self.functions:
+                return self.functions[name], {}
+            if "::" not in name:
+                return None
+            owner_name, member = name.rsplit("::", 1)
+            owner = self.resolve_alias(owner_name) if owner_name in self.aliases else None
+            if owner:
+                owner_name = owner.name
+            signature = self.methods.get((owner_name, member))
+            if signature and owner:
+                substitutions = {}
+                self.unify_generic(signature.self_type, owner, substitutions, node)
+                if substitute(signature.self_type, substitutions) != owner:
+                    self.fail(node, f"此关联函数属于 {signature.self_type}，不是 {owner}", "XE-TYPE-0001")
+                return signature, substitutions
+            return (signature, {}) if signature else None
+        if node["kind"] == "AssociatedAccess":
+            owner = self.expression_type(node["object"])
+            signature = self.methods.get((owner.name, node["member"]))
+            if not signature:
+                return None
+            substitutions = {}
+            self.unify_generic(signature.self_type, owner, substitutions, node)
+            if substitute(signature.self_type, substitutions) != owner:
+                self.fail(node, f"此关联函数属于 {signature.self_type}，不是 {owner}", "XE-TYPE-0001")
+            return signature, substitutions
+        return None
+
     def bracket(self, node, expected):
         obj = node["object"]
-        variant = self.variant("::".join(obj["path"]["parts"]), expected, obj, True) if obj["kind"] == "Name" else None
+        resolved = self.signature_target(obj)
+        if resolved:
+            signature, substitutions = resolved
+            substitutions.update(self.explicit_substitutions(signature, node["arguments"], node))
+            concrete = self.instantiate(signature, substitutions, node)
+            self.call_targets[id(node)] = concrete.node["name"]
+            # 机器代码缓存去除调用处风险，但源码显式 @[unsafe] 的函数值
+            # 类型必须保留这些信息，不能借实例缓存洗掉地址风险。
+            parameters = [substitute(t, substitutions) for t in signature.parameters]
+            result = self.call_result_type(concrete, [], substitute(signature.result, substitutions))
+            return Value(callable_type(parameters, result), node)
+        variant = self.variant_expression(obj, expected, optional=True)
         if variant:
             result, parameters = variant
             values = self.arguments(node["arguments"], parameters, node)
             if result.name == "maybe":
                 args = list(result.args)
-                index = 0 if obj["path"]["parts"][-1] == "Yes" else 1
+                member = obj["path"]["parts"][-1] if obj["kind"] == "Name" else obj["member"]
+                index = 0 if member == "Yes" else 1
                 if values:
                     args[index] = self.default(values[0].type)
                 result = Type("maybe", tuple(args))
+            if any(has_unsafe(v.type) for v in values):
+                result = mark_unsafe(result)
             return Value(result, node, origins=tuple(o for v in values for o in v.origins))
         value = self.infer(obj)
         base = value.type.args[0] if value.type.name == "ptr" else value.type
@@ -819,7 +1607,22 @@ class Checker:
         if base.name == "Array" and isinstance(index.literal, int) and len(base.args) > 1:
             if not 0 <= index.literal < int(base.args[1].name):
                 self.fail(node, "数组索引越界", "XE-TYPE-0004")
-        return Value(base.args[0], node, value.place, value.origins, borrowed=True, access_uid=value.access_uid)
+        origins = value.origins
+        if base.name in {"Array", "Vec"} and value.place and not value.borrowed and value.type.name != "ptr":
+            owner = self.by_uid(value.place[0])
+            origins = tuple(set(origins + ((value.place[0], bool(owner and owner.mutable)),)))
+        elif base.name == "SliceMut":
+            # 描述符是否能被重新赋值，不决定其独占数据是否可写；
+            # 但经只读指针访问描述符时，不可取得该独占写入能力。
+            writable = value.type.name != "ptr" or value.type.mutable
+            origins = tuple((uid, writable) for uid, _ in origins)
+        writable = (value.type.mutable if value.type.name == "ptr" else
+                    base.name == "SliceMut" or self.mutable_place(value))
+        element_type = base.args[0]
+        if has_unsafe(value.type) and self.carries_borrow(element_type):
+            element_type = mark_unsafe(element_type)
+        return Value(element_type, node, value.place, origins, borrowed=True,
+                     access_uid=value.access_uid, writable=writable)
 
     def arguments(self, nodes, parameters, node):
         if len(nodes) != len(parameters):
@@ -845,6 +1648,27 @@ class Checker:
         callee = node["callee"]
         if callee["kind"] == "FieldAccess":
             return self.method(callee, node["arguments"], node)
+        if callee["kind"] == "BracketApply":
+            target = callee["object"]
+            if target["kind"] == "FieldAccess":
+                return self.method(target, node["arguments"], node, callee["arguments"])
+            resolved = self.signature_target(target)
+            if resolved:
+                signature, substitutions = resolved
+                substitutions.update(self.explicit_substitutions(signature, callee["arguments"], callee))
+                return self.apply_signature(signature, node["arguments"], node, substitutions)
+        if callee["kind"] == "AssociatedAccess":
+            resolved = self.signature_target(callee)
+            if resolved:
+                signature, substitutions = resolved
+                return self.apply_signature(signature, node["arguments"], node, substitutions)
+            owner = self.expression_type(callee["object"])
+            if not owner.args:
+                builtin = self.builtin_call(owner.name + "::" + callee["member"], node["arguments"], node)
+                if builtin is not None:
+                    return builtin
+            if self.variant_expression(callee, expected, True):
+                self.fail(node, "枚举载荷使用 []，不是函数调用 ()", "XE-TYPE-0005")
         if callee["kind"] == "Name":
             name = "::".join(callee["path"]["parts"])
             if self.variant(name, expected, callee, True):
@@ -852,6 +1676,15 @@ class Checker:
             local = any(name in scope for scope in self.scopes)
             if name in self.functions and not local:
                 return self.apply_signature(self.functions[name], node["arguments"], node)
+            if "::" in name:
+                owner_name, member = name.rsplit("::", 1)
+                if owner_name in self.aliases:
+                    owner = self.resolve_alias(owner_name)
+                    name = owner.name + "::" + member
+                    resolved = self.signature_target(callee)
+                    if resolved:
+                        signature, substitutions = resolved
+                        return self.apply_signature(signature, node["arguments"], node, substitutions)
             builtin = self.builtin_call(name, node["arguments"], node) if not local else None
             if builtin is not None:
                 return builtin
@@ -859,52 +1692,41 @@ class Checker:
                 owner, method = name.rsplit("::", 1)
                 signature = self.methods.get((owner, method))
                 if signature:
-                    values = self.arguments(node["arguments"], signature.parameters, node)
-                    return Value(signature.result, node, origins=tuple(o for v in values for o in v.origins)
-                                 if self.carries_borrow(signature.result) else ())
+                    return self.apply_signature(signature, node["arguments"], node)
         function = self.infer(callee)
         return self.invoke(function, node["arguments"], node)
 
-    def apply_signature(self, signature, nodes, node):
-        """直接泛型调用从实参统一类型变量；不尝试隐式转换或 Trait 搜索。"""
-        if len(nodes) != len(signature.parameters):
+    def apply_signature(self, signature, nodes, node, substitutions=None, prefix_values=()):
+        """先按具体实参推导，再登记实例；具体函数体由检查队列独立复查。"""
+        if len(nodes) + len(prefix_values) != len(signature.parameters):
             self.fail(node, "函数参数数量不匹配", "XE-CALL-0001")
-        substitutions, values = {}, []
-        def has_variable(type_):
-            return type_.name.startswith("$") or any(has_variable(t) for t in type_.args)
-        def unify(pattern, actual, at):
-            if pattern.name.startswith("$"):
-                actual = self.default(actual)
-                if pattern.name in substitutions and substitutions[pattern.name] != actual:
-                    self.fail(at, "同一泛型参数被推导成不同类型")
-                substitutions[pattern.name] = actual
-            elif pattern.name == actual.name and len(pattern.args) == len(actual.args):
-                for p, a in zip(pattern.args, actual.args):
-                    unify(p, a, at)
+        substitutions, values = dict(substitutions or {}), []
         saved = list(self.temporary_loans)
         try:
-            for argument, pattern in zip(nodes, signature.parameters):
+            arguments = list(prefix_values) + list(nodes)
+            for argument, pattern in zip(arguments, signature.parameters):
                 parameter = substitute(pattern, substitutions)
-                value = self.infer(argument, None if has_variable(parameter) else parameter)
-                unify(pattern, value.type, argument)
+                value = (argument if isinstance(argument, Value) else
+                         self.infer(argument, None if self.has_variable(parameter) else parameter))
+                # 已显式绑定的类型只进行普通转换，允许 mut 指针降为只读；
+                # 尚未确定的类型才推导，不能覆盖调用者明确给出的附件。
+                if self.has_variable(parameter):
+                    self.unify_generic(parameter, value.type, substitutions, value.node)
                 value = self.convert(value, substitute(pattern, substitutions))
                 self.consume(value)
                 self.temporary_loans.extend(value.origins)
                 values.append(value)
         finally:
             self.temporary_loans = saved
-        for constraint in signature.node.get("constraints", []):
-            trait = constraint["trait"]
-            if trait["kind"] != "NamedType" or trait["path"]["parts"] != ["Copy"]:
-                self.fail(constraint, "目前泛型约束只支持 Copy", "XE-SEM-0001")
-            target = substitute(self.type_of(constraint["target"], signature.generics, signature.self_type), substitutions)
-            if not self.copyable(target):
-                self.fail(node, f"{target} 不满足 Copy 约束", "XE-OWN-0001")
-        result = substitute(signature.result, substitutions)
-        if has_variable(result):
-            self.fail(node, "无法从实参推导返回泛型，请明确实参类型", "XE-TYPE-0001")
-        return Value(result, node, origins=tuple(o for v in values for o in v.origins)
-                     if self.carries_borrow(result) else ())
+        concrete = self.instantiate(signature, substitutions, node)
+        if concrete.node["name"] in self.functions and self.functions[concrete.node["name"]] is concrete:
+            self.call_targets[id(node)] = concrete.node["name"]
+        result = self.call_result_type(concrete, values)
+        value = Value(result, node, origins=self.call_origins(concrete, values)
+                      if self.carries_borrow(result) else ())
+        if concrete.node["body"] is None and self.carries_borrow(result):
+            self.warn_pointer(value, "外部函数返回的地址或视图有效性无法由本编译器确认", "XE-PTR-0003")
+        return value
 
     def invoke(self, function, nodes, node):
         if function.type.name not in {"fn", "closure"}:
@@ -912,11 +1734,38 @@ class Checker:
         values = self.arguments(nodes, list(function.type.args[:-1]), node)
         self.consume(function)
         result = function.type.args[-1]
+        if self.carries_borrow(result) and any(has_unsafe(v.type) for v in [function, *values]):
+            result = mark_unsafe(result)
         return Value(result, node, origins=function.origins + tuple(o for v in values for o in v.origins)
                      if self.carries_borrow(result) else ())
 
     def builtin_call(self, name, nodes, node):
-        if name in {"println", "print", "eprintln", "format"}:
+        # Prelude 和 std::io 名称共用公开签名，不重复维护两套接口。
+        # 用户/局部函数的名称解析已在 call() 中先行处理。
+        io_signature = io_function(name)
+        if io_signature is not None:
+            name = normalize_io_name(name)
+            if not io_signature.formatted:
+                self.arguments(nodes, list(io_signature.parameters), node)
+                return Value(io_signature.result, node)
+        parts = name.split("::")
+        if len(parts) == 2 and parts[0] in NUMERIC and parts[1] == "try_from":
+            if len(nodes) != 1:
+                self.fail(node, "数值 try_from 需要且仅需要一个参数", "XE-CALL-0001")
+            value = self.infer(nodes[0])
+            source = self.default(value.type)
+            integers = NUMERIC - {"f32", "f64"}
+            if source.name in {"f32", "f64"} or parts[0] in {"f32", "f64"}:
+                self.fail(node, "数值 try_from 当前仅定义整数之间的检查转换；浮点策略尚未确定",
+                          "XE-SEM-0001")
+            if source.name not in integers:
+                self.fail(nodes[0], "数值 try_from 的实参必须是整数", "XE-TYPE-0001")
+            self.convert(value, source)
+            self.consume(value)
+            # ConversionError 是一个无资源负载的标准错误值，不臆造公开字段。
+            # 转换的范围检查在后端执行；这里不将失败改成编译期拒绝。
+            return Value(maybe(Type(parts[0]), CONVERSION_ERROR), node)
+        if (io_signature is not None and io_signature.formatted) or name == "format":
             if not nodes:
                 self.fail(node, "格式化调用需要格式字符串", "XE-CALL-0001")
             template = self.convert(self.infer(nodes[0]), STR)
@@ -940,19 +1789,44 @@ class Checker:
         self.arguments(nodes, parameters, node)
         return Value(result, node)
 
-    def method(self, callee, nodes, node):
+    def method(self, callee, nodes, node, type_arguments=None):
         receiver = self.place(callee["object"])
         base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
         name = callee["field"]
         signature = self.methods.get((base.name, name))
         mutable, owning, receiver_loans = False, False, ()
         if signature:
-            if not signature.parameters:
+            if not signature.parameters or signature.node["parameters"][0]["name"] != "self":
                 self.fail(node, "关联函数不能使用对象调用", "XE-CALL-0001")
-            self_parameter = signature.parameters[0]
-            owning = self_parameter.name != "ptr"
-            mutable = self_parameter.mutable
-            parameters, result = signature.parameters[1:], signature.result
+            substitutions = {}
+            self.unify_generic(signature.self_type, base, substitutions, node)
+            owner = substitute(signature.self_type, substitutions)
+            if owner != base:
+                self.fail(node, f"方法属于 {owner}，不能用 {base} 调用")
+            if type_arguments is not None:
+                explicit = self.explicit_substitutions(signature, type_arguments, node)
+                for key, type_ in explicit.items():
+                    if key in substitutions and substitutions[key] != type_:
+                        self.fail(node, "方法类型参数与对象类型冲突", "XE-GENERIC-0001")
+                    substitutions[key] = type_
+            self_parameter = substitute(signature.parameters[0], substitutions)
+            temporary_receiver = not receiver.place and not receiver.origins
+            if self_parameter.name == "ptr":
+                writable = receiver.type.mutable if receiver.type.name == "ptr" else self.mutable_place(receiver)
+                if self_parameter.mutable and not writable:
+                    self.fail(node, "可写方法需要 let[mut] 或 T@[mut]", "XE-BORROW-0004")
+                origins = receiver.origins or (((receiver.place[0], self_parameter.mutable),) if receiver.place else ())
+                receiver = Value(ptr(base, self_parameter.mutable, has_unsafe(receiver.type)), receiver.node,
+                                 receiver.place, origins, receiver.borrowed, receiver.access_uid)
+            elif receiver.type.name == "ptr":
+                receiver = Value(base, receiver.node, receiver.place, receiver.origins, True, receiver.access_uid)
+            result = self.apply_signature(signature, nodes, node, substitutions, [receiver])
+            concrete = self.functions.get(self.call_targets.get(id(node)), signature)
+            depends_on_receiver = concrete.borrow_parameters is None or 0 in concrete.borrow_parameters
+            if (temporary_receiver and self_parameter.name == "ptr" and self.carries_borrow(result.type)
+                    and (depends_on_receiver or not self.copyable(base))):
+                self.warn_pointer(result, "临时对象产生的地址或视图可能在使用前失效", "XE-PTR-0003")
+            return result
         elif base.name == "maybe" and name == "expect":
             parameters, result, owning = [STR], base.args[0], True
         else:
@@ -963,7 +1837,7 @@ class Checker:
                 ("String", "push_str"): ([STR], UNIT, True),
                 ("str", "byte_at"): ([USIZE], Type("u8"), False),
                 ("str", "slice_bytes"): ([Type("Range", (USIZE,))], maybe(STR), False),
-                ("str", "data"): ([], Type("RawPtr", (Type("u8"),)), False),
+                ("str", "data"): ([], ptr(Type("u8")), False),
                 ("File", "size"): ([], USIZE, False),
                 ("File", "read_to_string"): ([], maybe(STRING, IO_ERROR), False),
                 ("Array", "slice"): ([Type("Range", (USIZE,))], Type("Slice", (element,)), False),
@@ -974,6 +1848,8 @@ class Checker:
             if entry is None:
                 self.fail(node, f"类型 {base} 没有已支持的方法 {name}", "XE-NAME-0001")
             parameters, result, mutable = entry
+            if base.name == "SliceMut" and name == "copy_from" and not self.copyable(element):
+                self.fail(node, "copy_from 的元素必须是 Copy；资源不能被重复复制", "XE-OWN-0001")
         if owning:
             if receiver.type.name == "ptr":
                 receiver = Value(base, receiver.node, receiver.place, receiver.origins, True, receiver.access_uid)
@@ -981,7 +1857,7 @@ class Checker:
         elif self.check_borrows:
             writable = receiver.type.mutable if receiver.type.name == "ptr" else self.mutable_place(receiver)
             if mutable and not writable:
-                self.fail(node, "可写方法需要 var 或 T@[mut]", "XE-BORROW-0004")
+                self.fail(node, "可写方法需要 let[mut] 或 T@[mut]", "XE-BORROW-0004")
             origins = receiver.origins if receiver.type.name == "ptr" else (((receiver.place[0], mutable),) if receiver.place else ())
             self.loan(origins, node, receiver.access_uid)
             receiver_loans = origins
@@ -992,16 +1868,49 @@ class Checker:
             values = self.arguments(nodes, parameters, node)
         finally:
             self.temporary_loans = saved
+        if base == STRING and name == "push_str":
+            roots = {uid for uid, _ in receiver.origins}
+            if receiver.place and receiver.type.name != "ptr":
+                roots.add(receiver.place[0])
+            for uid in roots:
+                self.invalidate_storage(uid, node, "的数据缓冲区可能因追加而重新分配")
+                # 对象自身仍然存在；已有别名已标风险，新视图对应新缓冲区。
+                self.invalid_roots.pop(uid, None)
         origins = ()
         if self.carries_borrow(result):
-            if self.check_borrows and not self.copyable(base) and not owning and not receiver.place and not receiver.origins:
-                self.fail(node, "不能返回临时资源的借用视图；先将资源绑定到变量", "XE-BORROW-0003")
-            origins = receiver.origins or (((receiver.place[0], mutable),) if receiver.place else ())
-            origins += tuple(o for v in values for o in v.origins)
+            depends_on_receiver = (signature is not None and
+                                   (signature.borrow_parameters is None or 0 in signature.borrow_parameters))
+            temporary_storage = (base.name == "Array" and not receiver.place or
+                                 depends_on_receiver and not owning and not receiver.place and not receiver.origins)
+            risky_temporary = temporary_storage or not self.copyable(base) and not owning and not receiver.place and not receiver.origins
+            receiver_origins = receiver.origins or (((receiver.place[0], mutable),) if receiver.place else ())
+            origins = (self.call_origins(signature, [Value(receiver.type, node, origins=receiver_origins), *values])
+                       if signature else receiver_origins + tuple(o for v in values for o in v.origins))
+            if signature:
+                result = self.call_result_type(signature, [receiver, *values], result)
+            elif has_unsafe(receiver.type):
+                result = mark_unsafe(result)
+            value = Value(result, node, origins=origins)
+            if risky_temporary:
+                self.warn_pointer(value, "临时对象产生的地址或视图可能在使用前失效", "XE-PTR-0003")
+            return value
         return Value(result, node, origins=origins)
 
     def handle(self, handler, payloads, expected=None, lift=False):
         if handler["kind"] == "FunctionTarget":
+            target = handler["target"]
+            resolved = self.signature_target(target)
+            if resolved and resolved[0].generics:
+                signature, substitutions = resolved
+                if len(signature.parameters) != len(payloads):
+                    self.fail(handler, "管道函数参数数量与分支载荷不一致", "XE-CALL-0001")
+                for pattern, value in zip(signature.parameters, payloads):
+                    parameter = substitute(pattern, substitutions)
+                    if self.has_variable(parameter):
+                        self.unify_generic(parameter, value.type, substitutions, handler)
+                concrete = self.instantiate(signature, substitutions, handler)
+                self.call_targets[id(target)] = concrete.node["name"]
+                self.call_targets[id(handler)] = concrete.node["name"]
             function = self.infer(handler["target"])
             if function.type.name not in {"fn", "closure"}:
                 self.fail(handler, "管道目标必须是函数", "XE-CALL-0001")
@@ -1011,8 +1920,11 @@ class Checker:
             for value, type_ in zip(payloads, parameters):
                 self.consume(self.convert(value, type_))
             self.consume(function)
-            return Value(function.type.args[-1], handler, origins=function.origins + tuple(o for v in payloads for o in v.origins)
-                         if self.carries_borrow(function.type.args[-1]) else ())
+            result_type = function.type.args[-1]
+            if self.carries_borrow(result_type) and any(has_unsafe(v.type) for v in [function, *payloads]):
+                result_type = mark_unsafe(result_type)
+            return Value(result_type, handler, origins=function.origins + tuple(o for v in payloads for o in v.origins)
+                         if self.carries_borrow(result_type) else ())
         parameters = handler["parameters"]
         ignore = len(parameters) == 1 and parameters[0]["name"] == "_" and parameters[0]["type"] is None
         if not ignore and len(parameters) != len(payloads):
@@ -1021,8 +1933,8 @@ class Checker:
         if not ignore:
             for parameter, value in zip(parameters, payloads):
                 type_ = self.type_of(parameter["type"]) if parameter["type"] else value.type
-                self.convert(value, type_)
-                self.declare(parameter["name"], type_, parameter, parameter["mutable"], origins=value.origins)
+                value = self.convert(value, type_)
+                self.declare(parameter["name"], value.type, parameter, parameter["mutable"], origins=value.origins)
         result = self.infer(handler["body"], expected, lift)
         if expected:
             result = self.convert(result, expected, lift)
@@ -1035,12 +1947,21 @@ class Checker:
         value = self.infer(node["input"])
         borrowed = "borrow" in node["modifiers"]
         mutable = "mut" in node["modifiers"]
+        modifiers = node["modifiers"]
+        if len(modifiers) != len(set(modifiers)) or any(m not in {"borrow", "mut", "unsafe"} for m in modifiers):
+            self.fail(node, "未知或重复的匹配借用修饰", "XE-TYPE-0001")
         base = value.type.args[0] if value.type.name == "ptr" else value.type
         if value.type.name == "ptr" and not borrowed:
             self.fail(node, "指针匹配必须显式使用 ?[@]，不能取得其指向资源", "XE-MOVE-0002")
         if mutable and self.check_borrows and not (value.type.mutable if value.type.name == "ptr" else self.mutable_place(value)):
             self.fail(node, "可写匹配需要可写对象", "XE-BORROW-0004")
-        origins = value.origins or (((value.place[0], mutable),) if value.place else ())
+        origins = value.origins
+        if borrowed and value.type.name != "ptr" and value.place:
+            # 指向负载描述符的指针既依赖对象存储，也可能依赖视图底层数据。
+            # 只保留底层来源会错误允许返回局部枚举内的 str@。
+            origins = tuple(set(origins + ((value.place[0], mutable),)))
+        elif not origins and value.place:
+            origins = ((value.place[0], mutable),)
         if borrowed:
             if self.check_borrows and not value.place and not value.origins:
                 self.fail(node, "借用匹配需要稳定的存储位置；先绑定被匹配值", "XE-BORROW-0001")
@@ -1050,7 +1971,8 @@ class Checker:
         if self.unresolved(base):
             self.fail(node, "匹配前需要确定完整枚举类型，请给输入值添加类型注解")
         declaration = self.types.get(base.name, {})
-        variants = {v["name"]: [self.type_of(t, self.generic_set(declaration)) for t in v["payload"]]
+        substitutions = {"$" + p["name"]: t for p, t in zip(declaration.get("generics", []), base.args)}
+        variants = {v["name"]: [substitute(self.type_of(t, self.generic_set(declaration)), substitutions) for t in v["payload"]]
                     for v in declaration.get("variants", [])}
         if base.name == "maybe":
             variants = {"Yes": [base.args[0]], "None" if base.args[1] == NONE else "No": [] if base.args[1] == NONE else [base.args[1]]}
@@ -1073,7 +1995,12 @@ class Checker:
                 elif selector["kind"] == "VariantSelector":
                     path = selector["path"]["parts"]
                     key = path[-1]
-                    if len(path) != 2 or path[0] != ("Maybe" if base.name == "maybe" else base.name) or key not in variants:
+                    owner = path[0]
+                    alias_type = self.resolve_alias(owner) if owner in self.aliases else None
+                    if alias_type:
+                        owner = alias_type.name
+                    if (len(path) != 2 or owner != ("Maybe" if base.name == "maybe" else base.name)
+                            or key not in variants or alias_type is not None and alias_type != base):
                         self.fail(selector, "变体不属于被匹配类型", "XE-MATCH-0001")
                     if selector.get("filters") is not None:
                         self.fail(selector, "载荷过滤模式尚未实现", "XE-SEM-0001")
@@ -1088,7 +2015,9 @@ class Checker:
             covered.add(key)
             if not borrowed and base.name in self.drop_types and any(not self.copyable(t) for t in types):
                 self.fail(arm, "自定义 Drop 枚举不能移出资源载荷", "XE-OWN-0002")
-            payloads = [Value(ptr(t, mutable) if borrowed and t.name not in {"str", "Slice"} else t,
+            if has_unsafe(value.type):
+                types = [mark_unsafe(t) if self.carries_borrow(t) else t for t in types]
+            payloads = [Value(ptr(t, mutable, has_unsafe(value.type)) if borrowed else t,
                               arm, origins=origins if borrowed or self.carries_borrow(t) else ()) for t in types]
             result = self.handle(arm["handler"], payloads, expected, lift)
             results.append(result)
@@ -1117,10 +2046,18 @@ class Checker:
             annotation = self.type_of(node["type"]) if node["type"] else self.default(element)
             self.convert(Value(element, node), annotation)
             origins = source.origins
-            if element.name == "ptr" and not origins and source.place:
-                origins = ((source.place[0], element.mutable),)
+            if element.name == "ptr" and source.type.name == "Array" and not source.place:
+                # for 的临时数组确实由后端拥有至循环结束；引入不可命名的
+                # 所有者，让元素指针不能从循环返回或写到外层后继续使用。
+                owner = self.declare("$iteration-owner", source.type, node)
+                origins = tuple(set(origins + ((owner.uid, element.mutable),)))
+            elif element.name == "ptr" and source.place and not source.borrowed:
+                origins = tuple(set(origins + ((source.place[0], element.mutable),)))
+            if element.name == "ptr":
+                origins = tuple((uid, element.mutable) for uid, _ in origins)
             self.declare(node["name"], annotation, node, origins=origins)
         self.block(node["body"])
+        self.scope_escape(Value(UNIT, node), node, {b.uid for b in self.scopes[-1].values()})
         self.scopes.pop()
         after = deepcopy(self.bindings())
         self.scopes = before
@@ -1135,27 +2072,25 @@ class Checker:
             value = Value(binding.type, capture, (binding.uid, ()), binding.origins)
             if capture["borrow"]:
                 mods = [m["name"] for m in capture["modifiers"]]
-                if mods and not self.check_borrows:
-                    self.fail(capture, "借用捕获修饰需要 --check-borrows", "XE-BORROW-0001")
-                if len(mods) != len(set(mods)) or any(m != "mut" for m in mods):
+                if len(mods) != len(set(mods)) or any(m not in {"mut", "unsafe"} for m in mods):
                     self.fail(capture, "未知或重复的捕获借用修饰")
-                if binding.type == STR:
-                    self.fail(capture, "str 视图按值捕获，禁止 str@", "XE-TYPE-0003")
-                if self.check_borrows and binding.type.name == "ptr":
-                    self.fail(capture, "检查模式下的多级指针捕获尚未实现", "XE-SEM-0001")
                 mutable = "mut" in mods
-                if mutable and not binding.mutable:
-                    self.fail(capture, "可写捕获需要 var 存储", "XE-MUT-0001")
+                if self.check_borrows and mutable and not binding.mutable:
+                    self.fail(capture, "可写捕获需要 let[mut] 存储", "XE-MUT-0001")
                 origins = ((binding.uid, mutable),)
                 self.loan(origins, capture)
                 value = Value(ptr(binding.type, origins[0][1]), capture, origins=origins)
             else:
                 self.consume(value)
             captures.append((capture["name"], value))
-        saved = self.scopes, self.result, self.last_uses, self.loop_depths, self.parameter_roots
+        saved = (self.scopes, self.result, self.last_uses, self.loop_depths,
+                 self.parameter_roots, self.return_origins, self.invalid_roots, self.function_unsafe_return)
         self.scopes, self.result = [{}], self.type_of(node["result"])
         self.last_uses, self.loop_depths = names_used(node["body"]), []
         self.parameter_roots = {uid for _, value in captures for uid, _ in value.origins}
+        self.return_origins = set()
+        self.invalid_roots = {}
+        self.function_unsafe_return = False
         for name, value in captures:
             self.declare(name, value.type, node, origins=value.origins)
         parameters = []
@@ -1173,12 +2108,16 @@ class Checker:
         self.convert(result, self.result, True)
         self.escape(result, function_exit=True)
         result_type = self.result
-        self.scopes, self.result, self.last_uses, self.loop_depths, self.parameter_roots = saved
-        return Value(callable_type(parameters, result_type, bool(captures)), node,
+        if (self.carries_borrow(result_type) or result_type.name == "fn") and (has_unsafe(result.type) or self.function_unsafe_return):
+            result_type = mark_unsafe(result_type)
+        (self.scopes, self.result, self.last_uses, self.loop_depths,
+         self.parameter_roots, self.return_origins, self.invalid_roots, self.function_unsafe_return) = saved
+        return Value(callable_type(parameters, result_type, bool(captures),
+                                   self.offset(node) if captures else None), node,
                      origins=tuple(o for _, value in captures for o in value.origins))
 
 
-def check_source(text: str, filename: str = "<input>", check_borrows: bool = False) -> list[Diagnostic]:
+def check_source(text: str, filename: str = "<input>", check_borrows: bool = True) -> list[Diagnostic]:
     """解析失败也使用同一种定位诊断；语法成功才进入语义阶段。"""
     from .parser import parse_source
     source = Source(text, filename)

@@ -1,0 +1,4 @@
+// XE-PTR-0001：局部地址逃逸。应该 warning 但允许编译，禁止作为正常运行测试。
+fn invalid() -> i32@ { let value = 1; value@ }
+
+fn main() { let pointer: i32@ = invalid(); } // 只保存，不解引用悬垂指针。

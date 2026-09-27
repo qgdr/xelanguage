@@ -1,0 +1,36 @@
+// tuple 在类型位置列出成员类型，在值位置列出成员表达式。
+fn coordinates() -> tuple[i32, i32] { tuple[10, 20] }
+fn messages() -> tuple[String, String] {
+    tuple[String::from("hello"), String::from("world")]
+}
+
+fn main() {
+    let point: tuple[i32, i32] = coordinates();
+    // let 创建两个新变量；逐成员类型标注是可选的。
+    let tuple[x: i32, y: i32] = point;
+    let singleton: tuple[i32] = tuple[42];
+    println("{} {} {}", x, y, singleton.0);
+
+    // 没有 let 时，目标必须是已有的、允许写入的变量。
+    let[mut] left = 0;
+    let[mut] right = 0;
+    tuple[left, right] = coordinates();
+    println("{} {}", left, right);
+
+    // >> 按整个源元组的 Copy 资格决定复制或移动，只求值一次。
+    tuple[30, 40] >> tuple[left, right];
+    println("{} {}", left, right);
+
+    // String 不能复制：资源元组整体使用 <<，每个资源只取得一次。
+    let tuple[first: String, second: String] << messages();
+    println("{} {}", first@, second@);
+
+    let[mut] old_left << String::from("old left");
+    let[mut] old_right << String::from("old right");
+    tuple[old_left, old_right] << messages();
+    println("{} {}", old_left@, old_right@);
+
+    // _ 不创建变量，也不能读取；忽略的拥有资源仍会自动析构。
+    let tuple[kept, _] << messages();
+    println("{}", kept@);
+}

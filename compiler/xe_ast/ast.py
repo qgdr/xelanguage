@@ -3,7 +3,7 @@ from typing import Any
 from .source import Source
 
 SCHEMA_VERSION = 1
-SYNTAX_VERSION = "xe-bootstrap-0.2"
+SYNTAX_VERSION = "xe-bootstrap-0.9"
 
 
 def document(source: Source, module: dict[str, Any]) -> dict[str, Any]:

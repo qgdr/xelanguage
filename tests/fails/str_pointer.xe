@@ -1,6 +1,7 @@
 fn main() {
     let text: str = "hello";
 
-    // 编译失败：str 已经是地址和长度视图，安全代码禁止 str@。
+    // str@ 合法，但只读指针不能用于修改视图描述符。
     let pointer: str@ = text@;
+    pointer# = "changed";
 }

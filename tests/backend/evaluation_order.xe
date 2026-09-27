@@ -2,7 +2,7 @@ fn change(value: i32@[mut]) -> i32 { value# = value# + 1; value# }
 fn pair(a: i32, b: i32) { println("{} {}", a, b); }
 fn observed(value: i32) -> i32 { println("observed {}", value); value }
 fn main() {
-    var value = 1;
+    let[mut] value = 1;
     pair(value, change(value@[mut])); // 1 2，不受 C 实参求值顺序影响。
     println("{} {}", value, change(value@[mut])); // 2 3。
     let chain = observed(1) == observed(2) == observed(3);

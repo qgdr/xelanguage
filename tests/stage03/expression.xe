@@ -1,6 +1,6 @@
 fn main()
 {
-    var left: i32 = 2;
+    let[mut] left: i32 = 2;
     let right: i32 = 3;
     left = -left - right * -left;
     return left;

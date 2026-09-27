@@ -1,0 +1,22 @@
+// 别名可以先引用后面声明的别名；它们最终都是同一个 i32 类型。
+type Coordinate = Number;
+type Number = i32;
+type Point = tuple[Coordinate, Coordinate];
+
+// handler 是普通函数类型的简短名字，不需要创建包装函数。
+type handler = fn(i32) -> i32;
+type Text = String;
+
+fn next(value: Number) -> Coordinate { value + 1 }
+fn origin() -> Point { tuple[10, 20] }
+
+fn main() {
+    let point: Point = origin();
+    let tuple[x, y] = point;
+    let callback: handler = next;
+    println("{} {} {}", x, y, callback(41));
+
+    // 透明别名不会增加 Copy 能力：Text 与 String 都必须转移。
+    let text: Text << String::from("hello");
+    println("{}", text@);
+}

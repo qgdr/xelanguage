@@ -1,0 +1,17 @@
+// 已批准的语法：声明未知量在关键字后，代入类型在名称后。
+// 已经过单文件语义检查、具体实例的 C 布局和实际执行验收。
+struct[T] Holder { value: T, }
+
+fn[T] wrap(value: T) -> Holder[T] {
+    Holder[T] {
+        // T 可能 Copy，也可能是资源；通用转送按 T 的复制资格决定行为。
+        value >> .value;
+    }
+}
+
+fn main() {
+    // Holder 没有声明 Copy，所以两个具体实例都使用 <<。
+    let number: Holder[i32] << wrap[i32](42);
+    let text: Holder[String] << wrap[String](String::from("hello"));
+    println("{} {}", number.value, text.value@);
+}

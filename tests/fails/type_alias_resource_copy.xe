@@ -1,0 +1,6 @@
+type Text = String;
+
+fn main() {
+    // 别名不会凭空让 String 获得 Copy 能力。
+    let text: Text = String::from("hello"); // XE-OWN-0001
+}

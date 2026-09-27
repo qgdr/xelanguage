@@ -5,8 +5,9 @@
 当一个功能具有实现、成功测试、失败测试和清晰诊断之后，应把对应样例移动到正常阶段目录，
 不再把它留在 `stage999`。
 
-- pointer_unchecked.xe：默认模式、无修饰地址及指针写入。
-- borrow.xe：检查模式的共享、可写借用。
+- pointer_unchecked.xe / mutable_unchecked.xe：保留历史文件名，已迁移为有写权限的普通指针与声明。
+- borrow.xe / pointer_alias.xe：普通指针读写、地址别名和重复调用，没有独占/再次借用要求。
+- generic_holder.xe / generic_function.xe：泛型声明、推导/显式代入、字段转送与具体实例执行。
 - channel_expression.xe / option.xe：分支函数调用、参数绑定及 None 简写。
 - enum.xe / match_ownership.xe：统一分支、只读借用及按值取得所有权。
 - maybe_error.xe：成功直接返回，错误明确构造。
@@ -16,5 +17,12 @@
 - anonymous_function.xe：fn 匿名函数和返回已有函数。
 - closure_capture.xe：拥有捕获、单次调用和分支返回闭包（后续闭包实现阶段）。
 
-除 pointer_unchecked.xe 外，新样例均按检查模式验收；仅用共享借用的样例也可在默认
-模式运行，但不承诺相同的内存安全保证。这里是设计验收约定，尚未新增自动化执行器。
+全部新样例按统一的检查策略验收；通过语义检查不表示已有后端运行支持。
+tuple_pointer.xe 展示 tuple[...] 元组、str 描述符指针、无损转换及显式 Copy。
+0.9 的解包与透明别名完整示例见 ../backend/tuples.xe 与 ../backend/type_aliases.xe；
+别名不会改变 Copy、资源所有权或指针权限。
+
+使用 make audit 按阶段重新生成 target/audit/stage999.json，不靠过时的静态清单判断能力。
+Maybe、Array/Slice、文件结果、无捕获函数值与具体泛型实例示例已能生成和运行；
+仍缺捕获闭包、通用 Trait 分派与泛型类型的 Copy/Drop 实现。
+result.xe 已有可执行入口：仓库根读取 README，隔离审核目录验证不存在文件时的恢复。
