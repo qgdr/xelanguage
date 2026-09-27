@@ -10,6 +10,8 @@ import string
 from typing import Any
 from .source import Source, Diagnostic
 from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
+from .stdlib_env import env_function
+from .stdlib_iter import FROM_FN, callback_type, next_result
 from .typesys import (
     Type, NUMERIC, PRIMITIVES, STANDARD, UNIT, NEVER, BOOL, STR, I32, USIZE,
     INT_LITERAL, UNKNOWN, NONE, STRING, FILE, IO_ERROR, CONVERSION_ERROR,
@@ -61,6 +63,23 @@ class Signature:
     unsafe_result: bool = False
     type_substitutions: dict[str, Type] = field(default_factory=dict)
     instance_context: str | None = None
+
+
+@dataclass
+class ClosureInfo:
+    """闭包是具体环境加函数；侧表供后端布局、调用和资源清理使用。"""
+    node: Node
+    captures: tuple[tuple[str, Type], ...]
+    parameters: tuple[Type, ...]
+    result: Type
+    mode: str = "read"
+    borrow_parameters: frozenset[int] = frozenset()
+    borrow_captures: frozenset[int] = frozenset()
+    storage_captures: frozenset[int] = frozenset()
+    unsafe_result: bool = False
+    # 不是普通写入：只记录替换资源/缓冲区重分配，数值更新不在这里。
+    invalidated_captures: frozenset[int] = frozenset()
+    invalidated_external_captures: frozenset[int] = frozenset()
 
 
 def names_used(node: Any) -> dict[str, int]:
@@ -127,6 +146,15 @@ class Checker:
         self.implementation_constraints: dict[int, list[Node]] = {}
         self.instance_limit = 256
         self.type_substitutions: dict[str, Type] = {}
+        self.closures: dict[Type, ClosureInfo] = {}
+        self.closure_call_modes: dict[int, str] = {}
+        self._closure_bindings: dict[int, int] = {}
+        self._closure_mode = "read"
+        self._closure_invalidated: set[int] = set()
+        self._closure_external_invalidated: set[int] = set()
+        self._closure_external_roots: dict[int, set[int]] = {}
+        # for 的具体 next 方法/适配器由检查器决定，后端不猜测协议。
+        self.for_iterators: dict[int, Signature | None] = {}
 
     @staticmethod
     def has_variable(type_):
@@ -134,6 +162,9 @@ class Checker:
 
     def type_node(self, type_, span):
         """把已解析的具体类型放回复制的 AST；原始源码 AST 始终不修改。"""
+        if type_.name == "closure":
+            # 仅实例化复制的内部 AST 会出现；用户 AST JSON 不添加隐藏类型。
+            return {"kind": "InternalResolvedType", "span": span, "resolved_type": type_}
         if type_.name == "ptr":
             modifiers = [{"kind": "Modifier", "span": span, "name": name}
                          for name in (["mut"] if type_.mutable else []) + (["unsafe"] if type_.unsafe else [])]
@@ -159,7 +190,7 @@ class Checker:
     def expression_type(self, node):
         """[] 在类型应用位置内使用类型语法，不把 i32@ 当作取变量地址。"""
         kind, span = node["kind"], node["span"]
-        if kind in {"NamedType", "PointerType", "MaybeType", "TupleType", "FunctionType"}:
+        if kind in {"NamedType", "PointerType", "MaybeType", "TupleType", "FunctionType", "InternalResolvedType"}:
             return self.type_of(node)
         if kind == "Name":
             if len(node["path"]["parts"]) == 1:
@@ -229,7 +260,7 @@ class Checker:
         if type_.name == "tuple":
             return {"kind": "Tuple", "span": span,
                     "elements": [self.type_expression(t, span) for t in type_.args]}
-        if type_.name == "maybe" or type_.name == "fn":
+        if type_.name in {"maybe", "fn", "closure"}:
             return self.type_node(type_, span)
         result = {"kind": "Name", "span": span,
                   "path": {"kind": "Path", "span": span, "parts": type_.name.split("::")}}
@@ -350,11 +381,14 @@ class Checker:
         if hasattr(self, "binding_types"):
             self.binding_types[id(binding.node)] = binding.type
 
-    def invalidate_storage(self, uid, node, reason):
+    def invalidate_storage(self, uid, node, reason, exclude_uids=()):
         """移动、替换或作用域结束可能使地址失效；别名本身并不是错误。"""
+        if uid in self._closure_bindings:
+            self._closure_invalidated.add(self._closure_bindings[uid])
+        self._closure_external_invalidated.update(self._closure_external_roots.get(uid, ()))
         self.invalid_roots[uid] = reason
         for binding in self.bindings().values():
-            if (binding.uid != uid and binding.initialized and not binding.moved
+            if (binding.uid != uid and binding.uid not in exclude_uids and binding.initialized and not binding.moved
                     and binding.last_use >= self.offset(node)
                     and any(root == uid for root, _ in binding.origins)
                     and self.carries_borrow(binding.type)):
@@ -394,6 +428,8 @@ class Checker:
             "arguments": []})
 
     def type_of(self, node: Node | None, generics=None, self_type=None) -> Type:
+        if node is not None and node.get("kind") == "InternalResolvedType":
+            return node["resolved_type"]
         if node is None:
             return UNIT
         generics = self.generic_names if generics is None else generics
@@ -427,12 +463,14 @@ class Checker:
                 else:
                     args.append(self.type_of(arg, generics, self_type))
             arities = {"Array": 2, "Vec": 1, "Slice": 1, "SliceMut": 1,
-                       "Box": 1, "Map": 2, "Set": 1, "Range": 1, "Iterator": 1}
+                       "Box": 1, "Map": 2, "Set": 1, "Range": 1, "Iterator": 1, "FromFn": 1}
             arity = len(self.types[name].get("generics", [])) if name in self.types else arities.get(name, 0)
             if len(args) != arity:
                 self.fail(node, f"{name} 需要 {arity} 个类型附件，实际为 {len(args)} 个")
             if name == "Array" and not args[1].name.isdigit():
                 self.fail(node, "Array 的第二个附件必须是非负整数长度")
+            if name == "FromFn" and not self.has_variable(args[0]):
+                self.iterator_callback_result(args[0], node)
             return Type(name, tuple(args))
         if kind == "PointerType":
             base = self.type_of(node["target"], generics, self_type)
@@ -483,7 +521,7 @@ class Checker:
     def carries_borrow(self, type_: Type, visited=None) -> bool:
         if type_.name in {"ptr", "str", "Slice", "SliceMut", "closure"}:
             return True
-        if type_.name in {"maybe", "tuple", "Array"}:
+        if type_.name in {"maybe", "tuple", "Array", "FromFn"}:
             return any(self.carries_borrow(t, visited) for t in type_.args)
         if type_.name not in self.types:
             return type_.name.startswith("$") and type_ not in {INT_LITERAL, UNKNOWN}
@@ -518,6 +556,8 @@ class Checker:
                     self.fail(node, f"顶层名称 {name} 重复", "XE-NAME-0002")
                 seen.add(name)
                 if node["kind"] in {"Struct", "Enum", "Trait"}:
+                    if name == "FromFn":
+                        self.fail(node, "FromFn 是标准迭代器类型，不能重新定义", "XE-NAME-0002")
                     self.types[name] = node
                 if node["kind"] == "TypeAlias":
                     if name in PRIMITIVES | STANDARD | {"Self", "None", "Maybe"}:
@@ -816,6 +856,7 @@ class Checker:
         if value.borrowed:
             self.fail(value.node, "不能通过非拥有指针移走资源所有权", "XE-MOVE-0002",
                       "传递指针，或显式 clone 创建新的拥有值")
+        self.note_closure_access(value, "once")
         if value.place:
             uid, fields = value.place
             binding = self.by_uid(uid)
@@ -1037,6 +1078,12 @@ class Checker:
             return bool(binding and binding.mutable)
         return False
 
+    def note_closure_access(self, value, mode):
+        """只记录捕获环境的移动/写入；通过捕获指针写外部对象不是写环境。"""
+        if value.place and not value.borrowed and value.place[0] in self._closure_bindings:
+            if mode == "once" or self._closure_mode != "once":
+                self._closure_mode = mode
+
     def assignment(self, node):
         operator = node["operator"]
         target_node = node["right"] if operator == ">>" else node["left"]
@@ -1046,6 +1093,7 @@ class Checker:
         initializing = bool(binding and not binding.initialized and not target.place[1])
         if not initializing and not self.mutable_place(target):
             self.fail(target_node, "不能修改不可变绑定或只读指针", "XE-MUT-0001")
+        self.note_closure_access(target, "mut")
         value = self.convert(self.infer(source_node, target.type), target.type)
         # 写入发生在右侧求值完成之后。仍活跃的共享借用不能被写操作绕过，
         # 但仅在右侧最后一次使用的借用可以在真正写入前结束。
@@ -1209,12 +1257,12 @@ class Checker:
                 return value
             if name in self.constants:
                 return self.constants[name]
-            io_signature = io_function(name)
-            if io_signature is not None:
-                if io_signature.formatted:
+            standard_signature = io_function(name) or env_function(name)
+            if standard_signature is not None:
+                if standard_signature.formatted:
                     self.fail(node, "格式化输出目前需要直接调用；异构格式化函数值尚未支持",
                               "XE-SEM-0001", '可包装成固定签名：fn(text: str) { println("{}", text); }')
-                return Value(callable_type(io_signature.parameters, io_signature.result), node)
+                return Value(callable_type(standard_signature.parameters, standard_signature.result), node)
             if "::" in name:
                 resolved = self.signature_target(node)
                 if resolved:
@@ -1270,6 +1318,8 @@ class Checker:
             mutable = "mut" in mods
             if mutable and not self.mutable_place(value):
                 self.fail(node, "可写借用需要 let[mut] 存储或已有可写指针", "XE-MUT-0001")
+            if mutable:
+                self.note_closure_access(value, "mut")
             origins = value.origins if value.borrowed else ((value.place[0], mutable),)
             if not origins:
                 # 借用元素访问也必须有拥有者，不能因纯值没有自带视图来源
@@ -1616,7 +1666,10 @@ class Checker:
             # 但经只读指针访问描述符时，不可取得该独占写入能力。
             writable = value.type.name != "ptr" or value.type.mutable
             origins = tuple((uid, writable) for uid, _ in origins)
-        writable = (value.type.mutable if value.type.name == "ptr" else
+        # 可写的是描述符绑定，并不代表其指向的数据可写。Slice 始终只读；
+        # SliceMut 才携带元素写权限，经只读描述符指针访问时仍须降为只读。
+        writable = (False if base.name == "Slice" else
+                    value.type.mutable if value.type.name == "ptr" else
                     base.name == "SliceMut" or self.mutable_place(value))
         element_type = base.args[0]
         if has_unsafe(value.type) and self.carries_borrow(element_type):
@@ -1729,25 +1782,105 @@ class Checker:
         return value
 
     def invoke(self, function, nodes, node):
-        if function.type.name not in {"fn", "closure"}:
+        signature = self.callable_signature(function, node)
+        values = self.arguments(nodes, list(signature.args[:-1]), node)
+        return self.finish_invoke(function, values, node)
+
+    def callable_signature(self, function, node):
+        signature = function.type.args[0] if function.type.name == "ptr" else function.type
+        if signature.name not in {"fn", "closure"}:
             self.fail(node, f"{function.type} 不是可调用函数", "XE-CALL-0001")
-        values = self.arguments(nodes, list(function.type.args[:-1]), node)
-        self.consume(function)
-        result = function.type.args[-1]
+        if signature.name == "closure":
+            self.closure_receiver_mode(function, signature, node)
+        return signature
+
+    def closure_receiver_mode(self, function, signature, node):
+        """像普通 self 方法一样选接收者，而不是把 f(...) 特判为总是移动。"""
+        info = self.closures[signature]
+        pointer_call = function.type.name == "ptr" or function.borrowed
+        if pointer_call:
+            writable = function.type.mutable if function.type.name == "ptr" else function.writable
+            if info.mode == "once":
+                self.fail(node, "这个闭包会移出捕获资源，必须按值调用；指针没有环境所有权", "XE-MOVE-0002")
+            if info.mode == "mut" and not writable:
+                self.fail(node, "这个闭包会修改捕获环境，需可写存储或可写指针", "XE-MUT-0001")
+            return "mutable" if writable else "readonly"
+        if info.mode == "once":
+            return "owning"
+        if info.mode == "mut":
+            if function.place and not self.mutable_place(function):
+                self.fail(node, "这个闭包会修改捕获环境，请把闭包定义为 let[mut]", "XE-MUT-0001")
+            self.note_closure_access(function, "mut")
+            return "mutable"
+        return "readonly"
+
+    def finish_invoke(self, function, values, node):
+        signature = self.callable_signature(function, node)
+        pointer_call = function.type.name == "ptr" or function.borrowed
+        info = self.closures.get(signature)
+        mode = None
+        if info:
+            mode = self.closure_receiver_mode(function, signature, node)
+            self.closure_call_modes[id(node)] = mode
+        if mode == "owning" or info is None and not pointer_call:
+            self.consume(function)
+        if info:
+            self.invalidate_closure_call(function, info, node)
+        result = signature.args[-1]
         if self.carries_borrow(result) and any(has_unsafe(v.type) for v in [function, *values]):
             result = mark_unsafe(result)
-        return Value(result, node, origins=function.origins + tuple(o for v in values for o in v.origins)
-                     if self.carries_borrow(result) else ())
+        if not self.carries_borrow(result):
+            return Value(result, node)
+        if info is None:
+            return Value(result, node, origins=function.origins + tuple(o for v in values for o in v.origins))
+        origins = tuple(o for index, value in enumerate(values) if index in info.borrow_parameters for o in value.origins)
+        if info.borrow_captures:
+            # 环境自身的返回视图依赖 closure 的存储；外部指针捕获不拥有目标。
+            owner = self.by_uid(function.origins[0][0]) if pointer_call and function.origins else None
+            external = owner.origins if owner and owner.type.name in {"closure", "FromFn"} else function.origins
+            if info.borrow_captures - info.storage_captures:
+                origins += external
+            if info.storage_captures:
+                origins += function.origins if function.type.name == "ptr" else (((function.place[0], False),) if function.place else function.origins)
+        value = Value(mark_unsafe(result) if info.unsafe_result else result, node, origins=tuple(set(origins)))
+        if info.storage_captures and (mode == "owning" or not function.place and not pointer_call):
+            self.warn_pointer(value, "闭包拥有调用或临时环境结束后，返回的地址或视图可能失效", "XE-PTR-0003")
+        return value
+
+    def invalidate_closure_call(self, function, info, node):
+        """旧视图失效提示在返回值建立前执行，新视图来自调用后的存储。"""
+        environment = function.origins if function.type.name == "ptr" else (
+            ((function.place[0], False),) if function.place else function.origins)
+        owner = self.by_uid(environment[0][0]) if environment else None
+        external = owner.origins if owner and owner.type.name in {"closure", "FromFn"} else function.origins
+        roots = {uid for uid, _ in environment} if info.invalidated_captures else set()
+        if info.invalidated_external_captures:
+            roots.update(uid for uid, _ in external)
+        excluded = {uid for uid in (function.access_uid, owner.uid if owner else None) if uid is not None}
+        for uid in roots:
+            self.invalidate_storage(uid, node, "可能因闭包替换资源或追加内容而使旧缓冲区失效", excluded)
+            # 这里的对象/新缓冲区仍存在；保留旧别名上的 unsafe，清掉区域旧状态。
+            self.invalid_roots.pop(uid, None)
 
     def builtin_call(self, name, nodes, node):
-        # Prelude 和 std::io 名称共用公开签名，不重复维护两套接口。
+        if name == FROM_FN:
+            if len(nodes) != 1:
+                self.fail(node, "from_fn 需要一个无参数回调，回调返回 T?", "XE-CALL-0001")
+            callback = self.infer(nodes[0])
+            if callback.type == NEVER:
+                return callback
+            # 适配器保留自己的环境，通过可写指针重复调用，而非反复移动环境。
+            self.iterator_callback_result(callback.type, node)
+            self.consume(callback)
+            return Value(Type("FromFn", (callback.type,)), node, origins=callback.origins)
+        # 标准库沿用普通参数/类型规则，公开签名只在各库接口表中登记。
         # 用户/局部函数的名称解析已在 call() 中先行处理。
-        io_signature = io_function(name)
-        if io_signature is not None:
+        standard_signature = io_function(name) or env_function(name)
+        if standard_signature is not None:
             name = normalize_io_name(name)
-            if not io_signature.formatted:
-                self.arguments(nodes, list(io_signature.parameters), node)
-                return Value(io_signature.result, node)
+            if not standard_signature.formatted:
+                self.arguments(nodes, list(standard_signature.parameters), node)
+                return Value(standard_signature.result, node)
         parts = name.split("::")
         if len(parts) == 2 and parts[0] in NUMERIC and parts[1] == "try_from":
             if len(nodes) != 1:
@@ -1765,7 +1898,7 @@ class Checker:
             # ConversionError 是一个无资源负载的标准错误值，不臆造公开字段。
             # 转换的范围检查在后端执行；这里不将失败改成编译期拒绝。
             return Value(maybe(Type(parts[0]), CONVERSION_ERROR), node)
-        if (io_signature is not None and io_signature.formatted) or name == "format":
+        if (standard_signature is not None and standard_signature.formatted) or name == "format":
             if not nodes:
                 self.fail(node, "格式化调用需要格式字符串", "XE-CALL-0001")
             template = self.convert(self.infer(nodes[0]), STR)
@@ -1789,10 +1922,59 @@ class Checker:
         self.arguments(nodes, parameters, node)
         return Value(result, node)
 
+    def iterator_callback_result(self, callback, node):
+        """构造调用和显式 FromFn[F] 类型使用相同校验，拒绝无效布局。"""
+        repeated = Value(callback if callback.name == "ptr" else ptr(callback, True), node)
+        signature = self.callable_signature(repeated, node)
+        if len(signature.args) != 1:
+            self.fail(node, "from_fn 回调不能有参数", "XE-ITER-0001")
+        result = signature.args[-1]
+        if result.name != "maybe" or result.args[1] != NONE:
+            self.fail(node, "from_fn 回调必须返回 T?：T 产生元素，None 结束迭代", "XE-ITER-0001")
+        return result
+
+    def from_fn_result(self, receiver, node):
+        """复用闭包的返回来源/失效摘要，不把所有视图都绑到迭代器存储。
+
+        拥有闭包环境存在 FromFn 字段里，指针闭包环境存在外部对象里。
+        正文返回字面量、外部指针或内部 String 视图应保留各自来源。
+        """
+        base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
+        callback = callback_type(base)
+        signature = callback.args[0] if callback.name == "ptr" else callback
+        if callback.name == "ptr":
+            origins = receiver.origins
+            owner = self.by_uid(origins[0][0]) if origins else None
+            if owner and owner.type.name == "FromFn":
+                origins = owner.origins
+        elif receiver.type.name == "ptr":
+            origins = receiver.origins
+        else:
+            origins = ((receiver.place[0], True),) if receiver.place else receiver.origins
+        info = self.closures.get(signature)
+        function = Value(ptr(signature, True), node, origins=origins if info else ())
+        value = self.finish_invoke(function, [], node)
+        if has_unsafe(receiver.type) and self.carries_borrow(value.type):
+            value.type = mark_unsafe(value.type)
+        if (info and info.storage_captures and callback.name != "ptr" and
+                receiver.type.name != "ptr" and not receiver.place):
+            self.warn_pointer(value, "临时迭代器产生的内部地址或视图可能在使用前失效", "XE-PTR-0003")
+        return value
+
     def method(self, callee, nodes, node, type_arguments=None):
         receiver = self.place(callee["object"])
         base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
         name = callee["field"]
+        if base.name == "FromFn" and name == "next":
+            if nodes or type_arguments is not None:
+                self.fail(node, "next() 不接受参数或类型附件", "XE-CALL-0001")
+            writable = (receiver.type.mutable if receiver.type.name == "ptr" else
+                        self.mutable_place(receiver) or not receiver.place and not receiver.borrowed)
+            if not writable:
+                self.fail(node, "next() 修改迭代状态，需要 let[mut] 或 T@[mut]", "XE-MUT-0001")
+            if receiver.type.name != "ptr":
+                self.note_closure_access(receiver, "mut")
+            return self.from_fn_result(receiver, node)
         signature = self.methods.get((base.name, name))
         mutable, owning, receiver_loans = False, False, ()
         if signature:
@@ -1815,6 +1997,8 @@ class Checker:
                 writable = receiver.type.mutable if receiver.type.name == "ptr" else self.mutable_place(receiver)
                 if self_parameter.mutable and not writable:
                     self.fail(node, "可写方法需要 let[mut] 或 T@[mut]", "XE-BORROW-0004")
+                if self_parameter.mutable and receiver.type.name != "ptr":
+                    self.note_closure_access(receiver, "mut")
                 origins = receiver.origins or (((receiver.place[0], self_parameter.mutable),) if receiver.place else ())
                 receiver = Value(ptr(base, self_parameter.mutable, has_unsafe(receiver.type)), receiver.node,
                                  receiver.place, origins, receiver.borrowed, receiver.access_uid)
@@ -1833,6 +2017,8 @@ class Checker:
             element = base.args[0] if base.args else I32
             table = {
                 ("String", "len"): ([], USIZE, False), ("str", "len"): ([], USIZE, False),
+                ("Array", "len"): ([], USIZE, False),
+                ("Slice", "len"): ([], USIZE, False), ("SliceMut", "len"): ([], USIZE, False),
                 ("String", "as_str"): ([], STR, False), ("String", "clone"): ([], STRING, False),
                 ("String", "push_str"): ([STR], UNIT, True),
                 ("str", "byte_at"): ([USIZE], Type("u8"), False),
@@ -1858,6 +2044,8 @@ class Checker:
             writable = receiver.type.mutable if receiver.type.name == "ptr" else self.mutable_place(receiver)
             if mutable and not writable:
                 self.fail(node, "可写方法需要 let[mut] 或 T@[mut]", "XE-BORROW-0004")
+            if mutable and receiver.type.name != "ptr":
+                self.note_closure_access(receiver, "mut")
             origins = receiver.origins if receiver.type.name == "ptr" else (((receiver.place[0], mutable),) if receiver.place else ())
             self.loan(origins, node, receiver.access_uid)
             receiver_loans = origins
@@ -1873,7 +2061,10 @@ class Checker:
             if receiver.place and receiver.type.name != "ptr":
                 roots.add(receiver.place[0])
             for uid in roots:
-                self.invalidate_storage(uid, node, "的数据缓冲区可能因追加而重新分配")
+                # push_str 可能搬动字节缓冲区，但不搬动接收者 String 本身。
+                # 尤其不能把捕获的 String@ 自己标 unsafe，污染随后取得的新视图。
+                excluded = (receiver.access_uid,) if receiver.access_uid is not None else ()
+                self.invalidate_storage(uid, node, "的数据缓冲区可能因追加而重新分配", excluded)
                 # 对象自身仍然存在；已有别名已标风险，新视图对应新缓冲区。
                 self.invalid_roots.pop(uid, None)
         origins = ()
@@ -1912,19 +2103,13 @@ class Checker:
                 self.call_targets[id(target)] = concrete.node["name"]
                 self.call_targets[id(handler)] = concrete.node["name"]
             function = self.infer(handler["target"])
-            if function.type.name not in {"fn", "closure"}:
-                self.fail(handler, "管道目标必须是函数", "XE-CALL-0001")
-            parameters = list(function.type.args[:-1])
+            signature_type = self.callable_signature(function, handler)
+            parameters = list(signature_type.args[:-1])
             if len(parameters) != len(payloads):
                 self.fail(handler, "管道函数参数数量与分支载荷不一致", "XE-CALL-0001")
             for value, type_ in zip(payloads, parameters):
                 self.consume(self.convert(value, type_))
-            self.consume(function)
-            result_type = function.type.args[-1]
-            if self.carries_borrow(result_type) and any(has_unsafe(v.type) for v in [function, *payloads]):
-                result_type = mark_unsafe(result_type)
-            return Value(result_type, handler, origins=function.origins + tuple(o for v in payloads for o in v.origins)
-                         if self.carries_borrow(result_type) else ())
+            return self.finish_invoke(function, payloads, handler)
         parameters = handler["parameters"]
         ignore = len(parameters) == 1 and parameters[0]["name"] == "_" and parameters[0]["type"] is None
         if not ignore and len(parameters) != len(payloads):
@@ -2030,28 +2215,65 @@ class Checker:
         return self.common(results, node)
 
     def loop(self, node):
+        source, element, iterator = None, None, False
+        if node["kind"] != "While":
+            source = self.infer(node["source"])
+            if source.type == NEVER:
+                return Value(NEVER, node)
+            base = source.type.args[0] if source.type.name == "ptr" else source.type
+            if source.type.name in {"Range", "Iterator"}:
+                element = source.type.args[0]
+            elif source.type.name in {"Array", "Slice", "SliceMut"}:
+                element = ptr(source.type.args[0], source.type.name == "SliceMut")
+            else:
+                iterator = True
+                if source.type.name == "ptr" and not source.type.mutable:
+                    self.fail(node, "迭代会改变状态，请传入 iterator@[mut]", "XE-MUT-0001")
+                signature = self.methods.get((base.name, "next"))
+                if base.name == "FromFn":
+                    result = next_result(base)
+                    self.for_iterators[id(node)] = None
+                elif signature:
+                    substitutions = {}
+                    self.unify_generic(signature.self_type, base, substitutions, node)
+                    if (len(signature.parameters) != 1 or
+                            substitute(signature.parameters[0], substitutions) != ptr(base, True) or
+                            signature.node["parameters"][0]["name"] != "self"):
+                        self.fail(node, "迭代器需要 fn next(self: Self@[mut]) -> T?", "XE-ITER-0001")
+                    result = self.apply_signature(signature, [], node, substitutions,
+                        [Value(ptr(base, True), node, origins=source.origins)]).type
+                    self.for_iterators[id(node)] = self.functions.get(self.call_targets.get(id(node)), signature)
+                else:
+                    self.fail(node, "for 需要范围、数组、切片或提供 next(self: Self@[mut]) -> T? 的对象",
+                              "XE-ITER-0001")
+                if result.name != "maybe" or result.args[1] != NONE:
+                    self.fail(node, "迭代器 next() 必须返回 T?，返回 None 表示结束", "XE-ITER-0001")
+                element = result.args[0]
+                # 先转移拥有源，再进入循环：即使循环一次都不执行，转移也已发生。
+                self.consume(source)
         before = deepcopy(self.scopes)
         self.loop_depths.append(len(self.scopes)-1)
         self.scopes.append({})
         if node["kind"] == "While":
             self.convert(self.infer(node["condition"]), BOOL)
         else:
-            source = self.infer(node["source"])
-            if source.type.name in {"Range", "Iterator"}:
-                element = source.type.args[0]
-            elif source.type.name in {"Array", "Slice", "SliceMut"}:
-                element = ptr(source.type.args[0], source.type.name == "SliceMut")
-            else:
-                self.fail(node, "当前 for 支持范围、数组和切片", "XE-SEM-0001")
             annotation = self.type_of(node["type"]) if node["type"] else self.default(element)
             self.convert(Value(element, node), annotation)
             origins = source.origins
-            if element.name == "ptr" and source.type.name == "Array" and not source.place:
+            if iterator and source.type.name != "ptr":
+                owner = self.declare("$iteration-owner", source.type, node, mutable=True, origins=origins)
+                if source.type.name == "FromFn":
+                    origins = self.from_fn_result(Value(source.type, node, (owner.uid, ()), origins), node).origins
+                elif self.carries_borrow(element) and (signature.borrow_parameters is None or 0 in signature.borrow_parameters):
+                    origins = tuple(set(origins + ((owner.uid, False),)))
+            elif iterator and source.type.name == "ptr" and source.type.args[0].name == "FromFn":
+                origins = self.from_fn_result(source, node).origins
+            elif element.name == "ptr" and source.type.name == "Array" and not source.place:
                 # for 的临时数组确实由后端拥有至循环结束；引入不可命名的
                 # 所有者，让元素指针不能从循环返回或写到外层后继续使用。
                 owner = self.declare("$iteration-owner", source.type, node)
                 origins = tuple(set(origins + ((owner.uid, element.mutable),)))
-            elif element.name == "ptr" and source.place and not source.borrowed:
+            elif not iterator and element.name == "ptr" and source.place and not source.borrowed:
                 origins = tuple(set(origins + ((source.place[0], element.mutable),)))
             if element.name == "ptr":
                 origins = tuple((uid, element.mutable) for uid, _ in origins)
@@ -2067,6 +2289,9 @@ class Checker:
 
     def anonymous(self, node):
         captures = []
+        names = [capture["name"] for capture in node["captures"]]
+        if len(names) != len(set(names)):
+            self.fail(node, "闭包捕获名称重复", "XE-NAME-0002")
         for capture in node["captures"]:
             binding = self.lookup(capture["name"], capture)
             value = Value(binding.type, capture, (binding.uid, ()), binding.origins)
@@ -2077,44 +2302,76 @@ class Checker:
                 mutable = "mut" in mods
                 if self.check_borrows and mutable and not binding.mutable:
                     self.fail(capture, "可写捕获需要 let[mut] 存储", "XE-MUT-0001")
+                if mutable:
+                    self.note_closure_access(value, "mut")
                 origins = ((binding.uid, mutable),)
                 self.loan(origins, capture)
-                value = Value(ptr(binding.type, origins[0][1]), capture, origins=origins)
+                value = Value(ptr(binding.type, origins[0][1], "unsafe" in mods), capture, origins=origins)
             else:
                 self.consume(value)
             captures.append((capture["name"], value))
         saved = (self.scopes, self.result, self.last_uses, self.loop_depths,
-                 self.parameter_roots, self.return_origins, self.invalid_roots, self.function_unsafe_return)
-        self.scopes, self.result = [{}], self.type_of(node["result"])
-        self.last_uses, self.loop_depths = names_used(node["body"]), []
-        self.parameter_roots = {uid for _, value in captures for uid, _ in value.origins}
-        self.return_origins = set()
-        self.invalid_roots = {}
-        self.function_unsafe_return = False
-        for name, value in captures:
-            self.declare(name, value.type, node, origins=value.origins)
-        parameters = []
-        for parameter in node["parameters"]:
-            if parameter["type"] is None:
-                self.fail(parameter, "独立闭包参数需要类型注解", "XE-TYPE-0001")
-            type_ = self.type_of(parameter["type"])
-            parameters.append(type_)
-            binding = self.declare(parameter["name"], type_, parameter, parameter["mutable"], parameter=True)
-            if self.carries_borrow(type_):
-                self.uid += 1
-                self.parameter_roots.add(self.uid)
-                binding.origins = ((self.uid, type_.mutable),)
-        result = self.block(node["body"], self.result, True)
-        self.convert(result, self.result, True)
-        self.escape(result, function_exit=True)
-        result_type = self.result
-        if (self.carries_borrow(result_type) or result_type.name == "fn") and (has_unsafe(result.type) or self.function_unsafe_return):
-            result_type = mark_unsafe(result_type)
-        (self.scopes, self.result, self.last_uses, self.loop_depths,
-         self.parameter_roots, self.return_origins, self.invalid_roots, self.function_unsafe_return) = saved
-        return Value(callable_type(parameters, result_type, bool(captures),
-                                   self.offset(node) if captures else None), node,
-                     origins=tuple(o for _, value in captures for o in value.origins))
+                 self.parameter_roots, self.return_origins, self.invalid_roots,
+                 self.function_unsafe_return, self.temporary_loans,
+                 self._closure_bindings, self._closure_mode, self.position,
+                 self._closure_invalidated, self._closure_external_invalidated, self._closure_external_roots)
+        # 失败也恢复外层上下文，避免一个坏闭包改变后续函数的检查结果。
+        try:
+            self.scopes, self.result = [{}], self.type_of(node["result"])
+            self.last_uses, self.loop_depths, self.temporary_loans = names_used(node["body"]), [], []
+            self.parameter_roots = {uid for _, value in captures for uid, _ in value.origins}
+            self.return_origins, self.invalid_roots = set(), {}
+            self.function_unsafe_return = False
+            self._closure_bindings, self._closure_mode = {}, "read"
+            self._closure_invalidated, self._closure_external_invalidated = set(), set()
+            self._closure_external_roots = {}
+            capture_bindings = []
+            for index, ((name, value), capture_node) in enumerate(zip(captures, node["captures"])):
+                # 捕获后是新的环境字段；写入 Copy 字段不改动外部原值。
+                binding = self.declare(name, value.type, capture_node, mutable=True, origins=value.origins)
+                capture_bindings.append(binding)
+                self._closure_bindings[binding.uid] = index
+                for uid, _ in value.origins:
+                    self._closure_external_roots.setdefault(uid, set()).add(index)
+                self.parameter_roots.add(binding.uid)
+            parameters, parameter_sources = [], {}
+            for index, parameter in enumerate(node["parameters"]):
+                if parameter["type"] is None:
+                    self.fail(parameter, "独立闭包参数需要类型注解", "XE-TYPE-0001")
+                type_ = self.type_of(parameter["type"])
+                parameters.append(type_)
+                binding = self.declare(parameter["name"], type_, parameter, parameter["mutable"], parameter=True)
+                if self.carries_borrow(type_):
+                    self.uid += 1
+                    self.parameter_roots.add(self.uid)
+                    parameter_sources[self.uid] = index
+                    binding.origins = ((self.uid, type_.mutable),)
+            result = self.block(node["body"], self.result, True)
+            self.convert(result, self.result, True)
+            self.escape(result, function_exit=True)
+            self.return_origins.update(result.origins)
+            result_type = self.result
+            risky = has_unsafe(result.type) or self.function_unsafe_return
+            if (self.carries_borrow(result_type) or result_type.name == "fn") and risky:
+                result_type = mark_unsafe(result_type)
+            type_ = callable_type(parameters, result_type, bool(captures), id(node) if captures else None)
+            if captures:
+                roots = {uid for uid, _ in self.return_origins}
+                storage = frozenset(index for index, binding in enumerate(capture_bindings) if binding.uid in roots)
+                dependencies = storage | frozenset(index for index, (_, value) in enumerate(captures)
+                                                   if any(uid in roots for uid, _ in value.origins))
+                self.closures[type_] = ClosureInfo(node, tuple((name, value.type) for name, value in captures),
+                    tuple(parameters), result_type, self._closure_mode,
+                    frozenset(parameter_sources[uid] for uid in roots if uid in parameter_sources),
+                    dependencies, storage, risky, frozenset(self._closure_invalidated),
+                    frozenset(self._closure_external_invalidated))
+            return Value(type_, node, origins=tuple(o for _, value in captures for o in value.origins))
+        finally:
+            (self.scopes, self.result, self.last_uses, self.loop_depths,
+             self.parameter_roots, self.return_origins, self.invalid_roots,
+             self.function_unsafe_return, self.temporary_loans,
+             self._closure_bindings, self._closure_mode, self.position,
+             self._closure_invalidated, self._closure_external_invalidated, self._closure_external_roots) = saved
 
 
 def check_source(text: str, filename: str = "<input>", check_borrows: bool = True) -> list[Diagnostic]:

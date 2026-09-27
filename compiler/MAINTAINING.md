@@ -16,6 +16,12 @@
 make ast 只证明解析；make check 不会运行程序；make build 才调用系统编译器。
 make run 真正执行，make audit 记录每一层。先找到失败层，避免同时改动所有文件。
 
+标准库签名集中在 stdlib.py 的共用结构，以及 stdlib_io.py / stdlib_env.py 的接口表。
+操作系统实现位于 stdlib/io 与 stdlib/env，生成 C 时内嵌，不依赖构建目录。
+参数存储由 C 入口保存，Xe main 和 Drop 全部结束后才释放参数描述符表；不要在
+函数 args() 返回时释放它，也不要让只读 Slice 因 let[mut] 获得元素写权限。
+编译器 --run 的 -- 后参数必须以列表传给目标进程，不能用 shell 重新拼接。
+
 ## 一个小修改的顺序
 
 1. 写最短源码复现，说明应该通过/拒绝以及预期结果。
@@ -65,6 +71,24 @@ Value.origins 跟踪已知的地址来源，invalid_roots 记录失效的存储�
 inferred_types 记录语义信息，AST JSON 不插入用户没有写过的 unsafe。
 后端仍用同一 C 指针表示；普通指针不带析构活跃标记，不负责释放所指资源。
 
+## 闭包与迭代器：分清环境和参数
+
+ClosureInfo 保存捕获字段、read/mut/once 调用能力和返回地址来源。
+fn[x] 捕获拥有值，fn[x@] 捕获地址；正文决定调用能力，不由捕获方式决定。
+普通 f() 是方法式接收者调用：read/mut 环境保留，once 才移动环境。
+callback 作为普通函数参数传递仍可能移动，不能混淆这两个位置。
+闭包类型身份必须区分具体 AST 表达式和泛型实例，不能只用源码偏移或函数签名做缓存键。
+
+后端 callable_argument 固定接收者的地址或拥有值，隐藏函数访问原位环境字段。
+只读/可写调用不能复制出假拥有环境、也不能清理外部字段；一次性调用则清理剩余捕获。
+闭包所有权用已有 Slot.flags、fields 和 drop_complete 管理，避免另造一套析构机制。
+
+for_iterators 记录自定义 next 的具体实例；FromFn 布局是 callback + done。
+next 调用内部闭包的可写指针，保留环境；首次 None 以后不再执行回调。
+iterator_loop 外层 scope 拥有迭代器，内层 scope 拥有本轮元素，break/continue/return
+必须覆盖不同清理范围。条件块内声明的资源临时 Slot 不能留到块外清理，否则生成 C
+会引用超出作用域的变量。修改后运行 test_backend_closures 与 test_iterators 的实际 sanitizer 验收。
+
 ## 泛型不要用“未知类型”蒙混过关
 
 泛型声明是模板；调用给出具体类型后，才生成独立的函数体和数据布局。
@@ -98,6 +122,8 @@ unsafe 不区分 C ABI，也不能让第一次调用的地址风险污染后来�
 
 compiler/tests 中 frontend/cli 测结构和位置，semantic/data_declarations 测规则；
 backend、backend_branches、backend_results、backend_functions 真正编译运行；
+closure_semantic 检查捕获/调用能力/地址摘要，backend_closures 验收实际环境调用与析构；
+iterators 验收 next/from_fn、具体类型、退出清理和返回来源，examples/iterators 可独立运行。
 array_borrows 和 result_conversion 测类型/所有权与指针风险边界；calculator_project 验收真实解释器。
 explicit_copy、pointer_revision_syntax、pointer_warnings 验收沿用自 0.8 的显式复制、单层匹配及风险传播。
 generic_parser、generic_semantic、generic_backend、generic_integration 分别验收类型应用解析、

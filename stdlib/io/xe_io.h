@@ -5,6 +5,66 @@
 #ifndef XE_STDLIB_IO_H
 #define XE_STDLIB_IO_H
 
+/* POSIX 的标准描述符有固定入口，不调用可能被 C11 隐藏声明的 fileno。
+ * Windows 使用 CRT 提供的 _fileno/_isatty；未知平台保守地返回 false。
+ */
+#if defined(_WIN32)
+#include <io.h>
+#elif defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
+static bool xe_io_stdin_is_terminal(void) {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdin)) != 0;
+#elif defined(__unix__) || defined(__APPLE__)
+    return isatty(STDIN_FILENO) != 0;
+#else
+    return false;
+#endif
+}
+static bool xe_io_stdout_is_terminal(void) {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#elif defined(__unix__) || defined(__APPLE__)
+    return isatty(STDOUT_FILENO) != 0;
+#else
+    return false;
+#endif
+}
+static bool xe_io_stderr_is_terminal(void) {
+#if defined(_WIN32)
+    return _isatty(_fileno(stderr)) != 0;
+#elif defined(__unix__) || defined(__APPLE__)
+    return isatty(STDERR_FILENO) != 0;
+#else
+    return false;
+#endif
+}
+
+static bool xe_io_terminal_supports_color(bool terminal) {
+    /* 这是是否建议输出 ANSI 颜色的策略，不是所有终端能力的完整探测。
+     * NO_COLOR 空值不禁用；非空值禁用。TERM=dumb 即使是 TTY 也禁用。
+     * Windows 暂不配置控制台 ANSI 模式，因此不猜测它支持颜色。
+     */
+#if defined(_WIN32)
+    (void)terminal;
+    return false;
+#else
+    if (!terminal) return false;
+    const char *no_color = getenv("NO_COLOR");
+    if (no_color && *no_color) return false;
+    const char *term = getenv("TERM");
+    return !term || strcmp(term, "dumb") != 0;
+#endif
+}
+static bool xe_io_stdout_supports_color(void) {
+    return xe_io_terminal_supports_color(xe_io_stdout_is_terminal());
+}
+static bool xe_io_stderr_supports_color(void) {
+    return xe_io_terminal_supports_color(xe_io_stderr_is_terminal());
+}
+
 static void xe_io_write(FILE *stream, XeStr value) {
     if (value.len && fwrite(value.data, 1, value.len, stream) != value.len)
         xe_panic("output failed");
@@ -29,6 +89,14 @@ static void xe_io_print_error(FILE *stream, int error) {
 }
 static void xe_io_newline(FILE *stream) {
     if (fputc('\n', stream) == EOF) xe_panic("output failed");
+}
+/* stdio 可能只接收缓冲数据，直到 fflush 才发现目标不可写。
+ * 生成的入口在 Xe main 返回并清理资源后刷新两个输出流，不能把输出失败
+ * 当作成功退出。这里只保证 libc 接收输出，不承诺磁盘断电后数据仍持久。
+ * readline 自己检查 fflush 并返回错误值，不替调用者选择此处的 panic。
+ */
+static void xe_io_flush(FILE *stream) {
+    if (fflush(stream) == EOF) xe_panic("output failed");
 }
 static void xe_io_print_char(FILE *stream, uint32_t value) {
     unsigned char bytes[4]; size_t length;

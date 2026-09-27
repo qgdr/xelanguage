@@ -205,15 +205,12 @@ class FunctionValueDiagnosticTests(unittest.TestCase):
         # 运行安全；ASan 正例仍由上面的执行测试分别验证。
         self.assertIsInstance(lower_to_c(text), str)
 
-    def test_captured_environment_still_has_explicit_capability_diagnostic(self):
+    def test_captured_environment_has_concrete_c_layout(self):
         text = '''fn main() {
             let n = 1; let captured << fn[n](x: i32) -> i32 { x + n };
             println("{}", captured(2));
         }'''
-        with self.assertRaises(Diagnostic) as caught:
-            lower_to_c(text)
-        self.assertEqual(caught.exception.code, "XE-BACKEND-0001")
-        self.assertIn("捕获", caught.exception.message)
+        self.assertIn("closure_5f_environment", lower_to_c(text))
 
     def test_indirect_return_reports_unsafe_view_escape(self):
         text = '''fn bad() -> str {

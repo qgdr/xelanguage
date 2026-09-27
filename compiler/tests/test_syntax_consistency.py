@@ -81,7 +81,8 @@ class SyntaxConsistencyTests(unittest.TestCase):
         self.assert_error('fn f(flag: bool) { let a = 1; let b = 2; let callback << if flag { fn[a](x: i32) -> i32 { a + x } } else { fn[b](x: i32) -> i32 { b + x } }; }', "XE-TYPE-0001")
         self.assert_error('fn f() { let s << String::from("hi"); let callback << fn[s]() { println("{}", s); }; println("{}", s); }', "XE-MOVE-0001")
         self.assert_ok('fn f() { let s << String::from("hi"); let copied << s.clone(); let callback << fn[copied]() { println("{}", copied); }; println("{}", s); callback(); }')
-        self.assert_error('fn f() { let a = 1; let callback << fn[a]() {}; callback(); callback(); }', "XE-MOVE-0001")
+        # 只读环境可重复调用；只有移出资源才使接收者变成一次性拥有调用。
+        self.assert_error('fn f() { let a << String::from("x"); let callback << fn[a]() { println("{}", a); }; callback(); callback(); }', "XE-MOVE-0001")
 
     def test_numeric_conversions_are_explicit_and_lossless_by_default(self):
         self.assert_ok('fn f(x: i32) { let y: i64 = x as i64; let p: tuple[f32, i64] = tuple[-1.5, 10]; let b: u8?[ConversionError] = u8::try_from(x); let w: u8 = u8::try_from(x)?[panic]; }')

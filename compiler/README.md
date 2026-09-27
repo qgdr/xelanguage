@@ -24,9 +24,13 @@ make run SOURCE=tests/backend/generic_instances.xe
 make run SOURCE=tests/backend/tuples.xe
 make run SOURCE=tests/backend/type_aliases.xe
 make run SOURCE=tests/backend/readline.xe
+make run SOURCE=examples/args/main.xe ARGS='hello "two words" "你好 Xe" ""'
 make build SOURCE=tests/stage999/struct_move.xe
 make emit-c SOURCE=tests/stage999/struct_move.xe
 make demo
+make feature-check
+make feature-run
+make stdlib-test
 make audit
 
 uv run --project . --frozen --offline python compiler/main.py tests/stage999/enum.xe -o target/ast/enum.json
@@ -53,9 +57,11 @@ compiler/ 不再含独立项目配置；曾生成的 compiler/.venv 不会再被
 - semantic.py：单文件名称、类型、移动、分支、写权限和指针风险分析；
 - backend_c.py：语义类型侧表、C 降低、结构体方法及资源清理；
 - build.py：生成 C、调用系统编译器和原子发布程序；
-- runtime/xe_runtime.h：小型字符串、输出及数值运行库；
+- runtime/xe_runtime.h：小型字符串、文件及数值运行库，包含标准 IO 实现；
 - ../stdlib/io/xe_io.h：stage0 标准输入输出的 C 实现；
 - stdlib_io.py：prelude / std::io:: 的共同接口登记，固定名称、参数与返回类型；
+- stdlib.py / stdlib_env.py：共用签名结构与 std::env::args 的进程参数接口登记；
+- ../stdlib/env/xe_env.h：保存 argc/argv、UTF-8 参数视图、缓存及入口清理；
 - cli.py：UTF-8 文件输入、诊断、原子 JSON 输出；
 - tests/：AST 形状、源码范围、失败诊断和命令行验收。
 - audit.py：可信任示例的分层编译/运行审核，输出机器可读能力报告。
@@ -89,13 +95,22 @@ make check-safety 为兼容别名。禁止通过指针移走资源。
 普通管道、非泛型枚举载荷构造和拥有/借用分支匹配，
 以及 tuple[...] 元组、str@ 描述符指针、显式用户 Copy、无损 as 和整数 try_from。
 Maybe 的通道/传播/显式 panic、Array/Slice 基础运行与 File 读取已有端到端测试。
-具名函数值、无捕获 fn、函数参数/返回和管道目标已降低为 C 函数指针；捕获闭包尚未运行。
+具名函数值、无捕获 fn、函数参数/返回和管道目标已降低为 C 函数指针。
+捕获闭包生成具体环境和隐藏函数；f() 默认只读/可写访问，移出环境资源才消耗闭包。
+泛型 callback、嵌套环境、重复调用和退出清理已真实执行验收，见第 15 章。
+自定义 next() -> T? 和 std::iter::from_fn 支持拥有/可写指针 for，运行 make iterator-demo。
+闭包动态类型、公共 Call Trait 和 yield 暂停恢复尚未实现，见第 26 章。
 单文件泛型函数可推导或显式代入，具体结构体/枚举实例已有 C 布局与资源清理。
 泛型实例按具体类型重新检查和缓存；尚无完整模块/Trait 或完整后端覆盖。
 tuple[...] 支持新绑定与已有变量的浅层解包，拥有资源被 _ 忽略时仍清理。
 顶层透明 type 别名支持前向引用与链，循环给定位诊断，不产生新的 C 布局或 Copy 能力。
 标准 IO 提供 print/println/readline 与 std::io:: 完整路径；readline 返回拥有的
 String??[io::Error]，区分空行、EOF 和 IO 失败。C 实现位于 stdlib/io，并未实现普通 use 模块加载。
+readline 的固定签名支持函数值；异构格式化输出目前只支持直接调用或固定签名包装函数。
+make feature-check 执行 Xe 编写的 16 组功能检查；make feature-run 可交互输入 help/check/echo/quit。
+std::env::args 返回 Slice[str]?[io::Error]，成功视图只读且在整个 Xe main 执行期间有效。
+生成的 C 入口接收 argc/argv，但 Xe main 仍不需要参数。编译器 --run 的 -- 后参数原样
+传入目标程序；Feature Check 有参数时直接执行子命令，无参数时继续交互，见第 25 章。
 T@ 与 T@[mut] 都是允许别名的普通指针，不是独占借用；没有“再次借用”的调用要求。
 T@[mut] 可在初始化、赋值、传参和返回时浅层降为 T@；逆向以及内层指针、
 容器参数和函数签名的整体转换均拒绝，unsafe 风险在转换后继续传播。

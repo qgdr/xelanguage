@@ -1,4 +1,4 @@
-// 后续捕获闭包实现阶段；不作为第一版自举必过项。
+// 捕获闭包保存 base；只读调用不消耗自身，可反复调用。
 fn positive(value: i32) -> i32? { if value > 0 { value } else { None } }
 
 fn main() {
@@ -7,5 +7,5 @@ fn main() {
             fn[base](value: i32) -> i32 { base + value }
         }
         2> _ -> { return; };
-    println("{}", callback(2)); // 42；拥有捕获闭包调用后已消耗
+    println("{} {}", callback(2), callback(3)); // 42 43
 }

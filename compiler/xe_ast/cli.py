@@ -17,7 +17,8 @@ from .build import BuildError
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Xe 单文件编译器：AST、语义检查、C 输出、构建与运行")
+    parser = argparse.ArgumentParser(description="Xe 单文件编译器：AST、语义检查、C 输出、构建与运行",
+        epilog="--run 时，-- 后的参数原样传给 Xe 程序，例如：main.xe --run -- check")
     parser.add_argument("source", type=Path, help="UTF-8 .xe 源文件")
     parser.add_argument("-o", "--output", help="AST/C/程序输出路径；- 仅用于文本标准输出")
     parser.add_argument("--diagnostic-format", choices=("text", "json"), default="text")
@@ -29,7 +30,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cc", default="cc", help="系统 C 编译器路径（默认 cc）")
     parser.add_argument("--check-safety", "--check-borrows", dest="check_borrows", action="store_true",
                         help="兼容选项；始终检查类型、写权限和所有权，指针风险只警告")
-    args = parser.parse_args(argv)
+    # 分界符之前只解析编译器选项，之后只交给目标程序。不能用 shell 字符串
+    # 拼接：空参数、参数内的空格、--help 和第二个 -- 都必须原样保留。
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    program_arguments = []
+    has_separator = "--" in arguments
+    if has_separator:
+        separator = arguments.index("--")
+        program_arguments = arguments[separator + 1:]
+        arguments = arguments[:separator]
+    args = parser.parse_args(arguments)
+    if has_separator and not args.run:
+        parser.error("-- 后的程序参数只能与 --run 一起使用")
     if args.check_borrows and not (args.check or args.emit_c or args.build or args.run):
         parser.error("--check-safety 必须用于检查或后端动作；AST 阶段不检查可变性或借用")
     # 暂停开放不检查模式；旧旗标保留以免已有构建命令失效。
@@ -73,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
                 build_executable(args.source, output, args.check_borrows, args.cc, warnings=warnings)
                 if args.run:
                     report_warnings()
-                    return subprocess.call([str(output.resolve())])
+                    return subprocess.call([str(output.resolve()), *program_arguments])
                 print(f"可执行程序已输出：{output}")
             report_warnings()
             return 0

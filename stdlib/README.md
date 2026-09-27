@@ -7,6 +7,13 @@
 String、UTF-8 和输出。它是可替换的 stage0 实现，尚不是用 Xe 编写的完整标准库。
 新增可执行接口不改变 `xe-bootstrap-0.9` 语法版本。
 
+`std::iter::from_fn` 把保存状态的回调包装成拉取迭代器，具体布局由 C 后端生成，
+接口见 [iter/README.md](iter/README.md)。首次 None 后不再执行回调，尚不支持 yield。
+
+进程环境接口 `std::env::args()` 已能读取实际命令行参数，返回只读的字符串切片，
+包含程序名并保留空参数和参数内的空格。合同见 [env/README.md](env/README.md)，
+最小参数打印工具见 [examples/args](../examples/args/README.md)，完整说明见 [第 25 章](../doc/25.md)。
+
 编译器声明了简短 prelude 名称和 `std::io::` 完整路径：
 
 ```xe

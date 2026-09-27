@@ -1,0 +1,14 @@
+// 最小命令行工具：只读取参数并打印，不读取 stdin。
+// 参数包含程序名；空参数会打印为空行，参数内的空格不会再次拆分。
+fn main() -> i32 {
+    let args = std::env::args()?
+        1> values -> values
+        2> error -> {
+            eprintln("无法读取参数：{}", error);
+            return 1;
+        };
+    for arg: str@ in args {
+        println("{}", arg#);
+    }
+    0
+}

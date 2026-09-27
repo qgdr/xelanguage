@@ -1,13 +1,26 @@
-//! Xe Feature Check：用 Xe 编写的交互式语言功能验收工具。
+//! Xe Feature Check：用 Xe 编写的命令行语言功能验收工具。
 //!
 //! check 执行这份程序中的已编译测试，不解析或类型检查其他 Xe 文件。
 //! 每个检查都比较实际结果与预期结果；资源检查还观察析构次数。
-//! 所有命令从标准输入读取，因此可以交互运行，也可以接收管道输入。
+//! 有参数时执行一个命令后退出；无参数时交互运行或接收管道输入。
 
 type Pair = tuple[i32, bool];
 type handler = fn(i32) -> i32;
 type ReadNumber = i32@;
 type Text = String;
+
+// ANSI 的颜色设置必须配对复位，不能让后续输入/输出继承之前的颜色。
+// 非终端输出只得到空字符串，因此脚本看到的内容仍是普通文本。
+const RESET: str = "\x1b[0m";
+const CYAN: str = "\x1b[36m";
+const GREEN: str = "\x1b[32m";
+const RED: str = "\x1b[31m";
+fn style(enabled: bool, code: str) -> str { if enabled { code } else { "" } }
+
+fn show_prompt(label: str, prompts: bool, color: bool) {
+    if prompts { print("{}{}{}", style(color, CYAN), label, style(color, RESET)); }
+    // 随后的 readline 会刷新 stdout；不能等输入结束才显示提示。
+}
 
 // 一个小的 Copy 类型：复制之后可以单独修改副本，不会移动原对象。
 struct Point { x: i32, y: i32, }
@@ -131,7 +144,7 @@ fn check_pointer_enum() -> bool {
         Message::Text :> _ -> {},
         Message::Empty :> _ -> {},
     };
-    // 只借用负载，原枚举仍然拥有它，可以再次观察。
+    // 只取得负载地址，原枚举仍然拥有它，可以再次观察。
     message ?[@] {
         Message::Number :> number: i32@ -> number# == 42,
         Message::Text :> _ -> false,
@@ -206,44 +219,49 @@ fn check_resource_array() -> bool {
     total == 7 and words[0].as_str() == "new" and words[1].as_str() == "kept"
 }
 
-fn report(name: str, passed: bool, failures: i32@[mut]) {
-    if passed { println("PASS {}", name); }
-    else { println("FAIL {}", name); failures# = failures# + 1; }
+fn report(name: str, passed: bool, failures: i32@[mut], color: bool) {
+    if passed { println("{}PASS {}{}", style(color, GREEN), name, style(color, RESET)); }
+    else {
+        println("{}FAIL {}{}", style(color, RED), name, style(color, RESET));
+        failures# = failures# + 1;
+    }
 }
 
-fn run_checks() -> i32 {
+fn run_checks(color: bool) -> i32 {
     let[mut] failures = 0;
-    report("numeric", check_numeric(), failures@[mut]);
-    report("comparison-chain", check_comparison_chain(), failures@[mut]);
-    report("short-circuit", check_short_circuit(), failures@[mut]);
-    report("evaluation-order", check_evaluation_order(), failures@[mut]);
-    report("struct-copy-methods", check_struct_and_copy(), failures@[mut]);
-    report("resource-drop", check_resources_and_drop(), failures@[mut]);
-    report("generics", check_generics(), failures@[mut]);
-    report("tuple-alias", check_tuples_and_aliases(), failures@[mut]);
-    report("enum-owning", check_owning_enum(), failures@[mut]);
-    report("enum-pointer", check_pointer_enum(), failures@[mut]);
-    report("maybe-conversion", check_results_and_conversion(), failures@[mut]);
-    report("array-slice-range", check_arrays_slices_and_loops(), failures@[mut]);
-    report("function-pipeline", check_functions_and_pipeline(), failures@[mut]);
-    report("string-utf8", check_string_and_utf8(), failures@[mut]);
-    report("pointer-permissions", check_pointer_permissions(), failures@[mut]);
-    report("resource-array", check_resource_array(), failures@[mut]);
-    println("summary: {} passed, {} failed", 16 - failures, failures);
+    report("numeric", check_numeric(), failures@[mut], color);
+    report("comparison-chain", check_comparison_chain(), failures@[mut], color);
+    report("short-circuit", check_short_circuit(), failures@[mut], color);
+    report("evaluation-order", check_evaluation_order(), failures@[mut], color);
+    report("struct-copy-methods", check_struct_and_copy(), failures@[mut], color);
+    report("resource-drop", check_resources_and_drop(), failures@[mut], color);
+    report("generics", check_generics(), failures@[mut], color);
+    report("tuple-alias", check_tuples_and_aliases(), failures@[mut], color);
+    report("enum-owning", check_owning_enum(), failures@[mut], color);
+    report("enum-pointer", check_pointer_enum(), failures@[mut], color);
+    report("maybe-conversion", check_results_and_conversion(), failures@[mut], color);
+    report("array-slice-range", check_arrays_slices_and_loops(), failures@[mut], color);
+    report("function-pipeline", check_functions_and_pipeline(), failures@[mut], color);
+    report("string-utf8", check_string_and_utf8(), failures@[mut], color);
+    report("pointer-permissions", check_pointer_permissions(), failures@[mut], color);
+    report("resource-array", check_resource_array(), failures@[mut], color);
+    let summary_color = if failures == 0 { GREEN } else { RED };
+    println("{}summary: {} passed, {} failed{}", style(color, summary_color),
+        16 - failures, failures, style(color, RESET));
     failures
 }
 
-fn help() {
-    println("commands: help | check | echo | quit");
+fn help(color: bool) {
+    println("{}commands: help | check | echo | quit{}", style(color, CYAN), style(color, RESET));
     println("echo reads and prints the next line; EOF exits normally.");
 }
 
 // readline 的外层结果处理 IO 错误；内层 optional 区分一行与 EOF。
 // 空字符串是一条有效的空行，不是 EOF。读取出的 String 始终被拥有，
 // 使用完命令或回显文本后由作用域自动释放。
-fn read_input() -> Input {
+fn read_input(error_color: bool) -> Input {
     let optional << std::io::readline()? 1> line -> line 2> error -> {
-        eprintln("input error: {}", error@);
+        eprintln("{}input error: {}{}", style(error_color, RED), error@, style(error_color, RESET));
         return Input::Error;
     };
     optional ? {
@@ -252,35 +270,94 @@ fn read_input() -> Input {
     }
 }
 
-fn main() -> i32 {
-    println("Xe feature check: compiled language capabilities");
-    help();
+// 参数是进程持有的只读 UTF-8 文本，不需要为每个参数分配 String。
+// args[0] 是程序名称，所以用户的命令从 args[1] 开始。
+fn argument_usage(error_color: bool) {
+    eprintln("{}usage: xe-feature-check [help | check | echo [text ...] | quit]{}",
+        style(error_color, RED), style(error_color, RESET));
+}
+
+fn run_arguments(args: Slice[str], color: bool, error_color: bool) -> i32 {
+    let command = args[1];
+    if command == "echo" {
+        let[mut] index: usize = 2;
+        while index < args.len() {
+            if index > 2 { print(" "); }
+            print("{}", args[index]);
+            index = index + 1;
+        }
+        println("");
+        return 0;
+    }
+    if command == "help" or command == "--help" or command == "-h"
+        or command == "check" or command == "quit" {
+        if args.len() != 2 {
+            eprintln("{}unexpected arguments for command: {}{}", style(error_color, RED),
+                command, style(error_color, RESET));
+            argument_usage(error_color);
+            return 2;
+        }
+        if command == "check" { return if run_checks(color) == 0 { 0 } else { 1 }; }
+        if command != "quit" {
+            println("{}usage: xe-feature-check [help | check | echo [text ...] | quit]{}",
+                style(color, CYAN), style(color, RESET));
+            println("without arguments: interactive help/check/echo/quit commands");
+        }
+        return 0;
+    }
+    eprintln("{}unknown command: {}{}", style(error_color, RED), command, style(error_color, RESET));
+    argument_usage(error_color);
+    2
+}
+
+fn interactive(prompts: bool, color: bool, error_color: bool) -> i32 {
+    println("{}Xe feature check: compiled language capabilities{}", style(color, CYAN), style(color, RESET));
+    help(color);
+    // 功能失败之后仍允许继续输入；最后 quit 或 EOF 保留失败状态。
+    // 拼错交互命令只显示错误，不改变状态；真实 IO 错误仍退出，避免死循环。
     let[mut] status = 0;
     while true {
-        let command << read_input()? {
+        show_prompt("xe> ", prompts, color);
+        let command << read_input(error_color)? {
             Input::Line :> line -> line,
-            Input::End :> _ -> { return status; },
+            Input::End :> _ -> { if prompts { println(""); } return status; },
             Input::Error :> _ -> { return 3; },
         };
         let view = command.as_str();
         if view == "" { continue; }
-        if view == "help" { help(); continue; }
+        if view == "help" { help(color); continue; }
         if view == "check" {
-            if run_checks() != 0 { status = 1; }
+            if run_checks(color) != 0 { status = 1; }
             continue;
         }
         if view == "echo" {
-            let text << read_input()? {
+            show_prompt("text> ", prompts, color);
+            let text << read_input(error_color)? {
                 Input::Line :> line -> line,
-                Input::End :> _ -> { return status; },
+                Input::End :> _ -> { if prompts { println(""); } return status; },
                 Input::Error :> _ -> { return 3; },
             };
             println("{}", text@);
             continue;
         }
         if view == "quit" { return status; }
-        eprintln("unknown command: {}", command@);
-        return 2;
+        eprintln("{}unknown command: {}{}", style(error_color, RED), command@,
+            style(error_color, RESET));
     }
     status
+}
+
+fn main() -> i32 {
+    // stdin/stdout 都是终端时才有交互提示。颜色独立检测各输出流，
+    // 例如 stdout 重定向时，不能把 stderr 的颜色写入结果文件。
+    let prompts = std::io::stdin_is_terminal() and std::io::stdout_is_terminal();
+    let color = std::io::stdout_supports_color();
+    let error_color = std::io::stderr_supports_color();
+    let args = std::env::args()? 1> values -> values 2> error -> {
+        eprintln("{}argument error: {}{}", style(error_color, RED), error@,
+            style(error_color, RESET));
+        return 3;
+    };
+    if args.len() > 1 { return run_arguments(args, color, error_color); }
+    interactive(prompts, color, error_color)
 }

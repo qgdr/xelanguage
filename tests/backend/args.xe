@@ -1,0 +1,15 @@
+// 进程参数只读且在整个 Xe main（包括 Drop）执行期间有效。
+// args[0] 是程序名，shell 的引号已经被处理，不要再按空格拆分参数。
+fn main() -> i32 {
+    let args = std::env::args()? 1> values -> values 2> error -> {
+        eprintln("argument error: {}", error);
+        return 3;
+    };
+    println("count: {}", args.len());
+    let[mut] index: usize = 0;
+    for arg: str@ in args {
+        println("{}: {} ({} bytes)", index, arg, arg.len());
+        index = index + 1;
+    }
+    0
+}

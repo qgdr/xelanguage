@@ -134,6 +134,7 @@ static bool xe_str_slice_valid(XeStr value, size_t start, size_t end) {
         && (end == value.len || (value.data[end] & 0xc0) != 0x80);
 }
 #include "../../stdlib/io/xe_io.h"
+#include "../../stdlib/env/xe_env.h"
 
 /* 使用 GCC/Clang 的溢出检查，不直接继承 C 的有符号溢出未定义行为。
  * 宏只消除不同整数宽度之间的重复，不改变每种类型的运算规则。 */

@@ -1,0 +1,59 @@
+// 迭代器只是“状态 + next()”，不要求闭包或 yield。
+struct Counter {
+    current: i32,
+    end: i32,
+}
+
+impl Counter {
+    fn next(self: Self@[mut]) -> i32? {
+        if self.current >= self.end {
+            None
+        } else {
+            let value = self.current;
+            self.current = self.current + 1;
+            value
+        }
+    }
+}
+
+fn main() {
+    let counter << Counter { .current = 0; .end = 3; };
+    print("struct:");
+    for value in counter { print(" {}", value); }
+    println("");
+
+    // 捕获的是 current 的副本；闭包自己的字段保存后续状态。
+    let current = 0;
+    let[mut] advance << fn[current]() -> i32 {
+        current = current + 1;
+        current
+    };
+    println("closure: {} {} (outer {})", advance(), advance(), current);
+
+    // 每次从正文开头运行，None 表示结束；不是 yield 自动暂停。
+    let start = 0;
+    let generated << std::iter::from_fn(fn[start]() -> i32? {
+        if start >= 3 {
+            None
+        } else {
+            let value = start;
+            start = start + 1;
+            value
+        }
+    });
+    print("from_fn:");
+    for value in generated { print(" {}", value); }
+    println("");
+
+    // 普通指针允许共享；闭包不拥有或释放被指向的变量。
+    let[mut] shared = 0;
+    let borrowed << std::iter::from_fn(fn[shared@[mut]]() -> i32? {
+        if shared# >= 2 { None } else {
+            shared# = shared# + 1;
+            shared#
+        }
+    });
+    print("pointer:");
+    for value in borrowed { print(" {}", value); }
+    println(" (outer {})", shared);
+}

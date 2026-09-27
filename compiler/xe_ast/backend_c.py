@@ -12,7 +12,9 @@ import string
 from .parser import parse_source
 from .semantic import Checker, Signature
 from .source import Source
-from .stdlib_io import normalize_io_name
+from .stdlib_io import IO_NATIVE_FUNCTIONS, normalize_io_name
+from .stdlib_env import env_function
+from .stdlib_iter import FROM_FN, callback_type, next_result
 from .typesys import Type, UNIT, NEVER, BOOL, STR, STRING, NONE, INT_LITERAL, I32, NUMERIC, ptr, substitute
 
 
@@ -47,6 +49,8 @@ class Slot:
     flags: dict[tuple[str, ...], str] = field(default_factory=dict)
     order: str | None = None
     epoch: str | None = None
+    # 捕获环境的非拥有字段别名不参与当前函数的 Drop；原位替换仍要释放旧值。
+    borrowed: bool = False
 
 
 @dataclass
@@ -87,8 +91,10 @@ class CBackend:
         self.tuple_names, self.layout_types = {}, {}
         self.function_typedefs, self.function_typedef_names = {}, {}
         self.anonymous_names, self.pending_functions = {}, []
+        self.closure_function_names, self.pending_closure_functions = {}, []
         self.user_layout_names = {}
         self.io_function_definitions = {}
+        self.env_function_definitions = {}
 
     def fail(self, node, message):
         self.checker.fail(node, message, "XE-BACKEND-0001",
@@ -138,7 +144,27 @@ class CBackend:
                 self.function_typedefs[type_] = f"typedef {result} (*{name})({', '.join(parameters) or 'void'});"
             return self.function_typedef_names[type_]
         if type_.name == "closure":
-            self.fail(at, "带捕获环境的闭包运行尚未接入 C 后端；无捕获 fn 已支持")
+            if type_ not in self.tuple_names:
+                cname = identifier(f"closure_environment_{len(self.tuple_names)}")
+                self.tuple_names[type_] = cname
+                self.layout_types[type_] = type_
+                members = []
+                for name, capture_type in self.fields(type_):
+                    capture_c = self.ctype(capture_type, at)
+                    if capture_type.name in self.checker.types:
+                        self.define_type(capture_type)
+                    members.append(f"    {capture_c} {identifier(name)};")
+                self.definitions[type_] = (f"struct {cname} {{\n" + "\n".join(members) + "\n};")
+            return self.tuple_names[type_]
+        if type_.name == "FromFn":
+            if type_ not in self.tuple_names:
+                cname = identifier(f"iterator_from_fn_{len(self.tuple_names)}")
+                self.tuple_names[type_] = cname
+                self.layout_types[type_] = type_
+                callback_c = self.ctype(callback_type(type_), at)
+                self.definitions[type_] = (f"struct {cname} {{ {callback_c} "
+                    f"{identifier('callback')}; bool {identifier('done')}; }};")
+            return self.tuple_names[type_]
         if type_.name in {"maybe", "Array"}:
             if type_ not in self.tuple_names:
                 cname = identifier(f"{type_.name}_layout_{len(self.tuple_names)}")
@@ -229,6 +255,13 @@ class CBackend:
         return substitute(template, bindings)
 
     def fields(self, type_):
+        if type_.name == "FromFn":
+            return [("callback", callback_type(type_)), ("done", BOOL)]
+        if type_.name == "closure":
+            info = self.checker.closures.get(type_)
+            if info is None:
+                self.fail(self.tree, f"闭包 {type_} 缺少已验证的捕获环境")
+            return list(info.captures)
         if type_.name == "tuple":
             return [(str(i), t) for i, t in enumerate(type_.args)]
         if type_.name == "Array":
@@ -483,7 +516,7 @@ class CBackend:
                       for i, t in enumerate(signature.parameters)]
         return f"static {self.ctype(signature.result, signature.node)} {name}({', '.join(parameters) or 'void'})"
 
-    def emit_function(self, signature, name):
+    def emit_function(self, signature, name, closure_type=None, owning=True):
         self.signature = signature
         self.scopes = [Scope()]
         self.loop_scopes = []
@@ -499,6 +532,17 @@ class CBackend:
                 slot.flags[path] = flag
                 self.line(f"bool {flag} = true;")
             self.register_order(slot)
+        if closure_type is not None:
+            # 捕获名是环境字段的别名，不是复制出来的第二份资源。
+            # 拥有调用将字段移动标记联到环境；指针调用不注册字段的 Drop。
+            environment = self.scopes[0].names["$environment"]
+            code = environment.name if owning else f"*({environment.name})"
+            for capture_name, capture_type in self.fields(closure_type):
+                flags = {path[1:]: flag for path, flag in environment.flags.items()
+                         if path and path[0] == capture_name} if owning else {}
+                alias = Slot(self.field_code(code, (capture_name,)), capture_type,
+                             flags=flags, borrowed=not owning)
+                self.scopes[0].names[capture_name] = alias
         result = self.storage(signature.result, "return", "0" if signature.result == UNIT else None)
         self.block(signature.node["body"], result)
         self.transfer(self.value(result))
@@ -553,8 +597,17 @@ class CBackend:
                 return True
             # 替换拥有值时先析构旧值，指针原位替换也必须释放旧资源。
             if not self.checker.copyable(target.type):
-                if target.slot and not target.path:
+                if target.slot and target.slot.borrowed:
+                    self.drop_complete(target.type, target.code)
+                elif target.slot and not target.path:
                     self.cleanup_slot(target.slot)
+                elif target.slot:
+                    # 拥有聚合的字段可能已移动过：借其实际 flag 清理，不能
+                    # 无条件析构旧位，也不能因字段类型不是 String 就漏掉 Drop。
+                    prefix = len(target.path)
+                    flags = {path[prefix:]: flag for path, flag in target.slot.flags.items()
+                             if path[:prefix] == target.path}
+                    self.cleanup_slot(Slot(target.code, target.type, flags=flags))
                 elif target.type == STRING:
                     self.line(f"xe_string_drop(&({target.code}));")
                 else:
@@ -637,7 +690,8 @@ class CBackend:
                 self.argument(value)
             self.fail(node, "Never 聚合值没有终止表达式")
         target = getattr(self.checker, "call_targets", {}).get(id(node))
-        if target is not None and kind != "Call":
+        # for 也记录 next 的具体泛型目标，但 for 本身不是函数值。
+        if target is not None and kind in {"Name", "BracketApply", "AssociatedAccess"}:
             return self.temp(type_, self.function_name(target))
         if kind == "Literal":
             category, value = node["literal_kind"], node["value"]
@@ -659,8 +713,17 @@ class CBackend:
                 return self.lookup(name, node)
             if name in self.checker.functions:
                 return self.temp(type_, self.function_name(name))
+            if name in self.checker.constants:
+                # Prelude functions never override a user-defined value.
+                # Keep the same lookup order as the semantic checker.
+                return self.expression(self.checker.constants[name].node, type_)
             if normalize_io_name(name) == "readline":
                 return self.temp(type_, self.readline_function(type_.args[-1]))
+            io_native = IO_NATIVE_FUNCTIONS.get(normalize_io_name(name))
+            if io_native:
+                return self.temp(type_, io_native)
+            if env_function(name) is not None:
+                return self.temp(type_, self.args_function(type_.args[-1]))
             if name == "Maybe::None":
                 return self.temp(type_, f"({self.ctype(type_)}){{.tag = 1}}")
             if len(parts) == 2:
@@ -669,8 +732,6 @@ class CBackend:
                 for index, (variant, _) in enumerate(self.variants(type_)):
                     if variant == parts[1]:
                         return self.temp(type_, f"({self.ctype(type_)}){{.tag = {index}}}")
-            if name in self.checker.constants:
-                return self.expression(self.checker.constants[name].node, type_)
             return self.lookup(name, node)
         if kind == "NoneValue":
             return CValue("0", NONE)
@@ -761,6 +822,8 @@ class CBackend:
                 input_type = self.checker.binding_types[id(handler["parameters"][0])]
             elif handler["kind"] == "FunctionTarget":
                 signature_type = self.checker.expression_types.get(id(handler["target"]))
+                if signature_type and signature_type.name == "ptr":
+                    signature_type = signature_type.args[0]
                 if signature_type and signature_type.name in {"fn", "closure"} and len(signature_type.args) > 1:
                     input_type = signature_type.args[0]
             if input_type is None and type_.name in NUMERIC:
@@ -937,7 +1000,7 @@ class CBackend:
             if target_key is not None:
                 return self.invoke(self.checker.functions[target_key], self.function_name(target_key),
                                    values=[self.argument(value) for value in payloads])
-            function = self.argument(self.expression(handler["target"]))
+            function = self.callable_argument(self.expression(handler["target"]), handler)
             return self.invoke_function_value(function, handler,
                                               values=[self.argument(value) for value in payloads])
 
@@ -1047,15 +1110,32 @@ class CBackend:
         return self.temp(signature.result, f"{name}({', '.join(v.code for v in values)})")
 
     def anonymous_function(self, node, type_):
-        """Lift a capture-free fn to a normal file-scope C function.
+        """将 fn 提升为普通文件级函数，并在需要时构造捕获环境。
 
         No C nested-function extension, heap allocation or hidden lexical access is
         required. Bodies are queued, not emitted in the enclosing function, so its
         scopes and early-return destination remain untouched. Nested anonymous
         functions can append more bodies while this queue is being drained.
         """
+        if type_.name == "closure":
+            # 捕获按普通字段初始化：Copy 复制，资源移动，@ 保存原对象的地址。
+            # 环境是普通聚合返回值，不强制分配堆或复制捕获资源。
+            slot = self.storage(type_, "closure")
+            for capture, (name, capture_type) in zip(node["captures"], self.fields(type_)):
+                source = self.lookup(name, capture)
+                if capture["borrow"]:
+                    source = self.temp(capture_type, f"&({source.code})")
+                self.transfer(source)
+                self.line(f"{self.field_code(slot.name, (name,))} = {source.code};")
+                for path, flag in slot.flags.items():
+                    if path and path[0] == name:
+                        self.line(f"{flag} = true;")
+            self.line(f"{slot.flags[()]} = true;")
+            self.initialized(slot)
+            self.closure_function(type_, owning=True)
+            return self.value(slot)
         if node["captures"] or type_.name != "fn":
-            self.fail(node, "带捕获环境的闭包运行尚未接入 C 后端；无捕获 fn 已支持")
+            self.fail(node, "匿名函数缺少已验证的具体函数类型")
         key = id(node)
         if key not in self.anonymous_names:
             name = self.fresh("anonymous_function")
@@ -1064,20 +1144,60 @@ class CBackend:
             self.pending_functions.append((name, signature))
         return self.temp(type_, self.anonymous_names[key])
 
+    def closure_function(self, type_, owning):
+        """生成隐藏环境参数；共享/可写调用复用同一非拥有实现。
+
+        调用是否获准由语义层根据闭包能力判定。这里只降低已经获准的调用，
+        不能给指针调用制造环境副本，否则它会错误地复制或析构捕获资源。
+        """
+        key = (type_, owning)
+        if key not in self.closure_function_names:
+            info = self.checker.closures[type_]
+            name = self.fresh("closure_once" if owning else "closure_pointer_call")
+            self.closure_function_names[key] = name
+            environment_type = type_ if owning else ptr(type_, True)
+            node = dict(info.node)
+            node["parameters"] = [{"name": "$environment"}, *info.node["parameters"]]
+            signature = Signature(node, [environment_type, *type_.args[:-1]], type_.args[-1])
+            self.pending_closure_functions.append((name, signature, type_, owning))
+        return self.closure_function_names[key]
+
+    def callable_argument(self, value, node):
+        """先固定 receiver 地址，再按顺序求值实参；不快照共享环境内容。
+
+        普通 f(...) 与方法相同：read/mut 能力用环境指针，once 才移动环境。
+        尤其实参可能修改捕获状态，调用必须读同一环境里的最新状态，不能先
+        偷复制一份环境。临时闭包仍由创建它的作用域拥有并负责清理。
+        """
+        mode = getattr(self.checker, "closure_call_modes", {}).get(id(node))
+        if value.type.name == "closure" and mode in {"readonly", "mutable"}:
+            receiver_type = ptr(value.type, mode == "mutable")
+            return self.temp(receiver_type, f"&({value.code})")
+        return self.argument(value)
+
     def invoke_function_value(self, function, node, nodes=None, values=None):
-        if function.type.name != "fn":
-            self.fail(node, "带捕获环境的闭包调用尚未接入 C 后端")
+        pointer = function.type.name == "ptr"
+        callable_type = function.type.args[0] if pointer else function.type
+        if callable_type.name not in {"fn", "closure"}:
+            self.fail(node, "此值没有已验证的函数或闭包调用类型")
         if values is None:
             values = []
-            for argument, parameter in zip(nodes, function.type.args[:-1]):
+            for argument, parameter in zip(nodes, callable_type.args[:-1]):
                 value = self.expression(argument, parameter)
                 if value.type == NEVER:
                     return value
                 values.append(self.argument(value))
         for value in values:
             self.transfer(value)
-        return self.temp(function.type.args[-1],
-                         f"({function.code})({', '.join(value.code for value in values)})")
+        if callable_type.name == "closure":
+            name = self.closure_function(callable_type, owning=not pointer)
+            if not pointer:
+                self.transfer(function)
+            arguments = [function.code, *(value.code for value in values)]
+            return self.temp(callable_type.args[-1], f"{name}({', '.join(arguments)})")
+        callee = f"*({function.code})" if pointer else function.code
+        return self.temp(callable_type.args[-1],
+                         f"({callee})({', '.join(value.code for value in values)})")
 
     def call(self, node):
         callee = node["callee"]
@@ -1115,6 +1235,9 @@ class CBackend:
             receiver = self.expression(callee["object"])
             base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
             name = callee["field"]
+            if base.name == "FromFn" and name == "next":
+                pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
+                return self.from_fn_next(CValue(pointer, ptr(base, True)), node)
             if base.name == "maybe" and name == "expect":
                 message = self.argument(self.expression(node["arguments"][0], STR))
                 if message.type == NEVER:
@@ -1144,6 +1267,11 @@ class CBackend:
                     return value
                 arguments.append(self.argument(value))
             pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
+            if base.name in {"Array", "Slice", "SliceMut"} and name == "len":
+                # 数组长度来自类型；切片长度来自描述符。都不读取元素，
+                # 更不需要取得元素的所有权或可写指针。
+                length = base.args[1].name if base.name == "Array" else f"({pointer})->len"
+                return self.temp(Type("usize"), length)
             if base.name == "SliceMut" and name == "copy_from":
                 if not self.checker.copyable(base.args[0]):
                     self.fail(node, "copy_from 只能复制 Copy 元素；资源元素不能复制所有权")
@@ -1183,11 +1311,11 @@ class CBackend:
                     return self.temp(Type("u8"), f"({view}).data[{arguments[0].code}]")
             self.fail(node, f"方法 {base}::{name} 尚未接入 C 后端")
         if callee["kind"] != "Name":
-            function = self.argument(self.expression(callee))
+            function = self.callable_argument(self.expression(callee), node)
             return self.invoke_function_value(function, node, nodes=node["arguments"])
         name = "::".join(callee["path"]["parts"])
         if any(name in scope.names for scope in self.scopes):
-            function = self.argument(self.expression(callee))
+            function = self.callable_argument(self.expression(callee), node)
             return self.invoke_function_value(function, node, nodes=node["arguments"])
         if name in self.checker.functions:
             return self.invoke(self.checker.functions[name], self.function_name(name), nodes=node["arguments"])
@@ -1200,10 +1328,23 @@ class CBackend:
             if signature:
                 return self.invoke(signature, self.method_name(owner, method), nodes=node["arguments"])
         name = normalize_io_name(name)
+        if name == FROM_FN:
+            callback = self.argument(self.expression(node["arguments"][0]))
+            if callback.type == NEVER:
+                return callback
+            result_type = self.type_at(node)
+            self.transfer(callback)
+            return self.temp(result_type, f"({self.ctype(result_type)}){{"
+                f".{identifier('callback')} = {callback.code}, .{identifier('done')} = false}}")
         if name in {"print", "println", "eprintln"}:
             return self.format_output(name, node)
         if name == "readline":
             return self.readline(node)
+        if name in IO_NATIVE_FUNCTIONS:
+            return self.temp(self.type_at(node), IO_NATIVE_FUNCTIONS[name] + "()")
+        if env_function(name) is not None:
+            result_type = self.type_at(node)
+            return self.temp(result_type, self.args_function(result_type) + "()")
         if name == "String::from":
             value = self.expression(node["arguments"][0], STR)
             if value.type == NEVER:
@@ -1232,6 +1373,34 @@ class CBackend:
             return CValue("0", NEVER)
         self.fail(node, f"调用 {name} 尚未接入 C 后端")
 
+    def from_fn_next(self, pointer, node):
+        """回调借用自己的环境运行；第一次 None 以后不再调用用户代码。
+
+        就地展开而非另建 ABI：闭包具体类型、普通函数与函数指针均沿用
+        invoke_function_value 的一套调用规则，不增加隐式装箱。
+        """
+        iterator = pointer.type.args[0]
+        result_type = next_result(iterator)
+        result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = 1}}")
+        done = f"({pointer.code})->{identifier('done')}"
+        callback = f"({pointer.code})->{identifier('callback')}"
+        callback_t = callback_type(iterator)
+        function = (CValue(f"&({callback})", ptr(callback_t, True))
+                    if callback_t.name == "closure" else CValue(callback, callback_t))
+        self.line(f"if (!({done})) {{")
+        self.indent += 1
+        # C 的条件块也是临时资源作用域。不能把只在块内声明的
+        # produced slot 留在外层清理列表，否则循环退出时会引用不存在的名字。
+        self.scopes.append(Scope())
+        produced = self.invoke_function_value(function, node, values=[])
+        self.assign(result.slot, produced, node)
+        self.line(f"if (({result.code}).tag == 1) {done} = true;")
+        self.cleanup([self.scopes[-1]])
+        self.scopes.pop()
+        self.indent -= 1
+        self.line("}")
+        return result
+
     def readline(self, node):
         type_ = self.type_at(node)
         return self.temp(type_, self.readline_function(type_) + "()")
@@ -1254,6 +1423,27 @@ class CBackend:
                 "        result.tag = 0;\n"
                 f"        {optional} = ({inner}){{.tag = raw.has_line ? 0 : 1}};\n"
                 f"        if (raw.has_line) {text} = raw.text;\n"
+                "    }\n"
+                "    return result;\n"
+                "}")
+        return name
+
+    def args_function(self, type_):
+        """参数读取的直接调用与 fn 值共用一个普通 Maybe/Slice ABI 桥接。"""
+        name = identifier("stdlib_env_args")
+        if type_ not in self.env_function_definitions:
+            ctype = self.ctype(type_)
+            payload = self.payload_code("result", "Yes", 0)
+            error = self.payload_code("result", "No", 0)
+            slice_type = self.ctype(type_.args[0])
+            self.env_function_definitions[type_] = (
+                f"static {ctype} {name}(void) {{\n"
+                "    XeEnvArgs raw = xe_env_args();\n"
+                f"    {ctype} result = {{.tag = 1}};\n"
+                f"    if (raw.error) {{ {error} = raw.error; }}\n"
+                "    else {\n"
+                "        result.tag = 0;\n"
+                f"        {payload} = ({slice_type}){{.data = raw.data, .len = raw.len}};\n"
                 "    }\n"
                 "    return result;\n"
                 "}")
@@ -1400,9 +1590,13 @@ class CBackend:
         else:
             source = node["source"]
             source_type = self.type_at(source)
+            if source_type == NEVER:
+                return self.expression(source)
             base = source_type.args[0] if source_type.name == "ptr" else source_type
             if base.name in {"Array", "Slice", "SliceMut"}:
                 return self.array_loop(node, base)
+            if id(node) in self.checker.for_iterators:
+                return self.iterator_loop(node, base)
             if base.name != "Range":
                 self.fail(node, "for 后端当前支持整数范围、数组和切片")
             type_ = self.checker.binding_types[id(node)]
@@ -1427,6 +1621,52 @@ class CBackend:
             self.cleanup([self.scopes[-1]])
             self.loop_scopes.pop()
             self.scopes.pop()
+        self.indent -= 1
+        self.line("}")
+        return CValue("0", UNIT)
+
+    def iterator_loop(self, node, base):
+        """拥有源只移动一次，循环元素各自拥有；任何退出路径按作用域 Drop。
+
+        外层 scope 保存整个迭代器，内层 scope 保存本轮 next 结果和元素。
+        continue/break 只清理本轮；return 会清理两层，避免遗漏环境资源。
+        """
+        self.line("{")
+        self.indent += 1
+        self.scopes.append(Scope())
+        source = self.argument(self.expression(node["source"]))
+        pointer = source if source.type.name == "ptr" else CValue(f"&({source.code})", ptr(base, True))
+        self.line("while (true) {")
+        self.indent += 1
+        self.scopes.append(Scope())
+        self.loop_scopes.append(len(self.scopes)-1)
+        signature = self.checker.for_iterators[id(node)]
+        if signature is None:
+            produced = self.from_fn_next(pointer, node)
+        else:
+            target = self.checker.call_targets.get(id(node))
+            name = self.function_name(target) if target else self.method_name(base.name, "next")
+            produced = self.invoke(signature, name, values=[pointer])
+        self.line(f"if (({produced.code}).tag == 1) {{")
+        self.indent += 1
+        self.cleanup([self.scopes[-1]])
+        self.line("break;")
+        self.indent -= 1
+        self.line("}")
+        element_type = self.checker.binding_types[id(node)]
+        slot = self.storage(element_type, node["name"])
+        payload = CValue(self.payload_code(produced.code, "Yes", 0), produced.type.args[0])
+        self.assign(slot, payload, node)
+        self.transfer(produced)
+        self.scopes[-1].names[node["name"]] = slot
+        self.block(node["body"])
+        self.cleanup([self.scopes[-1]])
+        self.loop_scopes.pop()
+        self.scopes.pop()
+        self.indent -= 1
+        self.line("}")
+        self.cleanup([self.scopes[-1]])
+        self.scopes.pop()
         self.indent -= 1
         self.line("}")
         return CValue("0", UNIT)
@@ -1474,19 +1714,45 @@ class CBackend:
             self.fail(self.tree, "可执行入口必须为 fn main() 或 fn main() -> i32")
         for name, signature in signatures:
             self.emit_function(signature, name)
-        pending_index = 0
-        while pending_index < len(self.pending_functions):
-            name, signature = self.pending_functions[pending_index]
+        pending_index = closure_index = 0
+        # 闭包体可以再构造闭包或无捕获函数，两种队列都要排空。
+        while (pending_index < len(self.pending_functions)
+               or closure_index < len(self.pending_closure_functions)):
+            if pending_index < len(self.pending_functions):
+                name, signature = self.pending_functions[pending_index]
+                pending_index += 1
+                context = (None, True)
+            else:
+                name, signature, type_, owning = self.pending_closure_functions[closure_index]
+                closure_index += 1
+                context = (type_, owning)
             prototypes.append(self.prototype(signature, name) + ";")
-            self.emit_function(signature, name)
-            pending_index += 1
-        self.line(f"int main(void) {{ {'(void)' if main.result == UNIT else 'return (int)'}{self.function_name('main')}();"
-                  + (" return 0; }" if main.result == UNIT else " }"))
+            self.emit_function(signature, name, *context)
+        # 原生入口保留操作系统拆好的参数，Xe main 仍是用户熟悉的无参函数。
+        # Xe main 自己先完成 Drop（包括提前 return），之后才释放参数描述符表，
+        # 因此 Drop 内仍能读取参数视图。最后刷新两个输出流并保留退出码。
+        # C main/exit 默认刷新输出，但不会把刷新失败报告为失败退出。
+        self.line("int main(int argc, char **argv) {")
+        self.indent += 1
+        self.line("xe_env_init(argc, argv);")
+        if main.result == UNIT:
+            self.line(f"(void){self.function_name('main')}();")
+            self.line("int exit_code = 0;")
+        else:
+            self.line(f"int exit_code = (int){self.function_name('main')}();")
+        self.line("xe_env_cleanup();")
+        self.line("xe_io_flush(stdout);")
+        self.line("xe_io_flush(stderr);")
+        self.line("return exit_code;")
+        self.indent -= 1
+        self.line("}")
         compiler_root = Path(__file__).resolve().parents[1]
         runtime = (compiler_root / "runtime/xe_runtime.h").read_text(encoding="utf-8")
         io_library = (compiler_root.parent / "stdlib/io/xe_io.h").read_text(encoding="utf-8")
+        env_library = (compiler_root.parent / "stdlib/env/xe_env.h").read_text(encoding="utf-8")
         # emit-C remains self-contained even when compiled from another folder.
         runtime = runtime.replace('#include "../../stdlib/io/xe_io.h"', io_library)
+        runtime = runtime.replace('#include "../../stdlib/env/xe_env.h"', env_library)
         # Opaque pointer targets remain forward-only. Do not force completion
         # merely because a type name was needed in a pointer declaration.
         forwards = [f"typedef struct {cname} {cname};" for cname in self.user_layout_names.values()]
@@ -1500,6 +1766,7 @@ class CBackend:
                 "\n".join(forwards) + "\n" + "\n".join(self.function_typedefs.values()) + "\n" +
                 "\n\n".join(self.definitions.values()) + "\n\n" +
                 "\n\n".join(self.io_function_definitions.values()) + "\n\n" +
+                "\n\n".join(self.env_function_definitions.values()) + "\n\n" +
                 "\n".join(prototypes) + "\n\n" + "\n".join(self.lines) + "\n")
 
 

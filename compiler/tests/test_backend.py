@@ -236,7 +236,8 @@ class BackendFailureTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "XE-MOVE-0002")
 
     def test_unimplemented_features_report_language_diagnostic(self):
-        for source in ["fn main() { let n = 1; let f << fn[n](x: i32) -> i32 { x + n }; f(1); }"]:
+        # 捕获环境已实现；Vec 的运行布局仍是明确未实现能力。
+        for source in ["fn main() { let values: Vec[i32]; }"]:
             with self.subTest(source=source):
                 with self.assertRaises(Diagnostic) as caught:
                     lower_to_c(source)
@@ -245,7 +246,7 @@ class BackendFailureTests(unittest.TestCase):
     def test_unused_generic_template_does_not_force_code_generation(self):
         # 泛型以具体类型使用时才生成 C，不能为未实例化的 T 猜测布局。
         generated = lower_to_c("fn[T] same(x: T) -> T { x } fn main() {}")
-        self.assertIn("int main(void)", generated)
+        self.assertIn("int main(int argc, char **argv)", generated)
 
     def test_recursive_value_layout_fails_cleanly(self):
         with self.assertRaises(Diagnostic) as caught:
@@ -294,8 +295,8 @@ class BackendFailureTests(unittest.TestCase):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 status = main([str(source), "--emit-c", "-o", "-"])
             self.assertEqual(status, 0, err.getvalue())
-            self.assertIn("int main(void)", out.getvalue())
-            source.write_text("fn main() { let n = 1; let f << fn[n]() {}; f(); }")
+            self.assertIn("int main(int argc, char **argv)", out.getvalue())
+            source.write_text("fn main() { let values: Vec[i32]; }")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 status = main([str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])

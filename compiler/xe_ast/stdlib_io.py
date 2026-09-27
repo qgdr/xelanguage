@@ -4,9 +4,8 @@
 语法或不同的所有权规则。print 系列的异构格式化参数目前由编译器检查，
 还不是已经实现了可变参数泛型/Trait 的普通 Xe 函数。
 """
-from dataclasses import dataclass
-
-from .typesys import IO_ERROR, STR, STRING, UNIT, Type, maybe
+from .stdlib import StandardFunction
+from .typesys import BOOL, IO_ERROR, STR, STRING, UNIT, Type, maybe
 
 
 # 一次读取有两层可能性：操作是否成功，以及成功时是否还有一行。
@@ -17,20 +16,22 @@ READLINE_RESULT = maybe(maybe(STRING), IO_ERROR)
 IO_TYPE_ALIASES = {"std::io::Error": IO_ERROR}
 
 
-@dataclass(frozen=True)
-class IoFunction:
-    parameters: tuple[Type, ...]
-    result: Type
-    # 格式化只接收字面量格式字符串及对应实参；不是 C printf 的裸 varargs。
-    formatted: bool = False
-
-
 IO_FUNCTIONS = {
-    "print": IoFunction((STR,), UNIT, formatted=True),
-    "println": IoFunction((STR,), UNIT, formatted=True),
-    "eprintln": IoFunction((STR,), UNIT, formatted=True),
-    "readline": IoFunction((), READLINE_RESULT),
+    "print": StandardFunction((STR,), UNIT, formatted=True),
+    "println": StandardFunction((STR,), UNIT, formatted=True),
+    "eprintln": StandardFunction((STR,), UNIT, formatted=True),
+    "readline": StandardFunction((), READLINE_RESULT),
 }
+
+# 这些普通函数的 C ABI 与 Xe 相同，不需要 readline 的 Maybe 布局桥接。
+# 用一份映射共同驱动签名和后端，新增检测函数时不必修改多份名称列表。
+IO_NATIVE_FUNCTIONS = {
+    name: "xe_io_" + name for name in (
+        "stdin_is_terminal", "stdout_is_terminal", "stderr_is_terminal",
+        "stdout_supports_color", "stderr_supports_color",
+    )
+}
+IO_FUNCTIONS.update({name: StandardFunction((), BOOL) for name in IO_NATIVE_FUNCTIONS})
 
 
 def normalize_io_name(name: str) -> str:
@@ -45,5 +46,5 @@ def normalize_io_name(name: str) -> str:
     return name
 
 
-def io_function(name: str) -> IoFunction | None:
+def io_function(name: str) -> StandardFunction | None:
     return IO_FUNCTIONS.get(normalize_io_name(name))

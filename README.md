@@ -75,6 +75,12 @@ make run 默认运行 struct_move.xe。
 标准 IO 已提供 `print`、`println` 和 `readline`（也可写 `std::io::` 完整路径）：
 `make run SOURCE=tests/backend/readline.xe` 区分读到一行、空行、EOF 与 IO 错误。
 当前库由 [stdlib/io](stdlib/io/README.md) 中的 C 实现支撑，没有假定普通 use 模块加载已完成。
+用 Xe 编写的 [Feature Check](examples/feature_check/README.md) 工具提供 `help/check/echo/quit`：
+`make feature-run` 交互运行，`make feature-check` 自动执行 16 组功能检查，
+`make stdlib-test` 验证 IO 边界、所有权和工具行为。
+`std::env::args()` 提供实际命令行参数；最小的 [参数打印工具](examples/args/README.md)
+只读取参数并逐项打印，示例代码与运行方法见 [第 25 章](doc/25.md)。
+Feature Check 也能直接执行 `./target/debug/xe-feature-check check` 或 `echo "你好 Xe"`。
 make emit-c 输出可读 C，make build 生成可执行文件；实际运行边界见 [第 19 章](doc/19.md)。
 
 实际项目：[Xe Calculator](examples/calculator/README.md)，用约 330 行 Xe 实现扫描器、
@@ -105,7 +111,10 @@ RESERVED / PROVISIONAL / DEFERRED 分阶段实现。
 枚举分支写 `Token::Integer :> number: i64@ -> number#`，指针匹配使用 `?[@]`。
 每个 `?` 只处理当前一层枚举；内层再次显式匹配，不自动展开递归模式。
 管道之后只接可调用目标或参数绑定，真正的匿名函数/闭包必须以 fn 开头，显式捕获用
-`fn[value](x: i32) -> i32 { value + x }`。有捕获闭包暂缓，不能当成已运行功能。
+`fn[value](x: i32) -> i32 { value + x }`。捕获环境与方法式 f() 已能运行：读/写调用保留自身，
+移出捕获资源才消耗环境。机制见 [第 15 章](doc/15.md)。
+`next(self: Self@[mut]) -> T?` 对象可用于 for；`std::iter::from_fn` 保存可重复回调产生元素。
+运行 `make iterator-demo`，边界与清理规则见 [第 26 章](doc/26.md)；yield 尚未实现。
 优先级见第 02 章；本轮确认的设计与迁移理由见 [第 21 章](doc/21.md)。
 指针权限转换和泛型实例化的实现边界见 [第 22 章](doc/22.md)。
 tuple 元组、解包和透明类型别名的 0.9 迁移见 [第 23 章](doc/23.md)。

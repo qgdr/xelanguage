@@ -8,7 +8,7 @@ fn main() -> i32 {
                 maybe_line ?
                     1> line -> {
                         print("line: ");
-                        // 借用 String 进行输出，让当前分支负责结束时的析构。
+                        // 传入 String 的地址，让当前分支负责结束时的析构。
                         std::io::println("{}", line@);
                     }
                     2> _ -> {
