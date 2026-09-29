@@ -98,7 +98,7 @@ Maybe 的通道/传播/显式 panic、Array/Slice 基础运行与 File 读取已
 具名函数值、无捕获 fn、函数参数/返回和管道目标已降低为 C 函数指针。
 捕获闭包生成具体环境和隐藏函数；f() 默认只读/可写访问，移出环境资源才消耗闭包。
 泛型 callback、嵌套环境、重复调用和退出清理已真实执行验收，见第 15 章。
-自定义 next() -> T? 和 std::iter::from_fn 支持拥有/可写指针 for，运行 make iterator-demo。
+自定义 `next() -> Step[T]` 与返回 `Step[T]` 的 `std::iter::from_fn` 支持拥有/可写指针 `for`；`Step::Item[value]` 交付元素，`Step::Stop` 结束，运行 `make iterator-demo`。
 闭包动态类型、公共 Call Trait 和 yield 暂停恢复尚未实现，见第 26 章。
 单文件泛型函数可推导或显式代入，具体结构体/枚举实例已有 C 布局与资源清理。
 泛型实例按具体类型重新检查和缓存；尚无完整模块/Trait 或完整后端覆盖。

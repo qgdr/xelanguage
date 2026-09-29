@@ -16,6 +16,7 @@
 - match_multiple.xe：多负载处理参数附件。
 - anonymous_function.xe：fn 匿名函数和返回已有函数。
 - closure_capture.xe：拥有捕获、默认重复只读调用和分支返回闭包，已能编译运行。
+- closure_borrow_alias.xe：地址捕获保留正文变量的原类型；按值捕获已有指针仍需显式 `#`。
 
 全部新样例按统一的检查策略验收；通过语义检查不表示已有后端运行支持。
 tuple_pointer.xe 展示 tuple[...] 元组、str 描述符指针、无损转换及显式 Copy。
@@ -25,5 +26,7 @@ tuple_pointer.xe 展示 tuple[...] 元组、str 描述符指针、无损转换�
 使用 make audit 按阶段重新生成 target/audit/stage999.json，不靠过时的静态清单判断能力。
 Maybe、Array/Slice、文件结果、无捕获/捕获函数值与具体泛型实例示例已能生成和运行；
 仍缺通用 Trait 分派与泛型类型的 Copy/Drop 实现。
-闭包迭代示例见 ../../examples/iterators；生成器采用 from_fn，不宣称已支持 yield。
+闭包迭代示例见 ../../examples/iterators；`next` / `from_fn` 返回 `Step[T]`，
+`Item` 产出元素、`Stop` 结束；iterator_step.xe 验证 `Step[i32?]` 的
+`Item[Maybe::None]` 仍是一个元素；不宣称已支持 yield。
 result.xe 已有可执行入口：仓库根读取 README，隔离审核目录验证不存在文件时的恢复。

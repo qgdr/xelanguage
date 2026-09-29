@@ -85,17 +85,47 @@ class CapturedClosureExecutionTests(unittest.TestCase):
             println("{} {}",(replace@[mut])(),(replace@[mut])());}''',
             "2 3\n5 5\n", "mutable_resource")
 
-    def test_shared_closure_can_write_through_captured_mutable_pointer(self):
+    def test_shared_closure_can_write_through_borrowed_capture_alias(self):
         self.assert_runs('''fn main(){let[mut] value=0;
-            let callback << fn[value@[mut]]()->i32{value#=value#+1;value#};
+            let callback << fn[value@[mut]]()->i32{value=value+1;value};
             println("{} {} {}",callback(),(callback@)(),value);}''',
-            "1 2 2\n", "mutable_pointer_capture")
+            "1 2 2\n", "mutable_borrowed_capture")
+
+    def test_borrowed_capture_address_is_original_variable_address(self):
+        self.assert_runs('''fn write(target:i32@[mut],value:i32){target#=value;}
+            fn main(){let[mut] value=1;
+                let callback << fn[value@[mut]]()->i32{
+                    write(value@[mut],7);value=value+1;value};
+                println("{} {}",callback(),value);}''',
+            "8 8\n", "borrowed_original_address")
+
+    def test_pointer_value_and_borrowed_pointer_capture_both_require_dereference(self):
+        self.assert_runs('''fn main(){let[mut] value=0;let p=value@[mut];
+            let copied << fn[p]()->i32{p#=p#+1;p#};
+            let borrowed << fn[p@]()->i32{p#=p#+1;p#};
+            println("{} {} {}",copied(),borrowed(),value);}''',
+            "1 2 2\n", "pointer_value_captures")
 
     def test_readonly_pointer_capture_does_not_own_string(self):
         self.assert_runs('''fn main(){let text << String::from("kept");
             {let callback << fn[text@]()->usize{text.len()};
                 println("{} {}",(callback@)(),(callback@)());};
             println("{}",text);}''', "4 4\nkept\n", "pointer_capture")
+
+    def test_mutable_borrowed_string_can_append_and_replace_without_double_drop(self):
+        self.assert_runs('''fn main(){let[mut] text << String::from("old");
+            {let callback << fn[text@[mut]]()->usize{
+                text.push_str("!");text << String::from("new");text.len()};
+                println("{} {}",callback(),(callback@)());};
+            println("{}",text);}''', "3 3\nnew\n", "borrowed_string_replace")
+
+    def test_borrowed_resource_replacement_drops_old_once_and_closure_drops_no_target(self):
+        self.assert_runs(TRACKED + '''fn main(){let[mut] drops=0;
+            {let[mut] item << tracked(drops@[mut],1);
+                {let replace << fn[item@[mut],drops@[mut]](){
+                    item << tracked(drops@[mut],2);};replace();};
+                println("{} {}",item.weight,drops);};
+            println("{}",drops);}''', "2 1\n3\n", "borrowed_resource_replace")
 
     def test_uncalled_environment_drops_all_captured_resources(self):
         self.assert_runs(TRACKED + '''fn main(){let[mut] drops=0;
@@ -139,7 +169,7 @@ class CapturedClosureExecutionTests(unittest.TestCase):
                 let pair << Pair{.first << tracked(drops@[mut],1);
                     .second << tracked(drops@[mut],2);};
                 let callback << fn[pair,drops@[mut]](){
-                    let first << pair.first;pair.second << tracked(drops,4);};
+                    let first << pair.first;pair.second << tracked(drops@[mut],4);};
                 callback();println("{}",drops);}''', "7\n", "partial_resource_replace")
 
     def test_return_during_argument_evaluation_cleans_callee_environment(self):
@@ -229,11 +259,11 @@ class CapturedClosureExecutionTests(unittest.TestCase):
                 let callback << fn[item](){};apply(hold(callback));println("{}",drops);}''',
             "1\n", "holder_closure")
 
-    def test_nested_pointer_capture_still_refers_to_original_outer_storage(self):
+    def test_nested_borrowed_capture_still_refers_to_original_outer_storage(self):
         self.assert_runs('''fn main(){let[mut] count=0;
             let outer << fn[count@[mut]](){
-                let inner << fn[count](){count#=count#+1;};inner();};
-            outer();outer();println("{}",count);}''', "2\n", "nested_pointer_capture")
+                let inner << fn[count@[mut]](){count=count+1;};inner();};
+            outer();outer();println("{}",count);}''', "2\n", "nested_borrowed_capture")
 
     def test_unsafe_capture_escape_is_warned_and_compiled_but_not_executed(self):
         source = '''fn main(){let view={let text << String::from("dangling");

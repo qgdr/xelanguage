@@ -74,6 +74,47 @@ class BranchExecutionTests(unittest.TestCase):
             println("{}", p ? { Pair::Values :> [a, b] -> a * b, Pair::Empty :> _ -> 0, });
         }'''), "5 0\n20\n")
 
+    def test_named_handler_lifts_success_into_optional_branch_result(self):
+        self.assertEqual(self.run_source('''fn one(n: i32) -> i32 { n + 1 }
+        fn named(value: i32?) -> i32? { value? 1> one 2> _ -> None }
+        fn bound(value: i32?) -> i32? { value? 1> n -> one(n) 2> _ -> None }
+        fn function_value(value: i32?) -> i32? {
+            let handler = one;
+            value? 1> handler 2> _ -> None
+        }
+        fn main() {
+            let present: i32? = Maybe::Yes[41];
+            let absent: i32? = Maybe::None;
+            let also_present: i32? = Maybe::Yes[41];
+            let fourth: i32? = Maybe::Yes[41];
+            let a = named(present);
+            let b = named(absent);
+            let c = bound(also_present);
+            let d = function_value(fourth);
+            println("{} {} {} {}", a? 1> n -> n 2> _ -> -1,
+                b? 1> n -> n 2> _ -> -1,
+                c? 1> n -> n 2> _ -> -1,
+                d? 1> n -> n 2> _ -> -1);
+        }'''), "42 -1 42 42\n")
+
+    def test_named_handler_lifts_owned_resource_without_double_drop(self):
+        self.assertEqual(self.run_source('''struct Trace { n: i32, text: String, }
+        impl Drop for Trace { fn drop(self: Self@[mut]) { println("drop {}", self.n); } }
+        fn one(n: i32) -> Trace {
+            Trace { .n = n; .text << String::from("owned"); }
+        }
+        fn named(value: i32?) -> Trace? { value? 1> one 2> _ -> None }
+        fn main() {
+            let present: i32? = Maybe::Yes[7];
+            { let result << named(present);
+              result ?[@] { Maybe::Yes :> trace: Trace@ -> { println("{}", trace.n); },
+                            Maybe::None :> _ -> { println("none"); }, }; };
+            let absent: i32? = Maybe::None;
+            { let result << named(absent);
+              result ?[@] { Maybe::Yes :> trace: Trace@ -> { println("{}", trace.n); },
+                            Maybe::None :> _ -> { println("none"); }, }; };
+        }''', sanitize=True), "7\ndrop 7\nnone\n")
+
     def test_unselected_arms_have_no_effect(self):
         self.assertEqual(self.run_source('''enum E { A[i32], B, }
         fn main() {

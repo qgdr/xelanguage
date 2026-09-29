@@ -38,16 +38,32 @@ class ClosureSemanticTests(unittest.TestCase):
         self.assertEqual(checker.warnings, [])
 
     def test_mutable_pointer_capture_can_repeat_through_readonly_environment(self):
-        checker = self.check("fn main() { let[mut] n = 0; let f << fn[n@[mut]]() { n# = n# + 1; }; (f@)(); (f@)(); }")
+        checker = self.check("fn main() { let[mut] n = 0; let f << fn[n@[mut]]() { n = n + 1; }; (f@)(); (f@)(); }")
         info = next(iter(checker.closures.values()))
         self.assertEqual(info.mode, "read")
         self.assertEqual(info.captures[0][1].name, "ptr")
         self.assertTrue(info.captures[0][1].mutable)
         self.assertEqual(checker.warnings, [])
 
-    def test_pointer_capture_name_has_pointer_type(self):
-        checker = self.check("fn main() { let n = 42; let f << fn[n@]() -> i32 { n# }; (f@)(); }")
-        self.assertEqual(next(iter(checker.closures.values())).captures[0][1].name, "ptr")
+    def test_borrowed_capture_name_has_original_type_and_address(self):
+        checker = self.check("fn main() { let n = 42; let f << fn[n@]() -> i32@ { n@ }; let address = (f@)(); println(\"{}\", address#); }")
+        info = next(iter(checker.closures.values()))
+        self.assertEqual(info.captures[0][1].name, "ptr")
+        self.assertEqual(checker.inferred_types[id(info.node["body"]["tail"])]["type"], "i32@")
+        self.assertEqual(info.borrow_captures, frozenset({0}))
+        self.assertEqual(info.storage_captures, frozenset())
+        self.assertEqual(checker.warnings, [])
+        self.check("fn main() { let n = 42; let f << fn[n@]() -> i32 { n }; f(); }")
+        self.check("fn main() { let n = 42; let f << fn[n@]() -> i32 { n# }; }", "XE-TYPE-0001")
+
+    def test_readonly_borrowed_capture_cannot_write(self):
+        self.check("fn main() { let[mut] n = 0; let f << fn[n@]() { n = 1; }; }", "XE-MUT-0001")
+
+    def test_borrowing_a_pointer_variable_preserves_its_pointer_type(self):
+        checker = self.check("fn main() { let n = 42; let p = n@; let f << fn[p@]() -> i32 { p# }; f(); }")
+        self.assertEqual(next(iter(checker.closures.values())).captures[0][1].args[0].name, "ptr")
+        self.check("fn main() { let n = 42; let p = n@; let f << fn[p]() -> i32 { p }; }", "XE-TYPE-0001")
+        self.check("fn main() { let n = 42; let p = n@; let f << fn[p]() -> i32 { p# }; f(); }")
 
     def test_copy_capture_owns_an_independently_mutable_field(self):
         checker = self.check("fn main() { let n = 0; let[mut] f << fn[n]() -> i32 { n = n + 1; n }; (f@[mut])(); (f@[mut])(); println(\"{}\", n); }")
@@ -78,6 +94,25 @@ class ClosureSemanticTests(unittest.TestCase):
         checker = self.check('fn main() { let text << String::from("x"); let f << fn[text]() -> usize { text.len() }; (f@)(); (f@)(); }')
         self.assertEqual(next(iter(checker.closures.values())).mode, "read")
 
+    def test_borrowed_resource_is_not_moved_by_capture_or_call(self):
+        checker = self.check('fn main() { let text << String::from("x"); let f << fn[text@]() -> usize { text.len() }; f(); f(); println("{}", text); }')
+        self.assertEqual(next(iter(checker.closures.values())).mode, "read")
+        self.check('fn main() { let text << String::from("x"); let f << fn[text@]() -> String { text }; }', "XE-MOVE-0002")
+        self.check('fn main() { let text << String::from("x"); let f << fn[text@]() { println("{}", text); }; }', "XE-MOVE-0002")
+        self.check('fn take(value: String) {} fn main() { let text << String::from("x"); let f << fn[text@]() { take(text); }; }', "XE-MOVE-0002")
+        self.check('fn main() { let text << String::from("x"); let f << fn[text@]() { let inner << fn[text]() {}; }; }', "XE-MOVE-0002")
+
+    def test_resource_replacement_through_alias_invalidates_external_views(self):
+        self.check('fn main() { let[mut] text << String::from("x"); let f << fn[text@]() { text << String::from("new"); }; }', "XE-MUT-0001")
+        checker = self.check('fn main() { let[mut] text << String::from("x"); let f << fn[text@[mut]]() -> str { text << String::from("new"); text.as_str() }; let old = text.as_str(); let fresh = f(); println("{}", old); println("{}", fresh); }')
+        info = next(iter(checker.closures.values()))
+        self.assertEqual(info.mode, "read")
+        self.assertEqual(info.storage_captures, frozenset())
+        self.assertEqual(info.invalidated_external_captures, frozenset({0}))
+        entries = {entry.get("name"): entry for entry in checker.inferred_types.values() if entry.get("name")}
+        self.assertTrue(entries["old"]["unsafe"])
+        self.assertFalse(entries["fresh"]["unsafe"])
+
     def test_moving_owned_capture_is_once_only(self):
         checker = self.check('fn main() { let text << String::from("x"); let f << fn[text]() -> String { text }; let result << f(); println("{}", result); }')
         self.assertEqual(next(iter(checker.closures.values())).mode, "once")
@@ -96,9 +131,25 @@ class ClosureSemanticTests(unittest.TestCase):
         self.check("fn main() { let n = 1; let f = fn() -> i32 { n }; }", "XE-NAME-0001")
 
     def test_nested_mutable_capture_requires_mutable_outer_environment(self):
-        checker = self.check("fn main() { let n = 0; let[mut] f << fn[n]() { let inner << fn[n@[mut]]() { n# = 1; }; inner(); }; (f@[mut])(); }")
+        checker = self.check("fn main() { let n = 0; let[mut] f << fn[n]() { let inner << fn[n@[mut]]() { n = 1; }; inner(); }; (f@[mut])(); }")
         self.assertEqual(sorted(info.mode for info in checker.closures.values()), ["mut", "read"])
-        self.check("fn main() { let n = 0; let f << fn[n]() { let inner << fn[n@[mut]]() { n# = 1; }; inner(); }; (f@)(); }", "XE-MUT-0001")
+        self.check("fn main() { let n = 0; let f << fn[n]() { let inner << fn[n@[mut]]() { n = 1; }; inner(); }; (f@)(); }", "XE-MUT-0001")
+
+    def test_nested_borrowed_alias_uses_external_source(self):
+        checker = self.check("fn main() { let n = 42; let f << fn[n@]() -> i32@ { let inner << fn[n@]() -> i32@ { n@ }; inner() }; let p = f(); println(\"{}\", p#); }")
+        infos = list(checker.closures.values())
+        self.assertEqual([info.storage_captures for info in infos], [frozenset(), frozenset()])
+        self.assertEqual([info.borrow_captures for info in infos], [frozenset({0}), frozenset({0})])
+        self.assertEqual(checker.warnings, [])
+        self.check("fn main() { let[mut] n = 0; let f << fn[n@]() { let inner << fn[n@[mut]]() { n = 1; }; }; }", "XE-MUT-0001")
+
+    def test_nested_writable_alias_propagates_external_invalidation(self):
+        checker = self.check('fn main() { let[mut] text << String::from("x"); let outer << fn[text@[mut]]() { let inner << fn[text@[mut]]() { text.push_str("more"); }; inner(); }; let old = text.as_str(); outer(); println("{}", old); }')
+        infos = list(checker.closures.values())
+        self.assertEqual([info.mode for info in infos], ["read", "read"])
+        self.assertEqual([info.invalidated_external_captures for info in infos],
+                         [frozenset({0}), frozenset({0})])
+        self.assertTrue(checker.warnings)
 
     def test_local_writes_do_not_require_mutable_environment(self):
         checker = self.check("fn main() { let n = 1; let f << fn[n]() -> i32 { let[mut] local = n; local = 42; local }; (f@)(); }")

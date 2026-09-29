@@ -1,0 +1,30 @@
+// Step 的停止标记独立于元素本身的 Maybe::None。
+struct OptionalCounter { current: i32, }
+
+impl OptionalCounter {
+    fn next(self: Self@[mut]) -> Step[i32?] {
+        if self.current >= 2 {
+            Step::Stop
+        } else {
+            let index = self.current;
+            self.current = self.current + 1;
+            if index == 0 {
+                Step::Item[Maybe::None]
+            } else {
+                Step::Item[Maybe::Yes[7]]
+            }
+        }
+    }
+}
+
+fn main() {
+    let counter << OptionalCounter { .current = 0; };
+    let[mut] seen = 0;
+    for item: i32? in counter {
+        seen = seen + 1;
+        item?
+            1> value: i32 -> println("item {}", value)
+            2> _ -> println("item None");
+    }
+    println("seen {}", seen); // 2；第一轮的 Maybe::None 不是停止
+}

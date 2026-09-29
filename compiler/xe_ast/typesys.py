@@ -5,7 +5,7 @@ NUMERIC = {f"{prefix}{bits}" for prefix in ("i", "u") for bits in (8,16,32,64)}
 NUMERIC |= {"isize", "usize", "f32", "f64"}
 PRIMITIVES = NUMERIC | {"bool", "char", "str", "Unit", "Never"}
 STANDARD = {"String", "File", "io::Error", "ConversionError", "Array", "Vec",
-            "Slice", "SliceMut", "Map", "Set", "Box", "Range", "Iterator", "Formatter", "FromFn"}
+            "Slice", "SliceMut", "Map", "Set", "Box", "Range", "Iterator", "Formatter", "FromFn", "Step"}
 
 
 @dataclass(frozen=True)

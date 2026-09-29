@@ -5,13 +5,13 @@ struct Counter {
 }
 
 impl Counter {
-    fn next(self: Self@[mut]) -> i32? {
+    fn next(self: Self@[mut]) -> Step[i32] {
         if self.current >= self.end {
-            None
+            Step::Stop
         } else {
             let value = self.current;
             self.current = self.current + 1;
-            value
+            Step::Item[value]
         }
     }
 }
@@ -30,15 +30,15 @@ fn main() {
     };
     println("closure: {} {} (outer {})", advance(), advance(), current);
 
-    // 每次从正文开头运行，None 表示结束；不是 yield 自动暂停。
+    // 每次从正文开头运行，Step::Stop 表示结束；不是 yield 自动暂停。
     let start = 0;
-    let generated << std::iter::from_fn(fn[start]() -> i32? {
+    let generated << std::iter::from_fn(fn[start]() -> Step[i32] {
         if start >= 3 {
-            None
+            Step::Stop
         } else {
             let value = start;
             start = start + 1;
-            value
+            Step::Item[value]
         }
     });
     print("from_fn:");
@@ -47,10 +47,10 @@ fn main() {
 
     // 普通指针允许共享；闭包不拥有或释放被指向的变量。
     let[mut] shared = 0;
-    let borrowed << std::iter::from_fn(fn[shared@[mut]]() -> i32? {
-        if shared# >= 2 { None } else {
-            shared# = shared# + 1;
-            shared#
+    let borrowed << std::iter::from_fn(fn[shared@[mut]]() -> Step[i32] {
+        if shared >= 2 { Step::Stop } else {
+            shared = shared + 1;
+            Step::Item[shared]
         }
     });
     print("pointer:");

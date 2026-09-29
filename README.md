@@ -52,8 +52,9 @@ fn main() {
   有 Drop 或含不可复制字段时禁止实现 Copy；基础类型和普通指针可直接复制。
 - 泛型声明写 `struct[T] Holder`、`fn[T] wrap`；使用写 `Holder[i32]`、`wrap[i32](10)`。
   前者声明未知量，后者代入具体值；未知 T 的字段初始化可写 `value >> .value;`。
-- `T?` 是 `T?[None]` 的简写；`T?[E]` 是带错误负载的 `Maybe`。未修饰的 `?` 必须处理
-  `1>` 与 `2>`，`?[return]` 传播失败，`?[panic]` 明确选择失败终止。
+- `T?` 是 `T?[None]` 的简写；`T?[E]` 是 `Yes[T] | No[E]`，E 可以是任意类型。
+  只有 API 显式写 `E: Error` 约束时才要求 E 实现相应特性；目前尚无预定义 `Error` 特性。
+  未修饰的 `?` 必须处理 `1>` 与 `2>`；`?[return]` 传播 No 分支，`?[panic]` 明确选择终止。
 - `as T` 仅做无损转换；可失败整数转换写 `T::try_from(value)`。
 - 函数参数不会隐式借用；移动类型按值传入会被移动，需要保留时显式传入 `value@`，
   `println` 和 `format` 也不例外。
@@ -113,7 +114,7 @@ RESERVED / PROVISIONAL / DEFERRED 分阶段实现。
 管道之后只接可调用目标或参数绑定，真正的匿名函数/闭包必须以 fn 开头，显式捕获用
 `fn[value](x: i32) -> i32 { value + x }`。捕获环境与方法式 f() 已能运行：读/写调用保留自身，
 移出捕获资源才消耗环境。机制见 [第 15 章](doc/15.md)。
-`next(self: Self@[mut]) -> T?` 对象可用于 for；`std::iter::from_fn` 保存可重复回调产生元素。
+`next(self: Self@[mut]) -> Step[T]` 对象可用于 for；`Step::Item[value]` 产生元素，`Step::Stop` 结束迭代。`std::iter::from_fn` 保存返回 `Step[T]` 的可重复回调。
 运行 `make iterator-demo`，边界与清理规则见 [第 26 章](doc/26.md)；yield 尚未实现。
 优先级见第 02 章；本轮确认的设计与迁移理由见 [第 21 章](doc/21.md)。
 指针权限转换和泛型实例化的实现边界见 [第 22 章](doc/22.md)。

@@ -1,0 +1,19 @@
+// 捕获附件选择保存方式，不改变闭包正文里同名变量的类型。
+fn main() {
+    let[mut] current = 0;
+    let advance << fn[current@[mut]]() -> i32 {
+        current = current + 1;
+        current
+    };
+    advance();
+    advance();
+    println("{}", current); // 2；闭包保存地址，正文 current 仍是 i32。
+
+    // 反过来，按值捕获一个已经是指针的变量，正文里它仍是指针。
+    let pointer: i32@[mut] = current@[mut];
+    let increment_pointer << fn[pointer]() -> i32 {
+        pointer# = pointer# + 1;
+        pointer#
+    };
+    println("{}", increment_pointer()); // 3
+}

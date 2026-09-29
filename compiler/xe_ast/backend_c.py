@@ -279,6 +279,12 @@ class CBackend:
         return [(v["name"], [self.concrete_member_type(t, type_) for t in v["payload"]])
                 for v in node.get("variants", [])]
 
+    def variant_tag(self, type_, name, node):
+        for tag, (variant, _) in enumerate(self.variants(type_)):
+            if variant == name:
+                return tag
+        self.fail(node, f"{type_} 缺少 {name} 枚举变体")
+
     def payload_code(self, code, variant, index):
         return f"({code}).{identifier(variant + '_' + str(index))}"
 
@@ -379,6 +385,8 @@ class CBackend:
 
     def transfer(self, value):
         """转交只清活跃标记，不清数据：后续生成的赋值/调用仍需要这些位。"""
+        if value.slot and value.slot.borrowed and not self.checker.copyable(value.type):
+            self.fail(self.tree, "不能通过闭包的非拥有别名移走资源所有权")
         if value.slot and not self.checker.copyable(value.type):
             for path, flag in value.slot.flags.items():
                 if path[:len(value.path)] == value.path:
@@ -534,13 +542,22 @@ class CBackend:
             self.register_order(slot)
         if closure_type is not None:
             # 捕获名是环境字段的别名，不是复制出来的第二份资源。
-            # 拥有调用将字段移动标记联到环境；指针调用不注册字段的 Drop。
+            # 借用捕获的物理字段是 T@，正文中的名字则是原 T 的非拥有别名。
+            # 拥有调用将按值字段的移动标记联到环境；指针调用不注册字段的 Drop。
             environment = self.scopes[0].names["$environment"]
             code = environment.name if owning else f"*({environment.name})"
-            for capture_name, capture_type in self.fields(closure_type):
+            captures = self.checker.closures[closure_type].node["captures"]
+            for capture, (capture_name, capture_type) in zip(captures, self.fields(closure_type)):
+                field = self.field_code(code, (capture_name,))
+                if capture["borrow"]:
+                    if capture_type.name != "ptr":
+                        self.fail(capture, "借用捕获的环境字段必须是指针")
+                    self.scopes[0].names[capture_name] = Slot(
+                        f"*({field})", capture_type.args[0], borrowed=True)
+                    continue
                 flags = {path[1:]: flag for path, flag in environment.flags.items()
                          if path and path[0] == capture_name} if owning else {}
-                alias = Slot(self.field_code(code, (capture_name,)), capture_type,
+                alias = Slot(field, capture_type,
                              flags=flags, borrowed=not owning)
                 self.scopes[0].names[capture_name] = alias
         result = self.storage(signature.result, "return", "0" if signature.result == UNIT else None)
@@ -998,11 +1015,21 @@ class CBackend:
         if handler["kind"] == "FunctionTarget":
             target_key = getattr(self.checker, "call_targets", {}).get(id(handler))
             if target_key is not None:
-                return self.invoke(self.checker.functions[target_key], self.function_name(target_key),
-                                   values=[self.argument(value) for value in payloads])
-            function = self.callable_argument(self.expression(handler["target"]), handler)
-            return self.invoke_function_value(function, handler,
-                                              values=[self.argument(value) for value in payloads])
+                value = self.invoke(self.checker.functions[target_key], self.function_name(target_key),
+                                    values=[self.argument(payload) for payload in payloads])
+            else:
+                function = self.callable_argument(self.expression(handler["target"]), handler)
+                value = self.invoke_function_value(function, handler,
+                                                   values=[self.argument(payload) for payload in payloads])
+            # A named handler's result can be the successful payload of the
+            # branch's expected Maybe type, just like a binding handler's body.
+            # Keep this conversion at the handler result, rather than changing
+            # the return type of the underlying function call.
+            if type_.name == "maybe" and value.type in {type_.args[0], NONE}:
+                result = self.storage(type_, "handler_result")
+                self.assign(result, value, handler)
+                return self.value(result)
+            return value
 
         result = self.storage(UNIT if type_ == NEVER else type_, "handler_result")
         self.line("{")
@@ -1217,6 +1244,8 @@ class CBackend:
             if target.name == "ptr" and receiver.type.name != "ptr":
                 receiver = CValue(f"&({receiver.code})", target)
             elif target.name != "ptr" and receiver.type.name == "ptr":
+                if not self.checker.copyable(target):
+                    self.fail(node, "消耗资源的按值方法不能通过指针调用")
                 receiver = CValue(f"*({receiver.code})", target)
             arguments = [self.argument(receiver)]
             for argument, parameter in zip(node["arguments"], signature.parameters[1:]):
@@ -1239,6 +1268,8 @@ class CBackend:
                 pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
                 return self.from_fn_next(CValue(pointer, ptr(base, True)), node)
             if base.name == "maybe" and name == "expect":
+                if receiver.type.name == "ptr" and not self.checker.copyable(base):
+                    self.fail(node, "expect() 会消耗资源结果；不能通过指针调用")
                 message = self.argument(self.expression(node["arguments"][0], STR))
                 if message.type == NEVER:
                     return message
@@ -1256,6 +1287,8 @@ class CBackend:
                 if target.name == "ptr" and receiver.type.name != "ptr":
                     receiver = CValue(f"&({receiver.code})", target)
                 elif target.name != "ptr" and receiver.type.name == "ptr":
+                    if not self.checker.copyable(target):
+                        self.fail(node, "消耗资源的按值方法不能通过指针调用")
                     receiver = CValue(f"*({receiver.code})", target)
                 arguments = [self.argument(receiver)] + [self.argument(self.expression(n, t)) for n, t in
                                           zip(node["arguments"], signature.parameters[1:])]
@@ -1374,14 +1407,15 @@ class CBackend:
         self.fail(node, f"调用 {name} 尚未接入 C 后端")
 
     def from_fn_next(self, pointer, node):
-        """回调借用自己的环境运行；第一次 None 以后不再调用用户代码。
+        """回调借用自己的环境运行；第一次 Step::Stop 后不再调用用户代码。
 
         就地展开而非另建 ABI：闭包具体类型、普通函数与函数指针均沿用
         invoke_function_value 的一套调用规则，不增加隐式装箱。
         """
         iterator = pointer.type.args[0]
         result_type = next_result(iterator)
-        result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = 1}}")
+        stop_tag = self.variant_tag(result_type, "Stop", node)
+        result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = {stop_tag}}}")
         done = f"({pointer.code})->{identifier('done')}"
         callback = f"({pointer.code})->{identifier('callback')}"
         callback_t = callback_type(iterator)
@@ -1394,7 +1428,7 @@ class CBackend:
         self.scopes.append(Scope())
         produced = self.invoke_function_value(function, node, values=[])
         self.assign(result.slot, produced, node)
-        self.line(f"if (({result.code}).tag == 1) {done} = true;")
+        self.line(f"if (({result.code}).tag == {stop_tag}) {done} = true;")
         self.cleanup([self.scopes[-1]])
         self.scopes.pop()
         self.indent -= 1
@@ -1647,7 +1681,8 @@ class CBackend:
             target = self.checker.call_targets.get(id(node))
             name = self.function_name(target) if target else self.method_name(base.name, "next")
             produced = self.invoke(signature, name, values=[pointer])
-        self.line(f"if (({produced.code}).tag == 1) {{")
+        stop_tag = self.variant_tag(produced.type, "Stop", node)
+        self.line(f"if (({produced.code}).tag == {stop_tag}) {{")
         self.indent += 1
         self.cleanup([self.scopes[-1]])
         self.line("break;")
@@ -1655,7 +1690,7 @@ class CBackend:
         self.line("}")
         element_type = self.checker.binding_types[id(node)]
         slot = self.storage(element_type, node["name"])
-        payload = CValue(self.payload_code(produced.code, "Yes", 0), produced.type.args[0])
+        payload = CValue(self.payload_code(produced.code, "Item", 0), produced.type.args[0])
         self.assign(slot, payload, node)
         self.transfer(produced)
         self.scopes[-1].names[node["name"]] = slot
