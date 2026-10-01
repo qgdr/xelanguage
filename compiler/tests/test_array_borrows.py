@@ -3,18 +3,18 @@
 临时数组可以迭代，逃逸指针应标记 unsafe 并警告，但仍可编译。
 只执行存储仍有效的正例并配合 ASan/UBSan，不运行已知悬垂程序。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast import parse_source
-from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.build import build_executable
+from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class ArrayBorrowTests(unittest.TestCase):

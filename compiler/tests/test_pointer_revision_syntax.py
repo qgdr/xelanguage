@@ -3,17 +3,16 @@
 这里不把泛型语义/生命周期实现与解析测试混在一起。可运行的字段例子
 则真正经过 C 编译器，保证 >> 的解析与资源转移使用同一套后端路径。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.build import build_executable
 
-
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class PointerRevisionSyntaxTests(unittest.TestCase):
@@ -41,6 +40,7 @@ class PointerRevisionSyntaxTests(unittest.TestCase):
                 with self.assertRaises(Diagnostic) as caught:
                     parse_source(f"{keyword} Name[T] {{ {body} }}")
                 self.assertIn("关键字后", caught.exception.message)
+                assert caught.exception.hint is not None
                 self.assertIn(f"{keyword}[T] Name", caught.exception.hint)
 
     def test_nongeneric_declarations_are_unchanged(self):
@@ -97,6 +97,7 @@ class PointerRevisionSyntaxTests(unittest.TestCase):
                 with self.assertRaises(Diagnostic) as caught:
                     parse_source(f"fn f(value: Outer) {{ value ? {{ {selector} :> _ -> 0, }}; }}")
                 self.assertIn("一层", caught.exception.message)
+                assert caught.exception.hint is not None
                 self.assertIn("再写一次 ?", caught.exception.hint)
 
     def test_explicit_second_match_is_accepted(self):

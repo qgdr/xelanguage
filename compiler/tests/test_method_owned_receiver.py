@@ -1,16 +1,15 @@
 """资源的按值 self 不得由指针提供；Copy 值保留既有复制规则。"""
 
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
 
-
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class OwnedMethodReceiverTests(unittest.TestCase):

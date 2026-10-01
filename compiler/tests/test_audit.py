@@ -2,16 +2,16 @@
 import contextlib
 import io
 import json
-from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from compiler.audit import audit_directory, audit_file, main, write_report
 from compiler.xe_ast.source import Diagnostic, Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class AuditTests(unittest.TestCase):

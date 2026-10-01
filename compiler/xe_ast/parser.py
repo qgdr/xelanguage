@@ -7,7 +7,8 @@
 """
 import ast as python_ast
 import math
-from typing import Any
+from typing import Any, NoReturn
+
 from .lexer import Lexer, Token
 from .source import Diagnostic, Source
 
@@ -51,7 +52,7 @@ class Parser:
         return None
 
     def error(self, message: str, hint: str | None = None,
-              token: Token | None = None) -> None:
+              token: Token | None = None) -> NoReturn:
         token = token or self.current
         raise Diagnostic(self.source, token.start, token.end, message, hint=hint)
 
@@ -278,13 +279,30 @@ class Parser:
                 alias = self.expect("IDENT").text
             self.expect(";")
             return self.node("Use", start, public=public, path=path, names=names, alias=alias)
-        if self.accept("const"):
+        if kind in {"let", "var", "const"}:
+            # 同一声明附件表示同一写权限，不另设 global/static 关键字。
+            # 只读模块值继续兼容已有 Constant；可写对象有独立静态存储。
+            if kind == "const":
+                self.take()
+                if self.current.kind == "[":
+                    self.error("旧 const 声明不接受可变附件", "使用 let[mut] NAME: Type = value;")
+                mutable = False
+            else:
+                mutable = self.binding_prefix()
             name = self.expect("IDENT").text
+            if self.current.kind != ":":
+                self.error("模块级 let 必须显式标注类型", "例如 let LIMIT: usize = 100;")
             self.expect(":")
             annotation = self.type()
+            if self.current.kind != "=":
+                self.error("模块级绑定必须用 = 提供静态初值",
+                           "例如 let[mut] COUNT: usize = 0;；资源请在函数内创建")
             self.expect("=")
             value = self.expression()
             self.expect(";")
+            if mutable:
+                return self.node("GlobalBinding", start, public=public, name=name, type=annotation,
+                                 value=value, mutable=True, operator="=")
             return self.node("Constant", start, public=public, name=name, type=annotation, value=value)
         if self.accept("type"):
             if self.current.kind == "[":
@@ -315,7 +333,8 @@ class Parser:
                     self.error("声明未结束，缺少 }")
                 begin = self.current.start
                 if kind == "trait":
-                    if self.current.kind not in {"pub", "fn"}:
+                    method_kind = self.peek().kind if self.current.kind == "pub" else self.current.kind
+                    if method_kind != "fn":
                         self.error("Trait 内只能声明方法")
                     members.append(self.item(prototype=True))
                     continue
@@ -352,7 +371,8 @@ class Parser:
             if not self.accept(";"):
                 self.expect("{")
                 while self.current.kind != "}":
-                    if self.current.kind not in {"pub", "fn"}:
+                    method_kind = self.peek().kind if self.current.kind == "pub" else self.current.kind
+                    if method_kind != "fn":
                         self.error("impl 内只能定义方法")
                     methods.append(self.item())
                 self.expect("}")
@@ -373,7 +393,7 @@ class Parser:
                 functions.append(item)
             self.expect("}")
             return self.node("Extern", start, abi=abi, functions=functions)
-        self.error("模块顶层需要 fn、struct、enum、trait、impl、use、const、type 或 extern 声明")
+        self.error("模块顶层需要 fn、struct、enum、trait、impl、use、let、type 或 extern 声明")
 
     def tuple_targets(self) -> list[Node]:
         self.expect("tuple")

@@ -17,7 +17,23 @@ PROGRAM ?= target/debug/$(basename $(notdir $(SOURCE)))
 C_OUTPUT ?= target/c/$(notdir $(SOURCE)).c
 CC ?= cc
 
-.PHONY: ast ast-test check check-safety check-borrows compiler-test emit-c build run demo iterator-demo thread-demo source-scan feature-tool feature-run feature-check stdlib-test audit clean
+.PHONY: ast ast-test check check-safety check-borrows compiler-test python-check emit-c build run demo iterator-demo thread-demo source-scan feature-tool feature-run feature-check stdlib-test audit bootstrap bootstrap-sanitize bootstrap-test xe toolchain-test toolchain-demo clean
+
+# 新统一工具；旧目标保留原路径/默认值兼容性。
+XE_ARGS ?= --help
+xe:
+	$(UV) run --project . --frozen --offline python -m compiler $(XE_ARGS)
+
+toolchain-test:
+	$(UV) run --project . --frozen --offline python -m unittest compiler.tests.test_toolchain -v
+
+# 与 VS Code 的项目配置一致，不与 Xe 源码的 check/lint 混淆。
+python-check:
+	$(UV) run --project . --frozen --offline pyright
+	$(UV) run --project . --frozen --offline ruff check compiler bootstrap
+
+toolchain-demo:
+	$(UV) run --project . --frozen --offline python -m compiler run --manifest-path examples/toolchain
 
 ast:
 	$(UV) run --project . --frozen --offline python compiler/main.py "$(SOURCE)" -o "$(OUTPUT)"
@@ -77,6 +93,16 @@ stdlib-test:
 # AST、语义、生成C、系统编译及实际运行分层审核；报告不是完整规范的证明。
 audit:
 	$(UV) run --project . --frozen --offline python compiler/audit.py tests/stage999 -o target/audit/stage999.json --cc "$(CC)"
+
+# Xe 源码由上一代 Xe 可执行文件解析和发射；Python 只引导 seed 并调用系统 cc。
+bootstrap:
+	$(UV) run --project . --frozen --offline python bootstrap/verify.py --cc "$(CC)"
+
+bootstrap-sanitize:
+	$(UV) run --project . --frozen --offline python bootstrap/verify.py --cc "$(CC)" --sanitize
+
+bootstrap-test:
+	$(UV) run --project . --frozen --offline python -m unittest compiler.tests.test_selfhost -v
 
 clean:
 	find ./tests -name "*.out" -exec rm -f {} +

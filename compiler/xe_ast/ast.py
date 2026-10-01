@@ -1,5 +1,6 @@
 """AST JSON 边界：固定信封，后续类型信息不要偷偷混进语法树。"""
 from typing import Any
+
 from .source import Source
 
 SCHEMA_VERSION = 1

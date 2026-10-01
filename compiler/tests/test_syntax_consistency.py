@@ -2,18 +2,18 @@
 
 每次语法调整同时验证接受和拒绝的情况，避免只让解析器认识新符号。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
-from compiler.xe_ast import parse_source, Diagnostic
+from compiler.xe_ast import Diagnostic, parse_source
+from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
-from compiler.xe_ast.build import build_executable
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class SyntaxConsistencyTests(unittest.TestCase):

@@ -1,0 +1,5 @@
+fn twice(value: i32) -> i32 { value * 2 }
+fn main() {
+    let answer = twice(21);
+    println("hello Xe: {}", answer);
+}

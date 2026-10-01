@@ -5,11 +5,11 @@ PTY 只用来构造真实终端描述符，不替换 isatty 的返回值。分�
 """
 import errno
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -17,9 +17,8 @@ from compiler.xe_ast.semantic import check_source
 from compiler.xe_ast.stdlib_io import IO_NATIVE_FUNCTIONS, io_function
 from compiler.xe_ast.typesys import BOOL
 
-
 ROOT = Path(__file__).resolve().parents[2]
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 HAS_PTY = os.name == "posix" and hasattr(os, "openpty")
 PROBE = '''fn main() {
     println("{} {} {} {} {}", std::io::stdin_is_terminal(),
@@ -34,6 +33,7 @@ class StandardIoTerminalSemanticTests(unittest.TestCase):
         for name in IO_NATIVE_FUNCTIONS:
             with self.subTest(name=name):
                 signature = io_function(name)
+                assert signature is not None
                 self.assertEqual(signature.parameters, ())
                 self.assertEqual(signature.result, BOOL)
                 self.assertFalse(signature.formatted)

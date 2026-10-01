@@ -1,0 +1,1460 @@
+//! Xe 编写的首版自举编译器。没有调用 Python 前端，也不把源文件当作 C 文本复制。
+//! 数据流：源码 -> Token -> 扁平 AST -> 类型/资源检查与 C 发射。
+//! 第一版放在一个文件中，方便核对自编译输入；各节对应未来可拆开的模块。
+//! 不变量：source 在整个编译期间存活；表中用 ID，不保存 Vec 元素的地址。
+
+// ---------- 数据模型：小记录显式 Copy，拥有容器不 Copy ----------
+// 模块级只读绑定也使用 let；这些值在编译期确定，不执行全局初始化。
+let T_UNIT: usize = 0;
+let T_BOOL: usize = 1;
+let T_I32: usize = 2;
+let T_I64: usize = 3;
+let T_USIZE: usize = 4;
+let T_U8: usize = 5;
+let T_CHAR: usize = 6;
+let T_STR: usize = 7;
+let T_STRING: usize = 8;
+let T_FILE: usize = 9;
+let T_ERROR: usize = 10;
+let T_NEVER: usize = 11;
+let UNKNOWN: usize = 999999;
+let TYPE_POINTER: i32 = 1;
+let TYPE_VECTOR: i32 = 2;
+let TYPE_SLICE: i32 = 3;
+let TYPE_MAYBE: i32 = 4;
+let TYPE_STRUCT: i32 = 5;
+let TOKEN_END: i32 = 0;
+let TOKEN_NAME: i32 = 1;
+let TOKEN_NUMBER: i32 = 2;
+let TOKEN_STRING: i32 = 3;
+let TOKEN_CHAR: i32 = 4;
+let TOKEN_SYMBOL: i32 = 5;
+let N_NAME: i32 = 1;
+let N_LITERAL: i32 = 2;
+let N_BINARY: i32 = 3;
+let N_UNARY: i32 = 4;
+let N_CALL: i32 = 5;
+let N_FIELD: i32 = 6;
+let N_INDEX: i32 = 7;
+let N_ADDRESS: i32 = 8;
+let N_DEREF: i32 = 9;
+let N_CAST: i32 = 10;
+let N_STRUCT: i32 = 11;
+let N_UNWRAP: i32 = 12;
+let N_BLOCK: i32 = 13;
+let N_IF: i32 = 14;
+let N_LET: i32 = 15;
+let N_ASSIGN: i32 = 16;
+let N_RETURN: i32 = 17;
+let N_WHILE: i32 = 18;
+let N_BREAK: i32 = 19;
+let N_CONTINUE: i32 = 20;
+let N_STATEMENT: i32 = 21;
+let N_RANGE: i32 = 22;
+
+struct Token { kind: i32, text: str, line: usize, column: usize, }
+impl Copy for Token;
+// kind 决定 a/b/c 的含义：二元为左右节点；if 为条件/真块/假块；block.a 为尾值。
+// first/count 指向 edges 表中的变长列表；token 指向 Token 表，type_id 指向类型表。
+// 节点 0 表示 unit；UNKNOWN 表示尚未确定，不能直接拿去索引任何表。
+struct Node {
+    kind: i32, token: usize, type_id: usize,
+    a: usize, b: usize, c: usize, first: usize, count: usize,
+    writable: bool, op: str,
+}
+impl Copy for Node;
+struct TypeInfo {
+    name: str, kind: i32, base: usize, other: usize,
+    first: usize, count: usize, writable: bool, copy: bool,
+}
+impl Copy for TypeInfo;
+struct Field { name: str, type_id: usize, }
+impl Copy for Field;
+struct Function {
+    name: str, token: usize, result: usize, first: usize, count: usize, body: usize,
+}
+impl Copy for Function;
+// 模块绑定共用记录：只读 let 按值使用，可写 let 拥有跨函数的静态存储。
+struct Constant { name: str, type_id: usize, value: usize, writable: bool, }
+impl Copy for Constant;
+struct Program {
+    path: str, tokens: Vec[Token], nodes: Vec[Node], edges: Vec[usize],
+    types: Vec[TypeInfo], fields: Vec[Field], parameters: Vec[Field],
+    functions: Vec[Function], constants: Vec[Constant], cursor: usize,
+}
+// state: 0 有效，1 已移动，2 有字段被移动。depth 用于正常退出和提前退出清理。
+struct Symbol {
+    name: str, type_id: usize, id: usize, depth: usize,
+    writable: bool, state: i32, temporary: bool,
+}
+impl Copy for Symbol;
+// id == UNKNOWN 且 place 是 N_NAME 时表示模块可写存储，不是函数内临时副本。
+struct Value { id: usize, type_id: usize, place: usize, }
+impl Copy for Value;
+struct MovedField { symbol: usize, name: str, }
+impl Copy for MovedField;
+struct Generator {
+    program: Program@[mut], output: String, symbols: Vec[Symbol],
+    moved_fields: Vec[MovedField],
+    depth: usize, next_id: usize, result: usize, loop_depth: usize,
+}
+
+// ---------- 词法：位置随 Token 保存，注释与字符串不会变成代码 ----------
+fn is_letter(byte: u8) -> bool {
+    (byte >= b'a' and byte <= b'z') or (byte >= b'A' and byte <= b'Z') or byte == b'_'
+}
+fn is_digit(byte: u8) -> bool { byte >= b'0' and byte <= b'9' }
+fn view(text: str, start: usize, end: usize) -> str { text.slice_bytes(start..end)?[panic] }
+fn lex_error(path: str, line: usize, column: usize, message: str) -> Never {
+    eprintln("{}:{}:{}: XE-BOOT-LEX: {}", path, line, column, message);
+    panic("source rejected");
+}
+fn lex(path: str, source: str) -> Vec[Token] {
+    let[mut] tokens << Vec[Token]::new();
+    let[mut] offset: usize = 0;
+    let[mut] line: usize = 1;
+    let[mut] column: usize = 1;
+    while offset < source.len() {
+        let start = offset;
+        let start_line = line;
+        let start_column = column;
+        let byte = source.byte_at(offset);
+        if byte == b' ' or byte == b'\t' or byte == b'\r' or byte == b'\n' {
+            offset = offset + 1;
+            if byte == b'\n' { line = line + 1; column = 1; } else { column = column + 1; }
+            continue;
+        }
+        if byte == b'/' and offset + 1 < source.len() {
+            let next = source.byte_at(offset + 1);
+            if next == b'/' {
+                while offset < source.len() and source.byte_at(offset) != b'\n' {
+                    offset = offset + 1; column = column + 1;
+                }
+                continue;
+            }
+            if next == b'*' {
+                offset = offset + 2; column = column + 2;
+                let[mut] nesting: usize = 1;
+                while nesting != 0 {
+                    if offset >= source.len() { lex_error(path, start_line, start_column, "unclosed block comment"); }
+                    let current = source.byte_at(offset);
+                    if offset + 1 < source.len() {
+                        let next_byte = source.byte_at(offset + 1);
+                        if current == b'/' and next_byte == b'*' { nesting = nesting + 1; offset = offset + 2; column = column + 2; continue; }
+                        if current == b'*' and next_byte == b'/' { nesting = nesting - 1; offset = offset + 2; column = column + 2; continue; }
+                    }
+                    offset = offset + 1;
+                    if current == b'\n' { line = line + 1; column = 1; } else { column = column + 1; }
+                }
+                continue;
+            }
+        }
+        let[mut] kind = TOKEN_SYMBOL;
+        // b'...' 与普通名称 b 区分；引号内保留原文，C 发射器稍后处理。
+        if byte == b'"' or byte == b'\'' or
+           (byte == b'b' and offset + 1 < source.len() and source.byte_at(offset + 1) == b'\'') {
+            if byte == b'b' { offset = offset + 1; column = column + 1; }
+            let quote = source.byte_at(offset);
+            kind = TOKEN_CHAR;
+            if quote == b'"' { kind = TOKEN_STRING; }
+            offset = offset + 1; column = column + 1;
+            let[mut] closed = false;
+            while offset < source.len() {
+                let current = source.byte_at(offset);
+                if current == b'\n' { lex_error(path, start_line, start_column, "newline in literal"); }
+                offset = offset + 1; column = column + 1;
+                if current == quote { closed = true; break; }
+                if current == b'\\' {
+                    if offset >= source.len() { break; }
+                    let escape = source.byte_at(offset);
+                    if escape != b'\\' and escape != b'"' and escape != b'\'' and
+                       escape != b'n' and escape != b'r' and escape != b't' and escape != b'0' and
+                       escape != b'a' and escape != b'b' and escape != b'f' and escape != b'v' {
+                        lex_error(path, start_line, start_column, "unsupported escape in bootstrap literal");
+                    }
+                    offset = offset + 1; column = column + 1;
+                }
+            }
+            if not closed { lex_error(path, start_line, start_column, "unclosed literal"); }
+            if kind == TOKEN_CHAR {
+                let[mut] contents = start + 1; if byte == b'b' { contents = contents + 1; }
+                let count = offset - contents - 1;
+                if not (count == 1 and source.byte_at(contents) < 128) and
+                   not (count == 2 and source.byte_at(contents) == b'\\') {
+                    lex_error(path, start_line, start_column, "bootstrap character literals must be one ASCII character or escape");
+                }
+            }
+        } else if is_letter(byte) {
+            kind = TOKEN_NAME;
+            offset = offset + 1; column = column + 1;
+            while offset < source.len() and (is_letter(source.byte_at(offset)) or is_digit(source.byte_at(offset))) {
+                offset = offset + 1; column = column + 1;
+            }
+        } else if is_digit(byte) {
+            kind = TOKEN_NUMBER;
+            offset = offset + 1; column = column + 1;
+            while offset < source.len() and is_digit(source.byte_at(offset)) { offset = offset + 1; column = column + 1; }
+        } else {
+            if byte >= 128 { lex_error(path, line, column, "bootstrap identifiers must be ASCII"); }
+            offset = offset + 1; column = column + 1;
+            if offset < source.len() and source.byte_at(offset) < 128 {
+                let pair = view(source, start, offset + 1);
+                if pair == "::" or pair == "->" or pair == "<<" or pair == ">>" or
+                   pair == "==" or pair == "!=" or pair == "<=" or pair == ">=" or pair == ".." {
+                    offset = offset + 1; column = column + 1;
+                }
+            }
+        }
+        tokens.push(Token { .kind = kind; .text = view(source, start, offset); .line = start_line; .column = start_column; });
+    }
+    tokens.push(Token { .kind = TOKEN_END; .text = ""; .line = line; .column = column; });
+    tokens
+}
+
+// ---------- 表与解析辅助：所有 ID 在表末尾追加，0 号节点表示 unit ----------
+fn node(kind: i32, token: usize) -> Node {
+    Node { .kind = kind; .token = token; .type_id = UNKNOWN;
+        .a = 0; .b = 0; .c = 0; .first = 0; .count = 0; .writable = false; .op = ""; }
+}
+fn add_node(p: Program@[mut], value: Node) -> usize {
+    let id = p.nodes.len(); p.nodes.push(value); id
+}
+fn peek(p: Program@) -> Token { p.tokens[p.cursor] }
+fn at(p: Program@, text: str) -> bool { peek(p).text == text }
+fn error_at(p: Program@, token: usize, message: str) -> Never {
+    let location = p.tokens[token];
+    eprintln("{}:{}:{}: XE-BOOT-COMPILE: {}", p.path, location.line, location.column, message);
+    panic("source rejected");
+}
+fn take(p: Program@[mut]) -> usize {
+    let id = p.cursor;
+    if peek(p).kind == TOKEN_END { error_at(p, id, "unexpected end of file"); }
+    p.cursor = p.cursor + 1; id
+}
+fn eat(p: Program@[mut], text: str) -> bool {
+    if at(p, text) { take(p); true } else { false }
+}
+fn expect(p: Program@[mut], text: str) {
+    if not eat(p, text) {
+        let[mut] message << String::from("expected "); message.push_str(text);
+        error_at(p, p.cursor, message.as_str());
+    }
+}
+fn identifier(p: Program@[mut]) -> usize {
+    if peek(p).kind != TOKEN_NAME { error_at(p, p.cursor, "expected identifier"); }
+    if reserved_name(peek(p).text) { error_at(p, p.cursor, "keyword cannot be used as identifier"); }
+    take(p)
+}
+fn reserved_name(name: str) -> bool {
+    // 与 stage0 的保留词一致；mut 是附件位置的上下文词，不是保留词。
+    name == "let" or name == "var" or name == "const" or name == "fn" or name == "return" or
+    name == "if" or name == "else" or name == "while" or name == "for" or name == "in" or
+    name == "break" or name == "continue" or name == "struct" or name == "enum" or
+    name == "trait" or name == "impl" or name == "where" or name == "implements" or
+    name == "pub" or name == "use" or name == "as" or name == "crate" or name == "self" or
+    name == "super" or name == "region" or name == "extern" or name == "unsafe" or
+    name == "true" or name == "false" or name == "unit" or name == "None" or
+    name == "not" or name == "and" or name == "or" or name == "tuple" or name == "type"
+}
+fn find_type(p: Program@, name: str) -> usize {
+    let[mut] index: usize = 0;
+    while index < p.types.len() { if p.types[index].name == name { return index; } index = index + 1; }
+    UNKNOWN
+}
+fn primitive(p: Program@[mut], name: str, copy: bool) {
+    p.types.push(TypeInfo { .name = name; .kind = 0; .base = 0; .other = 0;
+        .first = 0; .count = 0; .writable = false; .copy = copy; });
+}
+fn compound(p: Program@[mut], kind: i32, base: usize, other: usize, writable: bool) -> usize {
+    if base == T_NEVER or other == T_NEVER {
+        error_at(p, p.cursor, "Never inside compound types is not supported by bootstrap");
+    }
+    let[mut] index: usize = 0;
+    while index < p.types.len() {
+        let t = p.types[index];
+        if t.kind == kind and t.base == base and t.other == other and t.writable == writable { return index; }
+        index = index + 1;
+    }
+    let id = p.types.len();
+    let copy = kind == TYPE_POINTER or kind == TYPE_SLICE or
+        (kind == TYPE_MAYBE and p.types[base].copy and p.types[other].copy);
+    p.types.push(TypeInfo { .name = ""; .kind = kind; .base = base; .other = other;
+        .first = 0; .count = 0; .writable = writable; .copy = copy; });
+    id
+}
+fn parse_type(p: Program@[mut]) -> usize {
+    let name_token = identifier(p);
+    let[mut] name = p.tokens[name_token].text;
+    if eat(p, "::") {
+        let part = identifier(p);
+        if name != "io" or p.tokens[part].text != "Error" { error_at(p, name_token, "unsupported type path"); }
+        name = "io::Error";
+    }
+    let[mut] result = find_type(p, name);
+    if name == "Vec" or name == "Slice" {
+        expect(p, "["); let base = parse_type(p); expect(p, "]");
+        let[mut] kind = TYPE_VECTOR; if name == "Slice" { kind = TYPE_SLICE; }
+        result = compound(p, kind, base, 0, false);
+    }
+    if result == UNKNOWN { error_at(p, name_token, "unknown type or unsupported generic type"); }
+    while at(p, "@") or at(p, "?") {
+        if eat(p, "@") {
+            let[mut] writable = false;
+            if eat(p, "[") { expect(p, "mut"); expect(p, "]"); writable = true; }
+            result = compound(p, TYPE_POINTER, result, 0, writable);
+        } else {
+            expect(p, "?");
+            let[mut] other = T_UNIT;
+            if eat(p, "[") { if not eat(p, "None") { other = parse_type(p); } expect(p, "]"); }
+            result = compound(p, TYPE_MAYBE, result, other, false);
+        }
+    }
+    result
+}
+fn attach_list(p: Program@[mut], value: Node, entries: Vec[usize]@) -> usize {
+    let[mut] result = value;
+    result.first = p.edges.len(); result.count = entries.len();
+    let[mut] index: usize = 0;
+    while index < entries.len() { p.edges.push(entries[index]); index = index + 1; }
+    add_node(p, result)
+}
+fn binary_priority(op: str) -> i32 {
+    if op == "or" { return 1; }
+    if op == "and" { return 2; }
+    if op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" { return 3; }
+    if op == "+" or op == "-" { return 4; }
+    if op == "*" or op == "/" or op == "%" { return 5; }
+    0
+}
+fn parse_expression(p: Program@[mut], minimum: i32, allow_struct: bool) -> usize {
+    let[mut] left = parse_postfix(p, allow_struct);
+    while binary_priority(peek(p).text) >= minimum and binary_priority(peek(p).text) != 0 {
+        let token = take(p); let op = p.tokens[token].text;
+        let right = parse_expression(p, binary_priority(op) + 1, allow_struct);
+        let[mut] value = node(N_BINARY, token); value.a = left; value.b = right; value.op = op;
+        left = add_node(p, value);
+        // 两个比较不能当作 (a < b) < c；本子集明确报错，不悄悄改变比较链的语义。
+        if binary_priority(op) == 3 and binary_priority(peek(p).text) == 3 {
+            error_at(p, p.cursor, "comparison chains are not yet supported by bootstrap; use and");
+        }
+    }
+    if minimum == 1 and eat(p, "..") {
+        let[mut] range = node(N_RANGE, p.cursor); range.a = left;
+        range.b = parse_expression(p, 1, allow_struct); left = add_node(p, range);
+    }
+    left
+}
+fn parse_postfix(p: Program@[mut], allow_struct: bool) -> usize {
+    let[mut] left = parse_primary(p, allow_struct);
+    let[mut] running = true;
+    while running {
+        let token = p.cursor;
+        let[mut] value = node(0, token);
+        value.a = left;
+        if eat(p, "(") {
+            value.kind = N_CALL;
+            let[mut] arguments << Vec[usize]::new();
+            if not at(p, ")") {
+                arguments.push(parse_expression(p, 1, true));
+                while eat(p, ",") { if at(p, ")") { break; } arguments.push(parse_expression(p, 1, true)); }
+            }
+            expect(p, ")"); left = attach_list(p, value, arguments@);
+        } else if eat(p, ".") {
+            value.kind = N_FIELD; value.token = identifier(p); left = add_node(p, value);
+        } else if eat(p, "[") {
+            value.kind = N_INDEX; value.b = parse_expression(p, 1, true); expect(p, "]"); left = add_node(p, value);
+        } else if eat(p, "@") {
+            value.kind = N_ADDRESS;
+            if eat(p, "[") { expect(p, "mut"); expect(p, "]"); value.writable = true; }
+            left = add_node(p, value);
+        } else if eat(p, "#") {
+            value.kind = N_DEREF; left = add_node(p, value);
+        } else if eat(p, "as") {
+            value.kind = N_CAST; value.type_id = parse_type(p); left = add_node(p, value);
+        } else if eat(p, "?") {
+            value.kind = N_UNWRAP; expect(p, "["); expect(p, "panic"); expect(p, "]"); left = add_node(p, value);
+        } else { running = false; }
+    }
+    left
+}
+fn parse_primary(p: Program@[mut], allow_struct: bool) -> usize {
+    let token = p.cursor;
+    if eat(p, "(") { let inner = parse_expression(p, 1, true); expect(p, ")"); return inner; }
+    if at(p, "{") { return parse_block(p); }
+    if eat(p, "if") {
+        let[mut] value = node(N_IF, token);
+        value.a = parse_expression(p, 1, false); value.b = parse_block(p);
+        if eat(p, "else") { if at(p, "if") { value.c = parse_primary(p, false); } else { value.c = parse_block(p); } }
+        return add_node(p, value);
+    }
+    if at(p, "not") or at(p, "-") or at(p, "+") {
+        let[mut] value = node(N_UNARY, take(p)); value.op = p.tokens[value.token].text;
+        value.a = parse_postfix(p, allow_struct); return add_node(p, value);
+    }
+    let current = peek(p);
+    if current.kind == TOKEN_STRING or current.kind == TOKEN_CHAR or current.kind == TOKEN_NUMBER or
+       current.text == "true" or current.text == "false" or current.text == "unit" {
+        take(p); return add_node(p, node(N_LITERAL, token));
+    }
+    if current.kind != TOKEN_NAME { error_at(p, token, "expected expression"); }
+    take(p);
+    let[mut] value = node(N_NAME, token);
+    // 构造器带一个具体类型附件；普通下标由 parse_postfix 处理。
+    if current.text == "Vec" {
+        expect(p, "["); let element = parse_type(p); expect(p, "]");
+        value.type_id = compound(p, TYPE_VECTOR, element, 0, false);
+    }
+    if eat(p, "::") {
+        if current.text == "std" { expect(p, "env"); expect(p, "::"); expect(p, "args"); value.op = "args"; }
+        else { value.op = p.tokens[identifier(p)].text; }
+        if value.type_id == UNKNOWN { value.type_id = find_type(p, current.text); }
+        if value.type_id == UNKNOWN and current.text != "std" {
+            error_at(p, token, "unknown type in associated function");
+        }
+    } else if allow_struct and at(p, "{") {
+        value.kind = N_STRUCT; value.type_id = find_type(p, current.text);
+        if value.type_id == UNKNOWN { error_at(p, token, "unknown struct"); }
+        expect(p, "{"); let[mut] entries << Vec[usize]::new();
+        while not at(p, "}") {
+            expect(p, "."); let field = identifier(p);
+            let[mut] initializer = node(N_ASSIGN, field);
+            if eat(p, "=") { initializer.op = "="; } else { expect(p, "<<"); initializer.op = "<<"; }
+            initializer.a = parse_expression(p, 1, true); expect(p, ";");
+            entries.push(add_node(p, initializer));
+        }
+        expect(p, "}"); return attach_list(p, value, entries@);
+    }
+    add_node(p, value)
+}
+fn parse_block(p: Program@[mut]) -> usize {
+    let token = p.cursor; expect(p, "{");
+    let[mut] entries << Vec[usize]::new();
+    let[mut] block = node(N_BLOCK, token);
+    while not at(p, "}") {
+        if peek(p).kind == TOKEN_END { error_at(p, p.cursor, "unclosed block"); }
+        let start = p.cursor;
+        let[mut] statement = node(0, start);
+        if eat(p, "let") {
+            statement.kind = N_LET;
+            if eat(p, "[") { expect(p, "mut"); expect(p, "]"); statement.writable = true; }
+            statement.token = identifier(p);
+            if eat(p, ":") { statement.type_id = parse_type(p); }
+            if eat(p, "=") { statement.op = "="; } else { expect(p, "<<"); statement.op = "<<"; }
+            statement.a = parse_expression(p, 1, true); expect(p, ";");
+        } else if eat(p, "return") {
+            statement.kind = N_RETURN;
+            if not at(p, ";") { statement.a = parse_expression(p, 1, true); }
+            expect(p, ";");
+        } else if eat(p, "while") {
+            statement.kind = N_WHILE; statement.a = parse_expression(p, 1, false); statement.b = parse_block(p); eat(p, ";");
+        } else if eat(p, "break") {
+            statement.kind = N_BREAK; expect(p, ";");
+        } else if eat(p, "continue") {
+            statement.kind = N_CONTINUE; expect(p, ";");
+        } else {
+            let expression = parse_expression(p, 1, true);
+            if at(p, "=") or at(p, "<<") or at(p, ">>") {
+                statement.kind = N_ASSIGN; statement.a = expression;
+                statement.op = p.tokens[take(p)].text;
+                statement.b = parse_expression(p, 1, true); expect(p, ";");
+                if statement.op == ">>" { let old = statement.a; statement.a = statement.b; statement.b = old; }
+            } else if eat(p, ";") {
+                statement.kind = N_STATEMENT; statement.a = expression;
+            } else if at(p, "}") {
+                block.a = expression; break;
+            } else if p.nodes[expression].kind == N_IF {
+                statement.kind = N_STATEMENT; statement.a = expression;
+            } else { error_at(p, p.cursor, "expected ; or block end"); }
+        }
+        entries.push(add_node(p, statement));
+    }
+    expect(p, "}"); attach_list(p, block, entries@)
+}
+fn parse(p: Program@[mut]) {
+    while peek(p).kind != TOKEN_END {
+        eat(p, "pub");
+        if eat(p, "struct") {
+            let name_token = identifier(p); let name = p.tokens[name_token].text;
+            if find_type(p, name) != UNKNOWN { error_at(p, name_token, "duplicate type"); }
+            if declared_name(p, name) { error_at(p, name_token, "duplicate top-level name"); }
+            let id = p.types.len();
+            primitive(p, name, false); p.types[id].kind = TYPE_STRUCT; p.types[id].first = p.fields.len();
+            expect(p, "{");
+            while not eat(p, "}") {
+                eat(p, "pub"); let field_token = identifier(p); expect(p, ":"); let type_id = parse_type(p);
+                if type_id == T_NEVER { error_at(p, field_token, "Never fields are not supported by bootstrap"); }
+                let[mut] previous = p.types[id].first;
+                while previous < p.fields.len() {
+                    if p.fields[previous].name == p.tokens[field_token].text { error_at(p, field_token, "duplicate struct field"); }
+                    previous = previous + 1;
+                }
+                p.fields.push(Field { .name = p.tokens[field_token].text; .type_id = type_id; });
+                p.types[id].count = p.types[id].count + 1; expect(p, ",");
+            }
+        } else if eat(p, "impl") {
+            expect(p, "Copy"); expect(p, "for"); let token = identifier(p);
+            let id = find_type(p, p.tokens[token].text);
+            if id == UNKNOWN or p.types[id].kind != TYPE_STRUCT { error_at(p, token, "Copy requires a declared struct"); }
+            if p.types[id].copy { error_at(p, token, "duplicate Copy implementation"); }
+            let info = p.types[id]; let[mut] field: usize = 0;
+            while field < info.count {
+                if not p.types[p.fields[info.first + field].type_id].copy { error_at(p, token, "non-Copy field prevents Copy"); }
+                field = field + 1;
+            }
+            p.types[id].copy = true; expect(p, ";");
+        } else if at(p, "let") or at(p, "var") or at(p, "const") {
+            // 顶层沿用 let[mut]，var/const 只兼容旧源码。初始化不运行表达式。
+            let declaration = p.tokens[take(p)].text;
+            let[mut] writable = declaration == "var";
+            if eat(p, "[") {
+                if declaration == "const" { error_at(p, p.cursor, "const does not support binding attachments"); }
+                expect(p, "mut"); expect(p, "]"); writable = true;
+            }
+            let token = identifier(p);
+            if declared_name(p, p.tokens[token].text) { error_at(p, token, "duplicate top-level name"); }
+            expect(p, ":"); let type_id = parse_type(p);
+            if at(p, "<<") { error_at(p, p.cursor, "bootstrap module let requires Copy literal initialized with ="); }
+            if not eat(p, "=") { error_at(p, p.cursor, "module let requires an initializer with ="); }
+            let value = parse_expression(p, 1, true); expect(p, ";");
+            p.constants.push(Constant { .name = p.tokens[token].text; .type_id = type_id; .value = value; .writable = writable; });
+        } else if eat(p, "fn") {
+            let token = identifier(p); let name = p.tokens[token].text;
+            if declared_name(p, name) { error_at(p, token, "duplicate top-level name"); }
+            expect(p, "("); let first = p.parameters.len();
+            while not at(p, ")") {
+                let parameter = identifier(p); expect(p, ":"); let type_id = parse_type(p);
+                if type_id == T_NEVER { error_at(p, parameter, "Never parameters are not supported by bootstrap"); }
+                p.parameters.push(Field { .name = p.tokens[parameter].text; .type_id = type_id; });
+                if not eat(p, ",") { break; }
+            }
+            expect(p, ")"); let count = p.parameters.len() - first;
+            let[mut] result = T_UNIT; if eat(p, "->") { result = parse_type(p); }
+            let body = parse_block(p);
+            p.functions.push(Function { .name = name; .token = token; .result = result; .first = first; .count = count; .body = body; });
+        } else { error_at(p, p.cursor, "unsupported top-level declaration in bootstrap subset"); }
+    }
+}
+
+fn new_program(path: str, tokens: Vec[Token]) -> Program {
+    let[mut] p << Program { .path = path; .tokens << tokens;
+        .nodes << Vec[Node]::new(); .edges << Vec[usize]::new(); .types << Vec[TypeInfo]::new();
+        .fields << Vec[Field]::new(); .parameters << Vec[Field]::new();
+        .functions << Vec[Function]::new(); .constants << Vec[Constant]::new(); .cursor = 0; };
+    primitive(p@[mut], "Unit", true); primitive(p@[mut], "bool", true);
+    primitive(p@[mut], "i32", true); primitive(p@[mut], "i64", true);
+    primitive(p@[mut], "usize", true); primitive(p@[mut], "u8", true);
+    primitive(p@[mut], "char", true); primitive(p@[mut], "str", true);
+    primitive(p@[mut], "String", false); primitive(p@[mut], "File", false);
+    primitive(p@[mut], "io::Error", false); primitive(p@[mut], "Never", true);
+    let[mut] empty = node(N_LITERAL, 0); empty.type_id = T_UNIT; add_node(p@[mut], empty);
+    p
+}
+
+// ---------- 类型与存储：先证明可传递，再发射 C，不靠 C 编译器兜底 ----------
+fn spelling(p: Program@, token: usize) -> str { p.tokens[token].text }
+fn decimal(p: Program@, token: usize, type_id: usize) -> usize {
+    // 首版数字只支持十进制；usize 字面量暂限定为 i64 正范围，超出明确报错。
+    let[mut] limit: usize = 9223372036854775807;
+    if type_id == T_U8 { limit = 255; }
+    if type_id == T_I32 { limit = 2147483647; }
+    let text = spelling(p, token); let[mut] value: usize = 0; let[mut] index: usize = 0;
+    while index < text.len() {
+        let digit = (text.byte_at(index) as usize) - 48;
+        if digit > 9 or value > (limit - digit) / 10 { error_at(p, token, "integer literal outside supported target range"); }
+        value = value * 10 + digit; index = index + 1;
+    }
+    value
+}
+fn lookup(g: Generator@, name: str) -> usize {
+    let[mut] index = g.symbols.len();
+    while index != 0 { index = index - 1; if g.symbols[index].name == name and not g.symbols[index].temporary { return index; } }
+    UNKNOWN
+}
+fn function_index(p: Program@, name: str) -> usize {
+    let[mut] index: usize = 0;
+    while index < p.functions.len() { if p.functions[index].name == name { return index; } index = index + 1; }
+    UNKNOWN
+}
+fn constant_index(p: Program@, name: str) -> usize {
+    let[mut] index: usize = 0;
+    while index < p.constants.len() { if p.constants[index].name == name { return index; } index = index + 1; }
+    UNKNOWN
+}
+fn declared_name(p: Program@, name: str) -> bool {
+    if constant_index(p, name) != UNKNOWN or function_index(p, name) != UNKNOWN { return true; }
+    let type_id = find_type(p, name);
+    type_id != UNKNOWN and p.types[type_id].kind == TYPE_STRUCT
+}
+fn field_index(p: Program@, type_id: usize, name: str) -> usize {
+    let info = p.types[type_id]; let[mut] index: usize = 0;
+    while index < info.count {
+        let field = info.first + index;
+        if p.fields[field].name == name { return field; } index = index + 1;
+    }
+    UNKNOWN
+}
+fn compatible(p: Program@, from: usize, to: usize) -> bool {
+    if from == to or from == T_NEVER { return true; }
+    let source = p.types[from]; let target = p.types[to];
+    source.kind == TYPE_POINTER and target.kind == TYPE_POINTER and source.base == target.base and
+        (source.writable or not target.writable)
+}
+fn require_type(g: Generator@, from: usize, to: usize, token: usize) {
+    if not compatible(g.program, from, to) { error_at(g.program, token, "type mismatch"); }
+}
+fn root_symbol(g: Generator@, id: usize) -> usize {
+    let n = g.program.nodes[id];
+    if n.kind == N_NAME { return lookup(g, spelling(g.program, n.token)); }
+    if n.kind == N_FIELD or n.kind == N_INDEX or n.kind == N_DEREF { return root_symbol(g, n.a); }
+    UNKNOWN
+}
+fn writable_place(g: Generator@[mut], id: usize) -> bool {
+    let n = g.program.nodes[id];
+    if n.kind == N_NAME {
+        let name = spelling(g.program, n.token); let symbol = lookup(g, name);
+        if symbol != UNKNOWN { return g.symbols[symbol].writable; }
+        let constant = constant_index(g.program, name);
+        return constant != UNKNOWN and g.program.constants[constant].writable;
+    }
+    if n.kind == N_FIELD or n.kind == N_INDEX {
+        let info = g.program.types[infer(g, n.a, UNKNOWN)];
+        if info.kind == TYPE_POINTER {
+            // 可写 Slice 描述符不提供元素写权限；这与可写 Vec 的指针不同。
+            if n.kind == N_INDEX and g.program.types[info.base].kind == TYPE_SLICE { return false; }
+            return info.writable;
+        }
+        if info.kind == TYPE_SLICE { return false; }
+        return writable_place(g, n.a);
+    }
+    if n.kind == N_DEREF { return g.program.types[infer(g, n.a, UNKNOWN)].writable; }
+    false
+}
+fn owned_place(g: Generator@[mut], id: usize) -> bool {
+    let n = g.program.nodes[id];
+    if n.kind == N_NAME { return lookup(g, spelling(g.program, n.token)) != UNKNOWN; }
+    if n.kind == N_FIELD {
+        if g.program.types[infer(g, n.a, UNKNOWN)].kind == TYPE_POINTER { return false; }
+        return owned_place(g, n.a);
+    }
+    false
+}
+fn argument_node(p: Program@, n: Node, index: usize) -> usize { p.edges[n.first + index] }
+fn check_arguments(g: Generator@[mut], n: Node, first: usize, count: usize) {
+    if n.count != count { error_at(g.program, n.token, "wrong number of arguments"); }
+    let[mut] index: usize = 0;
+    while index < count {
+        let target = g.program.parameters[first + index].type_id;
+        require_type(g, infer(g, argument_node(g.program, n, index), target), target, n.token);
+        index = index + 1;
+    }
+}
+fn method_type(g: Generator@[mut], n: Node, callee: Node) -> usize {
+    let receiver = infer(g, callee.a, UNKNOWN);
+    let[mut] base = receiver; let[mut] writable = writable_place(g, callee.a);
+    if g.program.types[base].kind == TYPE_POINTER {
+        writable = g.program.types[base].writable; base = g.program.types[base].base;
+    }
+    let info = g.program.types[base]; let name = spelling(g.program, callee.token);
+    let[mut] count: usize = 0; let[mut] parameter = UNKNOWN; let[mut] result = UNKNOWN; let[mut] changes = false;
+    if name == "len" and (base == T_STR or base == T_STRING or info.kind == TYPE_VECTOR or info.kind == TYPE_SLICE) { result = T_USIZE; }
+    if name == "as_str" and base == T_STRING { result = T_STR; }
+    if name == "byte_at" and (base == T_STR or base == T_STRING) { result = T_U8; parameter = T_USIZE; count = 1; }
+    if name == "slice_bytes" and base == T_STR {
+        result = compound(g.program, TYPE_MAYBE, T_STR, T_UNIT, false); count = 1;
+        if n.count == 1 {
+            let range = g.program.nodes[argument_node(g.program, n, 0)];
+            if range.kind != N_RANGE { error_at(g.program, n.token, "slice_bytes requires start..end"); }
+            require_type(g, infer(g, range.a, T_USIZE), T_USIZE, n.token);
+            require_type(g, infer(g, range.b, T_USIZE), T_USIZE, n.token);
+        }
+    }
+    if name == "push_str" and base == T_STRING { result = T_UNIT; parameter = T_STR; count = 1; changes = true; }
+    if name == "push" and info.kind == TYPE_VECTOR { result = T_UNIT; parameter = info.base; count = 1; changes = true; }
+    if name == "pop" and info.kind == TYPE_VECTOR { result = compound(g.program, TYPE_MAYBE, info.base, T_UNIT, false); changes = true; }
+    if name == "clear" and info.kind == TYPE_VECTOR { result = T_UNIT; changes = true; }
+    if name == "read_to_string" and base == T_FILE { result = compound(g.program, TYPE_MAYBE, T_STRING, T_ERROR, false); }
+    if name == "write_all" and base == T_FILE { result = compound(g.program, TYPE_MAYBE, T_UNIT, T_ERROR, false); parameter = T_STR; count = 1; changes = true; }
+    if name == "flush" and base == T_FILE { result = compound(g.program, TYPE_MAYBE, T_UNIT, T_ERROR, false); changes = true; }
+    if result == UNKNOWN { error_at(g.program, n.token, "unsupported method in bootstrap subset"); }
+    if changes and not writable { error_at(g.program, n.token, "method requires writable receiver"); }
+    if n.count != count { error_at(g.program, n.token, "wrong method argument count"); }
+    if parameter != UNKNOWN { require_type(g, infer(g, argument_node(g.program, n, 0), parameter), parameter, n.token); }
+    result
+}
+fn call_type(g: Generator@[mut], n: Node) -> usize {
+    let callee = g.program.nodes[n.a];
+    if callee.kind == N_FIELD { return method_type(g, n, callee); }
+    if callee.kind != N_NAME { error_at(g.program, n.token, "bootstrap supports named functions, not callable values"); }
+    let name = spelling(g.program, callee.token);
+    if name == "print" or name == "println" or name == "eprintln" {
+        if n.count == 0 or g.program.nodes[argument_node(g.program, n, 0)].kind != N_LITERAL or
+           g.program.tokens[g.program.nodes[argument_node(g.program, n, 0)].token].kind != TOKEN_STRING {
+            error_at(g.program, n.token, "format must be a literal");
+        }
+        return T_UNIT;
+    }
+    if name == "panic" {
+        if n.count != 1 { error_at(g.program, n.token, "panic requires a message"); }
+        require_type(g, infer(g, argument_node(g.program, n, 0), T_STR), T_STR, n.token); return T_NEVER;
+    }
+    if callee.op != "" {
+        let[mut] result = UNKNOWN; let[mut] count: usize = 0; let[mut] parameter = T_STR;
+        if name == "std" and callee.op == "args" { result = compound(g.program, TYPE_MAYBE, compound(g.program, TYPE_SLICE, T_STR, 0, false), T_ERROR, false); }
+        else if g.program.types[callee.type_id].kind == TYPE_VECTOR and callee.op == "new" { result = callee.type_id; }
+        else if callee.type_id == T_STRING {
+            result = T_STRING; if callee.op == "from" { count = 1; } else if callee.op != "new" { result = UNKNOWN; }
+        } else if callee.type_id == T_FILE and (callee.op == "open" or callee.op == "create") {
+            count = 1; result = compound(g.program, TYPE_MAYBE, T_FILE, T_ERROR, false);
+        }
+        if result == UNKNOWN { error_at(g.program, n.token, "unsupported associated function"); }
+        if n.count != count { error_at(g.program, n.token, "wrong constructor argument count"); }
+        if count == 1 { require_type(g, infer(g, argument_node(g.program, n, 0), parameter), parameter, n.token); }
+        return result;
+    }
+    let index = function_index(g.program, name);
+    if index == UNKNOWN { error_at(g.program, n.token, "unknown function"); }
+    let signature = g.program.functions[index]; check_arguments(g, n, signature.first, signature.count); signature.result
+}
+fn infer(g: Generator@[mut], id: usize, expected: usize) -> usize {
+    if id == 0 { return T_UNIT; }
+    let n = g.program.nodes[id]; let[mut] result = UNKNOWN;
+    if n.kind == N_LITERAL {
+        let token = g.program.tokens[n.token];
+        if token.kind == TOKEN_STRING { result = T_STR; }
+        else if token.kind == TOKEN_CHAR { result = T_CHAR; if token.text.byte_at(0) == b'b' { result = T_U8; } }
+        else if token.text == "true" or token.text == "false" { result = T_BOOL; }
+        else if token.text == "unit" { result = T_UNIT; }
+        else { result = T_I32; if expected == T_USIZE or expected == T_I64 or expected == T_U8 { result = expected; } decimal(g.program, n.token, result); }
+    } else if n.kind == N_NAME {
+        let symbol = lookup(g, spelling(g.program, n.token));
+        if symbol != UNKNOWN {
+            if g.symbols[symbol].state == 1 { error_at(g.program, n.token, "use after move"); }
+            result = g.symbols[symbol].type_id;
+        } else {
+            let constant = constant_index(g.program, spelling(g.program, n.token));
+            if constant == UNKNOWN { error_at(g.program, n.token, "unknown name"); }
+            result = g.program.constants[constant].type_id;
+        }
+    } else if n.kind == N_FIELD {
+        let[mut] base = infer(g, n.a, UNKNOWN);
+        if g.program.types[base].kind == TYPE_POINTER { base = g.program.types[base].base; }
+        let field = field_index(g.program, base, spelling(g.program, n.token));
+        if field == UNKNOWN { error_at(g.program, n.token, "unknown field"); }
+        let symbol = root_symbol(g, id); let[mut] index: usize = 0;
+        while index < g.moved_fields.len() {
+            if g.moved_fields[index].symbol == symbol and g.moved_fields[index].name == spelling(g.program, n.token) {
+                error_at(g.program, n.token, "use of moved field");
+            }
+            index = index + 1;
+        }
+        result = g.program.fields[field].type_id;
+    } else if n.kind == N_INDEX {
+        let[mut] base = infer(g, n.a, UNKNOWN);
+        if g.program.types[base].kind == TYPE_POINTER { base = g.program.types[base].base; }
+        let info = g.program.types[base];
+        if info.kind != TYPE_VECTOR and info.kind != TYPE_SLICE { error_at(g.program, n.token, "index requires Vec or Slice"); }
+        require_type(g, infer(g, n.b, T_USIZE), T_USIZE, n.token); result = info.base;
+    } else if n.kind == N_CALL { result = call_type(g, n); }
+    else if n.kind == N_ADDRESS {
+        let target = infer(g, n.a, UNKNOWN);
+        if not (g.program.nodes[n.a].kind == N_NAME or g.program.nodes[n.a].kind == N_FIELD or
+                g.program.nodes[n.a].kind == N_INDEX or g.program.nodes[n.a].kind == N_DEREF) {
+            error_at(g.program, n.token, "address requires a storage location");
+        }
+        // 模块可写绑定有真正静态存储；只读值仍按值发射，不对临时副本取址。
+        if g.program.nodes[n.a].kind == N_NAME and
+           lookup(g, spelling(g.program, g.program.nodes[n.a].token)) == UNKNOWN {
+            let constant = constant_index(g.program, spelling(g.program, g.program.nodes[n.a].token));
+            if not g.program.constants[constant].writable {
+                error_at(g.program, n.token, "module let has no addressable storage; copy to a local let first");
+            }
+        }
+        if n.writable and not writable_place(g, n.a) { error_at(g.program, n.token, "cannot take writable address"); }
+        result = compound(g.program, TYPE_POINTER, target, 0, n.writable);
+    } else if n.kind == N_DEREF {
+        let info = g.program.types[infer(g, n.a, UNKNOWN)];
+        if info.kind != TYPE_POINTER { error_at(g.program, n.token, "# requires pointer"); } result = info.base;
+    } else if n.kind == N_UNWRAP {
+        let info = g.program.types[infer(g, n.a, UNKNOWN)];
+        if info.kind != TYPE_MAYBE { error_at(g.program, n.token, "?[panic] requires result"); } result = info.base;
+    } else if n.kind == N_CAST {
+        let from = infer(g, n.a, UNKNOWN); result = n.type_id;
+        if from != T_I32 and from != T_I64 and from != T_USIZE and from != T_U8 {
+            error_at(g.program, n.token, "as requires numeric types; use @/# for pointers");
+        }
+        if from != result and not (from == T_I32 and result == T_I64) and not (from == T_U8 and (result == T_I32 or result == T_I64 or result == T_USIZE)) {
+            error_at(g.program, n.token, "unsupported or lossy as conversion");
+        }
+    } else if n.kind == N_UNARY {
+        result = infer(g, n.a, expected);
+        if n.op == "not" { require_type(g, result, T_BOOL, n.token); }
+        else if result != T_I32 and result != T_I64 and result != T_USIZE { error_at(g.program, n.token, "unary sign requires integer"); }
+    } else if n.kind == N_BINARY {
+        // 普通左项只检查一次：重复递归整个左子树会让长表达式呈指数增长。
+        // 只在左项是字面量时，按右侧类型重新定型；不缓存名字，以免漏查移动状态。
+        let[mut] left = infer(g, n.a, expected);
+        let[mut] operand = left;
+        if g.program.nodes[n.a].kind == N_LITERAL and
+           g.program.tokens[g.program.nodes[n.a].token].kind == TOKEN_NUMBER {
+            operand = infer(g, n.b, expected); left = infer(g, n.a, operand);
+        }
+        let right = infer(g, n.b, operand);
+        require_type(g, right, left, n.token); result = left;
+        if binary_priority(n.op) <= 2 { require_type(g, left, T_BOOL, n.token); result = T_BOOL; }
+        else if binary_priority(n.op) == 3 {
+            if left != T_I32 and left != T_I64 and left != T_USIZE and left != T_U8 and left != T_CHAR and left != T_BOOL and left != T_STR {
+                error_at(g.program, n.token, "unsupported comparison type");
+            }
+            result = T_BOOL;
+        } else if left != T_I32 and left != T_I64 and left != T_USIZE and left != T_U8 { error_at(g.program, n.token, "arithmetic requires integer"); }
+    } else if n.kind == N_STRUCT { result = n.type_id; }
+    else if n.kind == N_BLOCK { if expected != UNKNOWN { result = expected; } else { result = infer(g, n.a, UNKNOWN); } }
+    else if n.kind == N_IF {
+        require_type(g, infer(g, n.a, T_BOOL), T_BOOL, n.token);
+        if n.c == 0 { result = T_UNIT; }
+        else {
+            if expected != UNKNOWN { result = expected; } else { result = infer(g, n.b, UNKNOWN); }
+            require_type(g, infer(g, n.c, result), result, n.token);
+        }
+    }
+    if result == UNKNOWN { error_at(g.program, n.token, "unsupported expression"); }
+    // 给后续 place 与方法检查留下已确定的类型，不重写原始源码。
+    g.program.nodes[id].type_id = result; result
+}
+
+// ---------- C 发射基础：C 只负责平台编译，Xe 的求值顺序由临时变量保证 ----------
+fn put(g: Generator@[mut], text: str) { g.output.push_str(text); }
+fn put_number(g: Generator@[mut], number: usize) {
+    if number >= 10 { put_number(g, number / 10); }
+    let digit = number % 10; put(g, view("0123456789", digit, digit + 1));
+}
+fn put_type(g: Generator@[mut], id: usize) {
+    if id == T_UNIT { put(g, "XeUnit"); }
+    else if id == T_BOOL { put(g, "bool"); }
+    else if id == T_I32 { put(g, "int32_t"); }
+    else if id == T_I64 { put(g, "int64_t"); }
+    else if id == T_USIZE { put(g, "size_t"); }
+    else if id == T_U8 { put(g, "uint8_t"); }
+    else if id == T_CHAR { put(g, "uint32_t"); }
+    else if id == T_STR { put(g, "XeStr"); }
+    else if id == T_STRING { put(g, "XeString"); }
+    else if id == T_FILE { put(g, "XeFile"); }
+    else if id == T_ERROR { put(g, "int"); }
+    else if id == T_NEVER { put(g, "void"); }
+    else if g.program.types[id].kind == TYPE_POINTER { put_type(g, g.program.types[id].base); put(g, "*"); }
+    else { put(g, "X_t"); put_number(g, id); }
+}
+fn put_id(g: Generator@[mut], id: usize) { put(g, "v"); put_number(g, id); }
+fn put_value(g: Generator@[mut], value: Value) {
+    if value.id == UNKNOWN {
+        put(g, "c_"); put(g, spelling(g.program, g.program.nodes[value.place].token)); return;
+    }
+    let[mut] indirect = false;
+    if value.place != 0 {
+        let kind = g.program.nodes[value.place].kind;
+        indirect = kind == N_FIELD or kind == N_INDEX or kind == N_DEREF;
+    }
+    if indirect { put(g, "(*"); }
+    put_id(g, value.id);
+    if indirect { put(g, ")"); }
+}
+fn temporary(g: Generator@[mut], type_id: usize) -> Value {
+    let id = g.next_id; g.next_id = g.next_id + 1;
+    put_type(g, type_id); put(g, " "); put_id(g, id); put(g, " = {0};\n");
+    if not g.program.types[type_id].copy {
+        g.symbols.push(Symbol { .name = ""; .type_id = type_id; .id = id; .depth = g.depth;
+            .writable = true; .state = 0; .temporary = true; });
+    }
+    Value { .id = id; .type_id = type_id; .place = 0; }
+}
+fn alias(g: Generator@[mut], type_id: usize, place: usize) -> Value {
+    let id = g.next_id; g.next_id = g.next_id + 1;
+    put_type(g, type_id); put(g, " *"); put_id(g, id); put(g, " = ");
+    Value { .id = id; .type_id = type_id; .place = place; }
+}
+fn consume(g: Generator@[mut], value: Value) {
+    if g.program.types[value.type_id].copy { return; }
+    if value.place != 0 {
+        if not owned_place(g, value.place) { error_at(g.program, g.program.nodes[value.place].token, "pointer/index cannot transfer resource ownership"); }
+        let n = g.program.nodes[value.place]; let symbol = root_symbol(g, value.place);
+        if symbol != UNKNOWN {
+            if n.kind == N_NAME {
+                if g.symbols[symbol].state != 0 { error_at(g.program, n.token, "whole value already moved or partially moved"); }
+                g.symbols[symbol].state = 1;
+            } else {
+                g.symbols[symbol].state = 2;
+                g.moved_fields.push(MovedField { .symbol = symbol; .name = spelling(g.program, n.token); });
+            }
+        }
+    }
+    // 本子集没有自定义 Drop。每种拥有描述符的空表示可安全析构，所以移出后清零。
+    put(g, "memset(&("); put_value(g, value); put(g, "), 0, sizeof("); put_value(g, value); put(g, "));\n");
+}
+fn put_drop(g: Generator@[mut], type_id: usize) { put(g, "drop_t"); put_number(g, type_id); }
+fn cleanup(g: Generator@[mut], minimum_depth: usize) {
+    let[mut] index = g.symbols.len();
+    while index != 0 {
+        index = index - 1; let symbol = g.symbols[index];
+        if symbol.depth >= minimum_depth and not g.program.types[symbol.type_id].copy {
+            put_drop(g, symbol.type_id); put(g, "(&"); put_id(g, symbol.id); put(g, ");\n");
+        }
+    }
+}
+fn pop_scope(g: Generator@[mut], first: usize) {
+    while g.symbols.len() > first { g.symbols.pop()?[panic]; }
+}
+fn finish_temporaries(g: Generator@[mut], first: usize) {
+    // 带分号的表达式结束其临时资源，不延长到块末尾。已移动临时值的空描述符可重复清理。
+    let[mut] index = g.symbols.len();
+    while index > first {
+        index = index - 1; let symbol = g.symbols[index];
+        if symbol.temporary and not g.program.types[symbol.type_id].copy {
+            put_drop(g, symbol.type_id); put(g, "(&"); put_id(g, symbol.id); put(g, ");\n");
+        }
+    }
+}
+fn put_literal(g: Generator@[mut], raw: str) {
+    put(g, "((XeStr){(const unsigned char*)"); put(g, raw); put(g, ", sizeof("); put(g, raw); put(g, ")-1})");
+}
+fn emit_expression(g: Generator@[mut], id: usize, expected: usize) -> Value {
+    if id == 0 { return temporary(g, T_UNIT); }
+    let n = g.program.nodes[id]; let type_id = infer(g, id, expected);
+    if n.kind == N_NAME {
+        let name = spelling(g.program, n.token); let symbol = lookup(g, name);
+        if symbol != UNKNOWN { return Value { .id = g.symbols[symbol].id; .type_id = type_id; .place = id; }; }
+        if g.program.constants[constant_index(g.program, name)].writable {
+            return Value { .id = UNKNOWN; .type_id = type_id; .place = id; };
+        }
+        let result = temporary(g, type_id); put_id(g, result.id); put(g, " = c_"); put(g, name); put(g, ";\n"); return result;
+    }
+    if n.kind == N_LITERAL {
+        let result = temporary(g, type_id); put_id(g, result.id); put(g, " = ");
+        let token = g.program.tokens[n.token];
+        if type_id == T_STR { put_literal(g, token.text); }
+        else if type_id == T_UNIT { put(g, "0"); }
+        else if token.kind == TOKEN_CHAR and token.text.byte_at(0) == b'b' { put(g, view(token.text, 1, token.text.len())); }
+        else if token.kind == TOKEN_NUMBER { put_number(g, decimal(g.program, n.token, type_id)); }
+        else { put(g, token.text); }
+        put(g, ";\n"); return result;
+    }
+    if n.kind == N_CALL { return emit_call(g, n); }
+    if n.kind == N_BLOCK { return emit_block(g, id, type_id); }
+    if n.kind == N_IF { return emit_if(g, n, type_id); }
+    if n.kind == N_FIELD {
+        let object = emit_expression(g, n.a, UNKNOWN); let result = alias(g, type_id, id);
+        put(g, "&((");
+        if g.program.types[object.type_id].kind == TYPE_POINTER { put(g, "*"); }
+        put_value(g, object); put(g, ")."); put(g, spelling(g.program, n.token)); put(g, ");\n"); return result;
+    }
+    if n.kind == N_INDEX {
+        let object = emit_expression(g, n.a, UNKNOWN); let index = emit_expression(g, n.b, T_USIZE);
+        let[mut] pointer = object;
+        if g.program.types[object.type_id].kind == TYPE_POINTER {
+            pointer = snapshot(g, object);
+        } else {
+            pointer = temporary(g, compound(g.program, TYPE_POINTER, object.type_id, 0, false));
+            put_id(g, pointer.id); put(g, " = &("); put_value(g, object); put(g, ");\n");
+        }
+        put(g, "if ("); put_value(g, index); put(g, " >= "); put_id(g, pointer.id); put(g, "->len) xe_panic(\"index out of bounds\");\n");
+        let result = alias(g, type_id, id); put(g, "&("); put_id(g, pointer.id); put(g, "->data["); put_value(g, index); put(g, "]);\n"); return result;
+    }
+    if n.kind == N_DEREF {
+        let pointer = emit_expression(g, n.a, UNKNOWN); let result = alias(g, type_id, id);
+        put_value(g, pointer); put(g, ";\n"); return result;
+    }
+    if n.kind == N_ADDRESS {
+        let object = emit_expression(g, n.a, UNKNOWN); let result = temporary(g, type_id);
+        put_id(g, result.id); put(g, " = &("); put_value(g, object); put(g, ");\n"); return result;
+    }
+    if n.kind == N_CAST or n.kind == N_UNARY {
+        let object = emit_expression(g, n.a, type_id); let result = temporary(g, type_id);
+        put_id(g, result.id); put(g, " = ");
+        if n.kind == N_CAST { put(g, "("); put_type(g, type_id); put(g, ")"); }
+        else if n.op == "-" { put(g, "xe_sub_"); put(g, g.program.types[type_id].name); put(g, "(0, "); put_value(g, object); put(g, ");\n"); return result; }
+        else { if n.op == "not" { put(g, "!"); } else { put(g, n.op); } }
+        put(g, "("); put_value(g, object); put(g, ");\n"); return result;
+    }
+    if n.kind == N_UNWRAP {
+        let wrapped = emit_expression(g, n.a, UNKNOWN); let result = temporary(g, type_id);
+        put(g, "if ("); put_value(g, wrapped); put(g, ".tag != 0) {\n");
+        if g.program.types[wrapped.type_id].other == T_ERROR {
+            put(g, "xe_io_print_error(stderr, "); put_value(g, wrapped); put(g, ".no); xe_io_newline(stderr);\n");
+        }
+        put(g, "xe_panic(\"result failed\");\n}\n");
+        put_id(g, result.id); put(g, " = "); put_value(g, wrapped); put(g, ".yes;\n"); consume(g, wrapped); return result;
+    }
+    if n.kind == N_BINARY { return emit_binary(g, n, type_id); }
+    if n.kind == N_STRUCT { return emit_struct(g, n); }
+    error_at(g.program, n.token, "unsupported C emission")
+}
+
+fn snapshot(g: Generator@[mut], original: Value) -> Value {
+    let result = temporary(g, original.type_id);
+    put_id(g, result.id); put(g, " = "); put_value(g, original); put(g, ";\n");
+    consume(g, original); result
+}
+fn receiver_pointer(g: Generator@[mut], expression: usize) -> Value {
+    let object = emit_expression(g, expression, UNKNOWN);
+    if g.program.types[object.type_id].kind == TYPE_POINTER { return snapshot(g, object); }
+    let pointer = temporary(g, compound(g.program, TYPE_POINTER, object.type_id, 0, writable_place(g, expression)));
+    put_id(g, pointer.id); put(g, " = &("); put_value(g, object); put(g, ");\n"); pointer
+}
+fn emit_binary(g: Generator@[mut], n: Node, type_id: usize) -> Value {
+    let operand = g.program.nodes[n.a].type_id;
+    let left = snapshot(g, emit_expression(g, n.a, operand));
+    let result = temporary(g, type_id);
+    if n.op == "and" or n.op == "or" {
+        put_id(g, result.id); put(g, " = "); put_value(g, left); put(g, ";\nif (");
+        if n.op == "or" { put(g, "!"); } put_value(g, left); put(g, ") {\n");
+        let first = g.symbols.len(); g.depth = g.depth + 1;
+        let right = emit_expression(g, n.b, T_BOOL);
+        put_id(g, result.id); put(g, " = "); put_value(g, right); put(g, ";\n");
+        cleanup(g, g.depth); pop_scope(g, first); g.depth = g.depth - 1; put(g, "}\n"); return result;
+    }
+    let right = snapshot(g, emit_expression(g, n.b, operand));
+    put_id(g, result.id); put(g, " = ");
+    if operand == T_STR {
+        put(g, "(xe_str_compare("); put_value(g, left); put(g, ", "); put_value(g, right); put(g, ") "); put(g, n.op); put(g, " 0)");
+    } else if binary_priority(n.op) >= 4 {
+        put(g, "xe_");
+        if n.op == "+" { put(g, "add_"); } else if n.op == "-" { put(g, "sub_"); }
+        else if n.op == "*" { put(g, "mul_"); } else if n.op == "/" { put(g, "div_"); } else { put(g, "rem_"); }
+        put(g, g.program.types[operand].name); put(g, "("); put_value(g, left); put(g, ", "); put_value(g, right); put(g, ")");
+    } else { put_value(g, left); put(g, " "); put(g, n.op); put(g, " "); put_value(g, right); }
+    put(g, ";\n"); result
+}
+fn emit_struct(g: Generator@[mut], n: Node) -> Value {
+    let type_id = n.type_id; let info = g.program.types[type_id];
+    if info.kind != TYPE_STRUCT { error_at(g.program, n.token, "struct literal requires struct type"); }
+    if n.count != info.count { error_at(g.program, n.token, "every field must be initialized once"); }
+    let result = temporary(g, type_id); let[mut] seen << Vec[usize]::new(); let[mut] index: usize = 0;
+    while index < n.count {
+        let item = g.program.nodes[argument_node(g.program, n, index)]; let name = spelling(g.program, item.token);
+        let field = field_index(g.program, type_id, name);
+        if field == UNKNOWN { error_at(g.program, item.token, "unknown initializer field"); }
+        let[mut] previous: usize = 0;
+        while previous < seen.len() { if seen[previous] == field { error_at(g.program, item.token, "duplicate field initialization"); } previous = previous + 1; }
+        seen.push(field);
+        let target = g.program.fields[field].type_id;
+        let source = emit_expression(g, item.a, target); require_type(g, source.type_id, target, item.token);
+        if (item.op == "=") != g.program.types[target].copy { error_at(g.program, item.token, "field assignment must distinguish Copy = and resource <<"); }
+        put_id(g, result.id); put(g, "."); put(g, name); put(g, " = "); put_value(g, source); put(g, ";\n"); consume(g, source);
+        index = index + 1;
+    }
+    result
+}
+
+// ---------- 控制流与清理：分支合并移动状态；循环不猜测资源能否再次初始化 ----------
+fn emit_statement(g: Generator@[mut], id: usize) -> bool {
+    let n = g.program.nodes[id];
+    let temporary_start = g.symbols.len();
+    if n.kind == N_LET {
+        let name = spelling(g.program, n.token); let existing = lookup(g, name);
+        if existing != UNKNOWN and g.symbols[existing].depth == g.depth { error_at(g.program, n.token, "duplicate local binding"); }
+        let source = emit_expression(g, n.a, n.type_id); let[mut] target = n.type_id;
+        if target == UNKNOWN { target = source.type_id; }
+        require_type(g, source.type_id, target, n.token);
+        if (n.op == "=") != g.program.types[target].copy { error_at(g.program, n.token, "Copy requires =; resource requires <<"); }
+        let value = temporary(g, target);
+        put_id(g, value.id); put(g, " = "); put_value(g, source); put(g, ";\n"); consume(g, source);
+        // temporary 已登记资源清理；这里将其改为可查找的具名存储，不登记第二次。
+        if not g.program.types[target].copy { g.symbols.pop()?[panic]; }
+        g.symbols.push(Symbol { .name = name; .type_id = target; .id = value.id; .depth = g.depth;
+            .writable = n.writable; .state = 0; .temporary = false; });
+    } else if n.kind == N_ASSIGN {
+        let target = emit_expression(g, n.a, UNKNOWN);
+        if not writable_place(g, n.a) { error_at(g.program, n.token, "assignment requires writable storage"); }
+        let source = snapshot(g, emit_expression(g, n.b, target.type_id));
+        require_type(g, source.type_id, target.type_id, n.token);
+        if n.op != ">>" and (n.op == "=") != g.program.types[target.type_id].copy { error_at(g.program, n.token, "assignment copy/move mismatch"); }
+        if not g.program.types[target.type_id].copy {
+            if not owned_place(g, n.a) { error_at(g.program, n.token, "resource pointer/index replacement deferred in bootstrap"); }
+            put_drop(g, target.type_id); put(g, "(&("); put_value(g, target); put(g, "));\n");
+        }
+        put_value(g, target); put(g, " = "); put_value(g, source); put(g, ";\n"); consume(g, source);
+    } else if n.kind == N_RETURN {
+        if g.result == T_NEVER { error_at(g.program, n.token, "Never function cannot return"); }
+        let source = emit_expression(g, n.a, g.result); require_type(g, source.type_id, g.result, n.token);
+        let result = snapshot(g, source);
+        // 返回存储本身不属于清理列表；其它资源全部在 return 前清理。
+        if not g.program.types[result.type_id].copy { g.symbols.pop()?[panic]; }
+        cleanup(g, 0); put(g, "return "); put_value(g, result); put(g, ";\n"); return true;
+    } else if n.kind == N_WHILE {
+        put(g, "while (true) {\n"); g.depth = g.depth + 1; let first = g.symbols.len();
+        let condition = emit_expression(g, n.a, T_BOOL); require_type(g, condition.type_id, T_BOOL, n.token);
+        put(g, "if (!"); put_value(g, condition); put(g, ") {\n"); cleanup(g, g.depth); put(g, "break;\n}\n");
+        let old_loop = g.loop_depth; g.loop_depth = g.depth;
+        let[mut] before << Vec[i32]::new(); let[mut] index: usize = 0;
+        while index < first { before.push(g.symbols[index].state); index = index + 1; }
+        emit_block(g, n.b, T_UNIT); cleanup(g, g.depth); pop_scope(g, first);
+        index = 0;
+        while index < first {
+            if g.symbols[index].state != before[index] { error_at(g.program, n.token, "moving outer resource inside loop requires a more complete flow checker"); }
+            index = index + 1;
+        }
+        g.loop_depth = old_loop; g.depth = g.depth - 1; put(g, "}\n");
+    } else if n.kind == N_BREAK or n.kind == N_CONTINUE {
+        if g.loop_depth == 0 { error_at(g.program, n.token, "break/continue outside loop"); }
+        cleanup(g, g.loop_depth); if n.kind == N_BREAK { put(g, "break;\n"); } else { put(g, "continue;\n"); } return true;
+    } else if n.kind == N_STATEMENT {
+        let[mut] expected = UNKNOWN;
+        if g.program.nodes[n.a].kind == N_IF or g.program.nodes[n.a].kind == N_BLOCK { expected = T_UNIT; }
+        let value = emit_expression(g, n.a, expected);
+        if value.type_id == T_NEVER { return true; }
+    } else { error_at(g.program, n.token, "unsupported statement"); }
+    finish_temporaries(g, temporary_start); false
+}
+fn emit_block(g: Generator@[mut], id: usize, expected: usize) -> Value {
+    let n = g.program.nodes[id]; let[mut] type_id = expected;
+    if type_id == UNKNOWN { type_id = T_UNIT; }
+    let[mut] result = Value { .id = 0; .type_id = T_NEVER; .place = 0; };
+    if type_id != T_NEVER { result = temporary(g, type_id); }
+    put(g, "{\n"); g.depth = g.depth + 1; let first = g.symbols.len();
+    let[mut] stopped = false; let[mut] index: usize = 0;
+    while index < n.count {
+        if stopped { error_at(g.program, g.program.nodes[argument_node(g.program, n, index)].token, "unreachable statement in bootstrap subset"); }
+        stopped = emit_statement(g, argument_node(g.program, n, index)); index = index + 1;
+    }
+    if not stopped {
+        let tail = emit_expression(g, n.a, type_id);
+        if tail.type_id == T_NEVER { stopped = true; }
+        else {
+            require_type(g, tail.type_id, type_id, n.token);
+            if type_id != T_NEVER { put_id(g, result.id); put(g, " = "); put_value(g, tail); put(g, ";\n"); consume(g, tail); }
+            cleanup(g, g.depth);
+        }
+    }
+    pop_scope(g, first); g.depth = g.depth - 1; put(g, "}\n");
+    if stopped { return Value { .id = 0; .type_id = T_NEVER; .place = 0; }; }
+    result
+}
+fn emit_if(g: Generator@[mut], n: Node, type_id: usize) -> Value {
+    let condition = emit_expression(g, n.a, T_BOOL); let result = temporary(g, type_id);
+    let first = g.symbols.len(); let[mut] before << Vec[i32]::new(); let[mut] after << Vec[i32]::new();
+    g.depth = g.depth + 1;
+    let[mut] index: usize = 0;
+    while index < first { before.push(g.symbols[index].state); index = index + 1; }
+    let move_start = g.moved_fields.len();
+    put(g, "if ("); put_value(g, condition); put(g, ") {\n");
+    let yes = emit_block(g, n.b, type_id);
+    if yes.type_id != T_NEVER { put_id(g, result.id); put(g, " = "); put_value(g, yes); put(g, ";\n"); consume(g, yes); }
+    cleanup(g, g.depth); pop_scope(g, first); put(g, "} else {\n");
+    index = 0; while index < first { after.push(g.symbols[index].state); g.symbols[index].state = before[index]; index = index + 1; }
+    let[mut] then_moves << Vec[MovedField]::new();
+    while g.moved_fields.len() > move_start { then_moves.push(g.moved_fields.pop()?[panic]); }
+    let no = emit_expression(g, n.c, type_id);
+    if no.type_id != T_NEVER { require_type(g, no.type_id, type_id, n.token); put_id(g, result.id); put(g, " = "); put_value(g, no); put(g, ";\n"); consume(g, no); }
+    cleanup(g, g.depth); pop_scope(g, first); put(g, "}\n");
+    index = 0;
+    while index < first {
+        if yes.type_id != T_NEVER and (no.type_id == T_NEVER or after[index] > g.symbols[index].state) { g.symbols[index].state = after[index]; }
+        index = index + 1;
+    }
+    if yes.type_id != T_NEVER { index = 0; while index < then_moves.len() { g.moved_fields.push(then_moves[index]); index = index + 1; } }
+    g.depth = g.depth - 1;
+    if yes.type_id == T_NEVER and no.type_id == T_NEVER { return Value { .id = 0; .type_id = T_NEVER; .place = 0; }; }
+    result
+}
+
+// ---------- 布局与析构：用户记录、具体 Vec/Slice/Maybe 都是普通 C 描述符 ----------
+fn define_type(g: Generator@[mut], id: usize, states: Vec[i32]@[mut]) {
+    if id <= T_NEVER or states[id] == 2 { return; }
+    let info = g.program.types[id];
+    if info.kind == TYPE_POINTER { states[id] = 2; return; }
+    if states[id] == 1 { error_at(g.program, 0, "infinitely sized value type"); }
+    states[id] = 1;
+    if info.kind == TYPE_STRUCT {
+        let[mut] index: usize = 0;
+        while index < info.count { define_type(g, g.program.fields[info.first + index].type_id, states); index = index + 1; }
+    } else if info.kind == TYPE_MAYBE { define_type(g, info.base, states); define_type(g, info.other, states); }
+    put(g, "struct X_t"); put_number(g, id); put(g, " {\n");
+    if info.kind == TYPE_STRUCT {
+        if info.count == 0 { put(g, "XeUnit empty;\n"); }
+        let[mut] index: usize = 0;
+        while index < info.count {
+            let field = g.program.fields[info.first + index]; put_type(g, field.type_id); put(g, " "); put(g, field.name); put(g, ";\n"); index = index + 1;
+        }
+    } else if info.kind == TYPE_VECTOR or info.kind == TYPE_SLICE {
+        put_type(g, info.base); put(g, " *data; size_t len;"); if info.kind == TYPE_VECTOR { put(g, " size_t cap;"); } put(g, "\n");
+    } else if info.kind == TYPE_MAYBE {
+        put(g, "int tag; "); put_type(g, info.base); put(g, " yes; "); put_type(g, info.other); put(g, " no;\n");
+    }
+    put(g, "};\n"); states[id] = 2;
+}
+fn emit_drop_function(g: Generator@[mut], id: usize) {
+    let info = g.program.types[id];
+    put(g, "static void "); put_drop(g, id); put(g, "("); put_type(g, id); put(g, " *value) {\n");
+    if id == T_STRING { put(g, "xe_string_drop(value);\n"); }
+    else if id == T_FILE { put(g, "if (value->handle) xe_file_drop(value);\n"); }
+    else if info.kind == TYPE_VECTOR {
+        if not g.program.types[info.base].copy {
+            put(g, "while (value->len) { --value->len; "); put_drop(g, info.base); put(g, "(&value->data[value->len]); }\n");
+        }
+        put(g, "free(value->data);\n");
+    } else if info.kind == TYPE_STRUCT {
+        let[mut] index: usize = 0;
+        while index < info.count {
+            let field = g.program.fields[info.first + index];
+            if not g.program.types[field.type_id].copy { put_drop(g, field.type_id); put(g, "(&value->"); put(g, field.name); put(g, ");\n"); }
+            index = index + 1;
+        }
+    } else if info.kind == TYPE_MAYBE {
+        put(g, "if (value->tag == 0) {\n");
+        if not g.program.types[info.base].copy { put_drop(g, info.base); put(g, "(&value->yes);\n"); }
+        put(g, "} else {\n");
+        if not g.program.types[info.other].copy { put_drop(g, info.other); put(g, "(&value->no);\n"); }
+        put(g, "}\n");
+    }
+    put(g, "memset(value,0,sizeof(*value));\n}\n");
+}
+fn prototype(g: Generator@[mut], signature: Function) {
+    put(g, "static "); if signature.result == T_NEVER { put(g, "_Noreturn "); }
+    put_type(g, signature.result); put(g, " f_"); put(g, signature.name); put(g, "(");
+    let[mut] index: usize = 0;
+    while index < signature.count {
+        if index != 0 { put(g, ", "); } put_type(g, g.program.parameters[signature.first + index].type_id);
+        put(g, " "); put_id(g, index); index = index + 1;
+    }
+    if signature.count == 0 { put(g, "void"); } put(g, ")");
+}
+fn emit_function(g: Generator@[mut], signature: Function) {
+    g.symbols.clear(); g.moved_fields.clear(); g.depth = 0; g.loop_depth = 0; g.result = signature.result; g.next_id = signature.count;
+    prototype(g, signature); put(g, " {\n");
+    let[mut] index: usize = 0;
+    while index < signature.count {
+        let parameter = g.program.parameters[signature.first + index];
+        if lookup(g, parameter.name) != UNKNOWN { error_at(g.program, signature.token, "duplicate parameter"); }
+        g.symbols.push(Symbol { .name = parameter.name; .type_id = parameter.type_id; .id = index; .depth = 0;
+            .writable = false; .state = 0; .temporary = false; }); index = index + 1;
+    }
+    let tail = emit_block(g, signature.body, signature.result);
+    if tail.type_id != T_NEVER {
+        let result = snapshot(g, tail);
+        if not g.program.types[result.type_id].copy { g.symbols.pop()?[panic]; }
+        cleanup(g, 0); put(g, "return "); put_value(g, result); put(g, ";\n");
+    }
+    if tail.type_id == T_NEVER { put(g, "abort(); /* Never must not fall through. */\n"); }
+    put(g, "}\n");
+}
+fn compile(p: Program@[mut]) -> String {
+    let[mut] g << Generator { .program = p; .output << String::new();
+        .symbols << Vec[Symbol]::new(); .moved_fields << Vec[MovedField]::new();
+        .depth = 0; .next_id = 0; .result = T_UNIT; .loop_depth = 0; };
+    // 先发射函数并登记其用到的具体组合类型；再生成依赖完整的头部。
+    let[mut] index: usize = 0;
+    while index < p.functions.len() { emit_function(g@[mut], p.functions[index]); index = index + 1; }
+    let bodies << g.output;
+    let[mut] header << Generator { .program = p; .output << String::new();
+        .symbols << Vec[Symbol]::new(); .moved_fields << Vec[MovedField]::new();
+        .depth = 0; .next_id = 0; .result = T_UNIT; .loop_depth = 0; };
+    put(header@[mut], "/* Generated by the Xe-written bootstrap compiler. */\n#include \"xe_runtime.h\"\n");
+    index = T_NEVER + 1;
+    while index < p.types.len() {
+        if p.types[index].kind != TYPE_POINTER {
+            put(header@[mut], "typedef struct X_t"); put_number(header@[mut], index); put(header@[mut], " X_t"); put_number(header@[mut], index); put(header@[mut], ";\n");
+        }
+        index = index + 1;
+    }
+    let[mut] states << Vec[i32]::new(); index = 0;
+    while index < p.types.len() { states.push(0); index = index + 1; }
+    index = T_NEVER + 1;
+    while index < p.types.len() { define_type(header@[mut], index, states@[mut]); index = index + 1; }
+    index = 0;
+    while index < p.types.len() {
+        if not p.types[index].copy { put(header@[mut], "static void "); put_drop(header@[mut], index); put(header@[mut], "("); put_type(header@[mut], index); put(header@[mut], "*);\n"); }
+        index = index + 1;
+    }
+    index = 0;
+    while index < p.types.len() { if not p.types[index].copy { emit_drop_function(header@[mut], index); } index = index + 1; }
+    index = 0;
+    while index < p.constants.len() {
+        let constant = p.constants[index]; let literal = p.nodes[constant.value];
+        if literal.kind != N_LITERAL or not p.types[constant.type_id].copy { error_at(p, literal.token, "bootstrap module let requires Copy literal"); }
+        put(header@[mut], "static "); if not constant.writable { put(header@[mut], "const "); }
+        put_type(header@[mut], constant.type_id); put(header@[mut], " c_"); put(header@[mut], constant.name); put(header@[mut], " = ");
+        require_type(header@, infer(header@[mut], constant.value, constant.type_id), constant.type_id, literal.token);
+        if constant.type_id == T_STR { put_literal(header@[mut], spelling(p, literal.token)); }
+        else if constant.type_id == T_UNIT { put(header@[mut], "0"); }
+        else if p.tokens[literal.token].kind == TOKEN_CHAR and constant.type_id == T_U8 {
+            let raw = spelling(p, literal.token); put(header@[mut], view(raw, 1, raw.len()));
+        }
+        else if p.tokens[literal.token].kind == TOKEN_NUMBER { put_number(header@[mut], decimal(p, literal.token, constant.type_id)); }
+        else { put(header@[mut], spelling(p, literal.token)); } put(header@[mut], ";\n"); index = index + 1;
+    }
+    index = 0; while index < p.functions.len() { prototype(header@[mut], p.functions[index]); put(header@[mut], ";\n"); index = index + 1; }
+    put(header@[mut], bodies.as_str());
+    let entry = function_index(p, "main");
+    if entry == UNKNOWN or p.functions[entry].count != 0 or (p.functions[entry].result != T_UNIT and p.functions[entry].result != T_I32) { error_at(p, 0, "main must have no parameters and return Unit or i32"); }
+    put(header@[mut], "int main(int argc,char **argv) { xe_env_init(argc,argv);\n");
+    if p.functions[entry].result == T_I32 { put(header@[mut], "int result = f_main();\n"); }
+    else { put(header@[mut], "f_main(); int result = 0;\n"); }
+    put(header@[mut], "xe_env_cleanup(); xe_io_flush(stdout); xe_io_flush(stderr); return result; }\n");
+    header.output
+}
+
+// ---------- CLI：只有完成检查后才打开输出；编译错误不会截断旧产物 ----------
+fn read_source(path: str) -> String {
+    let file << File::open(path)?[panic]; file.read_to_string()?[panic]
+}
+fn main() -> i32 {
+    let arguments = std::env::args()?[panic];
+    if arguments.len() != 3 {
+        eprintln("Usage: xec <input.xe> <output.c>"); return 2;
+    }
+    let input = arguments[1]; let output = arguments[2];
+    if input == output { eprintln("input and output must differ"); return 2; }
+    let source << read_source(input);
+    let[mut] program << new_program(input, lex(input, source.as_str()));
+    parse(program@[mut]); let generated << compile(program@[mut]);
+    let[mut] file << File::create(output)?[panic];
+    file.write_all(generated.as_str())?[panic]; file.flush()?[panic];
+    0
+}
+// ---------- IO 与调用发射：库的 C 接口集中映射，格式参数仍按 Xe 规则传递 ----------
+fn emit_print_value(g: Generator@[mut], value: Value, stream: str, token: usize) {
+    let[mut] base = value.type_id;
+    if g.program.types[base].kind == TYPE_POINTER { base = g.program.types[base].base; }
+    put(g, "xe_io_");
+    if base == T_STR or base == T_STRING { put(g, "write"); }
+    else if base == T_BOOL { put(g, "print_bool"); }
+    else if base == T_CHAR { put(g, "print_char"); }
+    else if base == T_ERROR { put(g, "print_error"); }
+    else if base == T_USIZE or base == T_U8 { put(g, "print_u64"); }
+    else if base == T_I32 or base == T_I64 { put(g, "print_i64"); }
+    else { error_at(g.program, token, "unsupported format argument type"); }
+    put(g, "("); put(g, stream); put(g, ", ");
+    if base == T_STRING { put(g, "xe_string_view(&("); }
+    if g.program.types[value.type_id].kind == TYPE_POINTER { put(g, "*("); }
+    put_value(g, value);
+    if g.program.types[value.type_id].kind == TYPE_POINTER { put(g, ")"); }
+    if base == T_STRING { put(g, "))"); }
+    put(g, ");\n");
+}
+fn emit_print(g: Generator@[mut], n: Node, name: str) -> Value {
+    let raw = spelling(g.program, g.program.nodes[argument_node(g.program, n, 0)].token);
+    let text = view(raw, 1, raw.len() - 1);
+    let[mut] stream = "stdout"; if name == "eprintln" { stream = "stderr"; }
+    // 先求所有参数的快照，再输出，保证前一实参不会被后一实参改掉。
+    let[mut] values << Vec[Value]::new(); let[mut] index: usize = 1;
+    while index < n.count { values.push(snapshot(g, emit_expression(g, argument_node(g.program, n, index), UNKNOWN))); index = index + 1; }
+    let[mut] start: usize = 0; let[mut] offset: usize = 0; let[mut] used: usize = 0;
+    while offset < text.len() {
+        let byte = text.byte_at(offset);
+        if byte == b'{' or byte == b'}' {
+            if offset > start {
+                put(g, "xe_io_write("); put(g, stream); put(g, ", ");
+                put_literal_contents(g, view(text, start, offset)); put(g, ");\n");
+            }
+            if offset + 1 >= text.len() { error_at(g.program, n.token, "unclosed format field"); }
+            let next = text.byte_at(offset + 1);
+            if next == byte { put(g, "xe_io_write("); put(g, stream); put(g, ", "); put_literal_contents(g, view(text, offset, offset + 1)); put(g, ");\n"); }
+            else if byte == b'{' and next == b'}' {
+                if used >= values.len() { error_at(g.program, n.token, "not enough format arguments"); }
+                emit_print_value(g, values[used], stream, n.token); used = used + 1;
+            } else { error_at(g.program, n.token, "bootstrap formatting supports {} and escaped braces only"); }
+            offset = offset + 2; start = offset;
+        } else { offset = offset + 1; }
+    }
+    if offset > start { put(g, "xe_io_write("); put(g, stream); put(g, ", "); put_literal_contents(g, view(text, start, offset)); put(g, ");\n"); }
+    if used != values.len() { error_at(g.program, n.token, "too many format arguments"); }
+    if name != "print" { put(g, "xe_io_newline("); put(g, stream); put(g, ");\n"); }
+    index = 0;
+    while index < values.len() {
+        if not g.program.types[values[index].type_id].copy { put_drop(g, values[index].type_id); put(g, "(&"); put_value(g, values[index]); put(g, ");\n"); }
+        index = index + 1;
+    }
+    temporary(g, T_UNIT)
+}
+fn put_literal_contents(g: Generator@[mut], contents: str) {
+    put(g, "((XeStr){(const unsigned char*)\""); put(g, contents); put(g, "\", sizeof(\""); put(g, contents); put(g, "\")-1})");
+}
+fn emit_call(g: Generator@[mut], n: Node) -> Value {
+    let callee = g.program.nodes[n.a]; let result_type = call_type(g, n);
+    if callee.kind == N_FIELD { return emit_method(g, n, callee, result_type); }
+    let name = spelling(g.program, callee.token);
+    if name == "print" or name == "println" or name == "eprintln" { return emit_print(g, n, name); }
+    if name == "panic" {
+        let message = emit_expression(g, argument_node(g.program, n, 0), T_STR);
+        put(g, "xe_io_write(stderr, "); put_value(g, message); put(g, "); xe_panic(\"explicit panic\");\n");
+        return Value { .id = 0; .type_id = T_NEVER; .place = 0; };
+    }
+    if callee.op != "" {
+        let[mut] argument = Value { .id = 0; .type_id = T_UNIT; .place = 0; };
+        if n.count == 1 { argument = snapshot(g, emit_expression(g, argument_node(g.program, n, 0), T_STR)); }
+        let result = temporary(g, result_type);
+        if callee.op == "args" {
+            let raw = g.next_id; g.next_id = g.next_id + 1;
+            put(g, "XeEnvArgs args"); put_number(g, raw); put(g, " = xe_env_args();\n");
+            put_id(g, result.id); put(g, ".tag = args"); put_number(g, raw); put(g, ".error ? 1 : 0;\n");
+            put_id(g, result.id); put(g, ".no = args"); put_number(g, raw); put(g, ".error;\n");
+            put_id(g, result.id); put(g, ".yes.data = args"); put_number(g, raw); put(g, ".data;\n");
+            put_id(g, result.id); put(g, ".yes.len = args"); put_number(g, raw); put(g, ".len;\n");
+        } else if callee.type_id == T_STRING and callee.op == "from" {
+            put_id(g, result.id); put(g, " = xe_string_from("); put_value(g, argument); put(g, ");\n");
+        } else if callee.type_id == T_STRING and callee.op == "new" {
+            put_id(g, result.id); put(g, " = xe_string_from((XeStr){(const unsigned char*)\"\",0});\n");
+        } else if callee.type_id == T_FILE {
+            put_id(g, result.id); put(g, ".yes = xe_file_"); put(g, callee.op); put(g, "("); put_value(g, argument);
+            put(g, ", &"); put_id(g, result.id); put(g, ".no);\n");
+            put_id(g, result.id); put(g, ".tag = "); put_id(g, result.id); put(g, ".no ? 1 : 0;\n");
+        }
+        return result;
+    }
+    let signature = g.program.functions[function_index(g.program, name)];
+    let[mut] arguments << Vec[Value]::new(); let[mut] index: usize = 0;
+    while index < n.count {
+        let target = g.program.parameters[signature.first + index].type_id;
+        arguments.push(snapshot(g, emit_expression(g, argument_node(g.program, n, index), target))); index = index + 1;
+    }
+    let[mut] result = Value { .id = 0; .type_id = T_NEVER; .place = 0; };
+    if result_type != T_NEVER { result = temporary(g, result_type); put_id(g, result.id); put(g, " = "); }
+    put(g, "f_"); put(g, name); put(g, "("); index = 0;
+    while index < arguments.len() { if index != 0 { put(g, ", "); } put_value(g, arguments[index]); index = index + 1; }
+    put(g, ");\n");
+    index = 0; while index < arguments.len() { consume(g, arguments[index]); index = index + 1; }
+    result
+}
+fn emit_method(g: Generator@[mut], n: Node, callee: Node, result_type: usize) -> Value {
+    let pointer = receiver_pointer(g, callee.a); let base = g.program.types[pointer.type_id].base;
+    let info = g.program.types[base]; let name = spelling(g.program, callee.token);
+    let[mut] argument = Value { .id = 0; .type_id = T_UNIT; .place = 0; };
+    if n.count == 1 and name != "slice_bytes" {
+        let[mut] target = T_STR;
+        if name == "push" { target = info.base; } else if name == "byte_at" { target = T_USIZE; }
+        argument = snapshot(g, emit_expression(g, argument_node(g.program, n, 0), target));
+    }
+    let result = temporary(g, result_type);
+    if name == "len" { put_id(g, result.id); put(g, " = "); put_value(g, pointer); put(g, "->len;\n"); }
+    else if name == "as_str" { put_id(g, result.id); put(g, " = xe_string_view("); put_value(g, pointer); put(g, ");\n"); }
+    else if name == "byte_at" {
+        put(g, "if ("); put_value(g, argument); put(g, " >= "); put_value(g, pointer); put(g, "->len) xe_panic(\"byte index out of bounds\");\n");
+        put_id(g, result.id); put(g, " = "); put_value(g, pointer); put(g, "->data["); put_value(g, argument); put(g, "];\n");
+    } else if name == "slice_bytes" {
+        let range = g.program.nodes[argument_node(g.program, n, 0)];
+        let start = snapshot(g, emit_expression(g, range.a, T_USIZE)); let end = snapshot(g, emit_expression(g, range.b, T_USIZE));
+        put_id(g, result.id); put(g, ".tag = 1;\nif (xe_str_slice_valid(*"); put_value(g, pointer); put(g, ", "); put_value(g, start); put(g, ", "); put_value(g, end); put(g, ")) {\n");
+        put_id(g, result.id); put(g, ".tag = 0;\n"); put_id(g, result.id); put(g, ".yes = (XeStr){"); put_value(g, pointer); put(g, "->data + "); put_value(g, start);
+        put(g, ", "); put_value(g, end); put(g, " - "); put_value(g, start); put(g, "};\n}\n");
+    } else if name == "push_str" { put(g, "xe_string_push("); put_value(g, pointer); put(g, ", "); put_value(g, argument); put(g, ");\n"); }
+    else if name == "push" {
+        put_value(g, pointer); put(g, "->data = xe_vec_reserve("); put_value(g, pointer); put(g, "->data, sizeof("); put_type(g, info.base);
+        put(g, "), "); put_value(g, pointer); put(g, "->len, &"); put_value(g, pointer); put(g, "->cap, 1);\n");
+        put_value(g, pointer); put(g, "->data["); put_value(g, pointer); put(g, "->len++] = "); put_value(g, argument); put(g, ";\n"); consume(g, argument);
+    } else if name == "pop" {
+        put_id(g, result.id); put(g, ".tag = 1;\nif ("); put_value(g, pointer); put(g, "->len) {\n"); put_id(g, result.id); put(g, ".tag = 0;\n");
+        put_id(g, result.id); put(g, ".yes = "); put_value(g, pointer); put(g, "->data[--"); put_value(g, pointer); put(g, "->len];\n}\n");
+    } else if name == "clear" {
+        put(g, "while ("); put_value(g, pointer); put(g, "->len) { --"); put_value(g, pointer); put(g, "->len;\n");
+        if not g.program.types[info.base].copy { put_drop(g, info.base); put(g, "(&"); put_value(g, pointer); put(g, "->data["); put_value(g, pointer); put(g, "->len]);\n"); }
+        put(g, "}\n");
+    } else if name == "read_to_string" {
+        put_id(g, result.id); put(g, ".yes = xe_file_read("); put_value(g, pointer); put(g, ", &"); put_id(g, result.id); put(g, ".no);\n");
+        put_id(g, result.id); put(g, ".tag = "); put_id(g, result.id); put(g, ".no ? 1 : 0;\n");
+    } else if name == "write_all" or name == "flush" {
+        put_id(g, result.id); put(g, ".no = xe_file_");
+        if name == "write_all" { put(g, "write"); } else { put(g, "flush"); }
+        put(g, "("); put_value(g, pointer); if name == "write_all" { put(g, ", "); put_value(g, argument); } put(g, ");\n");
+        put_id(g, result.id); put(g, ".tag = "); put_id(g, result.id); put(g, ".no ? 1 : 0;\n");
+    }
+    result
+}

@@ -1,13 +1,13 @@
 """编译器所需基础库：真实文件、增长存储、UTF-8 与资源清理。"""
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
+from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
-from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.source import Diagnostic
 
 
@@ -18,7 +18,7 @@ class BootstrapLibraryTests(unittest.TestCase):
             root = Path(directory)
             source, program = root / "main.xe", root / "program"
             source.write_text(text, encoding="utf-8")
-            build_executable(source, program, cc=shutil.which("cc"),
+            build_executable(source, program, cc=shutil.which("cc") or "",
                 extra_flags=("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie"))
             result = subprocess.run([str(program)], cwd=root, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -126,8 +126,8 @@ class BootstrapLibrarySemanticTests(unittest.TestCase):
                 self.assertTrue(check_source('fn main() {' + code + '}'))
 
     def test_old_vector_view_and_escaping_text_iterators_warn(self):
-        from compiler.xe_ast.semantic import Checker
         from compiler.xe_ast.parser import parse_source
+        from compiler.xe_ast.semantic import Checker
         from compiler.xe_ast.source import Source
         for text in ('''fn main() { let[mut] v << Vec[i32]::new(); v.push(1);
                       let old = v.as_slice(); v.reserve(100); println("{}", old[0]); }''',

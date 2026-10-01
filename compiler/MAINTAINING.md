@@ -34,6 +34,17 @@ make run 真正执行，make audit 记录每一层。先找到失败层，避免
 失败测试必须保留原来要测的错误。例如方法参数类型错误夹具，不能先被错误的 Copy<<
 初始化挡住；应修夹具，而不是把期待的错误编号改成一个不相关编号。
 
+## Python 静态检查
+
+修改 Python 代码后可以先跑 `make python-check`：Pyright standard 与 Ruff 使用
+根 pyproject.toml 的同一套规则，不用关闭编辑器检查来取得“没有红线”。
+异构 AST 的值边界用 Any，明确的数据表和业务对象仍保留具体类型；新增 fail/error
+辅助函数如果一定抛诊断，应标 NoReturn，让调用者的类型收窄与真实控制流一致。
+辅助混入类的 cast 只用于确认已知宿主 Checker/CBackend，不能用来掩盖真正的
+参数/返回类型不匹配。内部 assert 记录已经由前置步骤保证的不变量，不替代用户诊断。
+测试找不到 cc 时用空字符串代表不可用，仍通过 skipUnless 跳过；不要用默认 "cc"
+冒充检测成功，也不要把 None 放进 subprocess 的命令参数中。
+
 ## 三个关键数据结构
 
 - AST：保留用户写了什么和在哪里；不偷偷加入取地址、unsafe、成功包装或 drop。
@@ -182,3 +193,45 @@ ASan 检测部分内存错误，UBSan 检测部分未定义行为。两者很有
 
 当单文件规则明显过大时，可以按职责抽取小模块；先保持测试与外部行为不变，
 再做结构整理。不要一边发明语法、一边更换算法、一边改变后端，以免失去可定位的失败原因。
+
+## Xe 自举子集
+
+`bootstrap/compiler.xe` 独立实现一个可自编译子集，Python stage0 仍是参考实现与 seed
+编译器。`bootstrap/verify.py` 只在 seed 步骤调用 stage0；不允许后来各代借用 Python
+前端或替换/预处理输入源码。`test_selfhost` 验收固定点、参考行为、跨代失败诊断、
+资源/算术/Unicode 边界；修改 stage0 公共语义或运行库后也必须运行它。
+
+新编译器使用 Vec 表和整数 ID，不保存 Vec 元素地址；源码 String 必须在其所有 Token
+视图之后释放，不能解析中修改；输出缓冲不得作为永久名称视图的拥有者。其清零析构
+策略只适合已实现的内建资源及默认成员析构，不能擅自用于用户 Drop。下一阶段扩大
+功能时要保持诊断与资源检查，而不是为了自编译成功绕过规则。
+边界及代码导航见 [bootstrap/README](../bootstrap/README.md) 和 [第 31 章](../doc/31.md)。
+
+## 原版编译器工具链
+
+仓库根 xe 仅负责选择根目录解释器；python -m compiler 与它进入同一个 toolchain.main。
+project 选择项目/入口，不自行改写模块路径；所有语言检查仍由 modules/Checker/C 后端
+执行。原 cli/main.py/Makefile 入口继续可用，不因统一命令更改旧默认输出路径。
+
+driver 每次重新加载并检查源码，缓存只跳过最后 C 编译。缓存键必须覆盖实际 C 文本、
+输入/清单、编译器源码、C 工具身份、编译参数与相关环境；自定义 C 参数可能引入
+额外输入，所以当前禁用缓存。不要只依靠 mtime 或缓存命中而跳过 warning。
+build.compile_generated 编译私有 C 快照，在发布前登记自己生成程序的哈希，原子替换
+可执行文件；失败不能覆盖旧程序。不要改回读取可被其他任务改写的共享 .c 来编译。
+
+artifacts 收据不是可信代码。clean 核对根目录、目标路径和内容哈希，只删明确的普通文件；
+外部输出、未知/修改产物、符号链接、损坏收据和 target/bootstrap 都保留，绝不递归
+删除 target。不要并行 clean 与 build/run，也不要让不同任务共用一个自定义输出。
+输出保护包含源码/清单的符号链接和硬链接别名；写产物时先保护后发布。
+
+formatting 不重新打印整棵 AST，只整理现有行；字面量/注释内容保持不变，变换后再次解析
+并核对忽略源码范围的结构。写入前所有输入先验证；没有官方全量格式规则时不能擅自
+重写表达式或设计新排版语法。documentation 读取加载器改写前的树，保留用户名称、
+源码位置与注释；仅展示本包可达公开 API，不泄露私有成员或自动执行文档示例。
+
+test 只运行明确提供的带 main 的 Xe 程序，--compiler 才启动现有 unittest；不把
+tests/fails/warnings 或所有示例作为可自动执行的单元测试。运行目标不拼接 shell，run
+保持调用者的 cwd/stdin/终端与 argv；测试用例 stdin 为 EOF、有限超时、限长报告。
+test_toolchain 使用独立临时项目验证真实运行、缓存失效、参数、格式/文档、失败保护和
+清理范围，含保留 LeakSanitizer 的资源测试。运行 make toolchain-test；改共用 build.py
+还要运行完整 make compiler-test。用户命令与限制见 [第 32 章](../doc/32.md)。

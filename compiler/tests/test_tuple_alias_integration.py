@@ -4,18 +4,18 @@
 悬垂地址只检查风险信息。这里不修改源码 AST 来伪装别名展开或隐式转换。
 """
 import copy
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class TupleAliasIntegrationTests(unittest.TestCase):

@@ -1,0 +1,18 @@
+//! 全局可写绑定在各函数间共享；返回的普通指针指向同一份静态存储。
+let[mut] COUNT: i32 = 0;
+
+fn increment() { COUNT = COUNT + 1; }
+fn writable_count() -> i32@[mut] { COUNT@[mut] }
+fn readable_count() -> i32@ { COUNT@ }
+
+fn main() {
+    let writable = writable_count();
+    let readable = readable_count();
+    writable# = 40;
+    increment();
+    increment();
+    // 局部同名绑定只遮蔽当前作用域，不能替代之前取到的全局地址。
+    let[mut] COUNT = COUNT;
+    COUNT = 100;
+    println("global={} local={}", readable#, COUNT);
+}

@@ -1,4 +1,5 @@
 """语义类型，不污染源码 AST。类型不可变，可作为字典键或分支快照的一部分。"""
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
 NUMERIC = {f"{prefix}{bits}" for prefix in ("i", "u") for bits in (8,16,32,64)}
@@ -65,7 +66,7 @@ def maybe(base: Type, error: Type = NONE) -> Type:
     return Type("maybe", (base, error))
 
 
-def callable_type(parameters: list[Type], result: Type, capture: bool = False,
+def callable_type(parameters: Sequence[Type], result: Type, capture: bool = False,
                   identity: int | None = None) -> Type:
     return Type("closure" if capture else "fn", tuple(parameters) + (result,), identity=identity)
 

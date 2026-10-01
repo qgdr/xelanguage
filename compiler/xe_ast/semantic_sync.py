@@ -3,15 +3,21 @@
 这不是 Send/Sync Trait 求解器，不承诺检测所有数据竞争。只拒绝已知
 不能跨线程释放的 MutexGuard，递归检查聚合和捕获环境，防止包装绕过。
 """
-from .typesys import Type, NEVER, UNKNOWN, maybe
+from typing import TYPE_CHECKING, cast
 
+if TYPE_CHECKING:
+    from .semantic import Checker
+
+from .typesys import NEVER, UNKNOWN, Type, maybe
 
 SYNC_TYPES = {"Shared", "Weak", "Mutex", "MutexGuard", "Thread"}
 SYNC_MARKERS = {"Expired", "SyncError", "ThreadError"}
 
 
 class SyncChecker:
+    # 只有 Checker 使用本辅助类，静态检查时明确其已有的类型/方法表。
     def sync_contains(self, type_, names, seen=None):
+        self = cast("Checker", self)
         if type_.name in names:
             return True
         seen = set() if seen is None else seen
@@ -40,6 +46,7 @@ class SyncChecker:
         return False
 
     def sync_constructor(self, owner, member, node):
+        self = cast("Checker", self)
         from .semantic import Value
         if owner.name in {"Shared", "Mutex"} and member == "new":
             values = self.arguments(node["arguments"], [owner.args[0]], node)

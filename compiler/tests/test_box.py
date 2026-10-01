@@ -3,12 +3,12 @@
 分配失败在测试生成的 C 中注入，不给正式 Xe 语法或运行库增加测试开关。
 所有实际程序启用 ASan/UBSan 和正常泄漏检测。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable

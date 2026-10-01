@@ -1,0 +1,39 @@
+//! 由 Xe 自举编译器编译的应用：读文件，记录 ASCII 单词位置，再按源码顺序打印。
+//! 源文本只有一个拥有者，Word 只保存偏移；Vec 扩容不会让 Word 失效。
+struct Word { start: usize, end: usize, }
+impl Copy for Word;
+
+fn letter(byte: u8) -> bool {
+    (byte >= b'a' and byte <= b'z') or (byte >= b'A' and byte <= b'Z') or byte == b'_'
+}
+fn words(text: str) -> Vec[Word] {
+    let[mut] found << Vec[Word]::new();
+    let[mut] position: usize = 0;
+    while position < text.len() {
+        if letter(text.byte_at(position)) {
+            let start = position;
+            position = position + 1;
+            while position < text.len() and letter(text.byte_at(position)) {
+                position = position + 1;
+            }
+            found.push(Word { .start = start; .end = position; });
+        } else { position = position + 1; }
+    }
+    found
+}
+fn main() -> i32 {
+    let arguments = std::env::args()?[panic];
+    if arguments.len() != 2 { eprintln("Usage: words <input-file>"); return 2; }
+    let file << File::open(arguments[1])?[panic];
+    let source << file.read_to_string()?[panic];
+    let text = source.as_str();
+    let found << words(text);
+    let[mut] index: usize = 0;
+    while index < found.len() {
+        let word = found[index];
+        println("{}", text.slice_bytes(word.start..word.end)?[panic]);
+        index = index + 1;
+    }
+    println("words={}", found.len());
+    0
+}

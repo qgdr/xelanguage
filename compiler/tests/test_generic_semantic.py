@@ -90,6 +90,7 @@ class GenericSemanticTests(unittest.TestCase):
 
     def test_generic_function_value_requires_explicit_type_arguments(self):
         error = self.fails("fn[T] id(x:T)->T{x} fn main(){let f=id;}", "XE-GENERIC-0001")
+        assert error.hint is not None
         self.assertIn("id[i32]", error.hint)
 
     def test_concrete_method_cannot_be_called_on_wrong_generic_owner(self):

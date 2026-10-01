@@ -4,16 +4,16 @@
 输出给现有检查器的是内部限定名称；用户 AST 不被改写，源码位置仍指向
 各自文件。第一版一次生成一个 C 编译单元，先把正确性与诊断做完整。
 """
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-import tomllib
+from typing import Any, NoReturn
 
 from .parser import parse_source
-from .source import Source, Diagnostic
+from .source import Diagnostic, Source
 from .stdlib_io import IO_FUNCTIONS
 
-
-DECLARATIONS = {"Function", "Struct", "Enum", "Trait", "TypeAlias", "Constant"}
+DECLARATIONS = {"Function", "Struct", "Enum", "Trait", "TypeAlias", "Constant", "GlobalBinding"}
 STANDARD_MODULES = {
     ("std", "io"): {**{name: ("std", "io", name) for name in IO_FUNCTIONS}, "Error": ("io", "Error")},
     ("std", "env"): {"args": ("std", "env", "args")},
@@ -66,7 +66,7 @@ class ModuleLoader:
         self.entry_path = () if relative.parts in {("main",), ("lib",)} else relative.parts
         self.entry_module = self.load(package, self.entry_path, self.entry)
 
-    def fail(self, module, node, message, hint=None):
+    def fail(self, module, node, message, hint=None) -> NoReturn:
         span = node["span"]
         raise Diagnostic(module.source, span["start"]["offset"], span["end"]["offset"],
                          message, "XE-MODULE-0001", hint)
@@ -123,7 +123,7 @@ class ModuleLoader:
                     module.declarations[name] = declaration
         return module
 
-    def anchor(self, module, parts, node):
+    def anchor(self, module, parts, node) -> tuple[Package, tuple[str, ...]] | None:
         """将 crate/self/super/依赖名变为包和模块路径，不做名称猜测。"""
         parts = list(parts)
         package, prefix = module.package, []
@@ -207,6 +207,7 @@ class ModuleLoader:
             if (node.get("kind") == "Path" and
                     node["parts"][0] in {"crate", "self", "super"} | set(module.package.dependencies)):
                 anchored = self.anchor(module, node["parts"], node)
+                assert anchored is not None  # 本分支只接受已知根前缀。
                 self.locate(*anchored, module, node)
 
     @staticmethod
@@ -247,6 +248,8 @@ class ModuleLoader:
                 self.fail(module, node, f"未知标准库导入 {'::'.join(parts)}")
             return list(STANDARD_MODULES[prefix][tail[0]]) + tail[1:]
         anchored = self.anchor(module, parts, node)
+        if anchored is None:
+            self.fail(module, node, "路径需要 crate/self/super 或已声明的依赖包名")
         owner, tail = self.locate(*anchored, module, node)
         # namespace::child 可以第一次在正文才发现 child；它自己的 use
         # 必须先登记，否则再导出会被错误地当成不存在的声明。
@@ -287,7 +290,7 @@ class ModuleLoader:
             return self.resolve_absolute(module, parts, node)
         return parts
 
-    def rewrite(self, module, value, locals_=frozenset()):
+    def rewrite(self, module, value, locals_=frozenset()) -> Any:
         if isinstance(value, list):
             return [self.rewrite(module, child, locals_) for child in value]
         if not isinstance(value, dict) or "kind" not in value:
@@ -324,7 +327,7 @@ class ModuleLoader:
             node[key] = self.rewrite(module, child, scope)
         return node
 
-    def program(self):
+    def program(self) -> tuple[Source, dict[str, Any]]:
         while True:
             self.prepare()
             modules, items = list(self.modules.values()), []
@@ -353,5 +356,5 @@ class ModuleLoader:
         return self.entry_module.source, tree
 
 
-def load_program(entry, text=None):
+def load_program(entry, text=None) -> tuple[Source, dict[str, Any]]:
     return ModuleLoader(entry, text).program()

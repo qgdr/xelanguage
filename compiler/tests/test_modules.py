@@ -2,13 +2,13 @@
 import contextlib
 import io
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
-from compiler.xe_ast.build import build_executable, emit_c, BuildError
+from compiler.xe_ast.build import BuildError, build_executable, emit_c
 from compiler.xe_ast.cli import main
 from compiler.xe_ast.modules import load_program
 from compiler.xe_ast.semantic import Checker
@@ -136,6 +136,7 @@ class ModuleTests(unittest.TestCase):
         with self.assertRaises(Diagnostic) as caught:
             self.check()
         self.assertEqual(caught.exception.source.filename,str(self.root/'src/model.xe'))
+        assert caught.exception.hint is not None
         self.assertIn(str(self.root/'src/model.xe'),caught.exception.hint)
         self.assertNotIn('!module!',caught.exception.hint)
 

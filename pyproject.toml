@@ -6,5 +6,35 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "ruff>=0.13",
+]
+
 [tool.uv]
 package = false
+
+[tool.pyright]
+include = ["compiler", "bootstrap/verify.py"]
+exclude = [".venv", "**/target", "ignore"]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+
+[tool.ruff]
+target-version = "py313"
+extend-exclude = ["target", "ignore"]
+
+[tool.ruff.lint]
+# 保留错误、名称、导入和常见缺陷检查；不强迫重排现有紧凑代码。
+select = ["E4", "E9", "F", "I", "B"]
+# zip 有的用于截断，有的已由 Xe 类型检查保证等长，不统一改成 strict=True。
+ignore = ["B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# 直接执行脚本时须先将仓库根加入 sys.path，再导入编译器包。
+"compiler/main.py" = ["E402"]
+"compiler/audit.py" = ["E402"]
+"bootstrap/verify.py" = ["E402"]

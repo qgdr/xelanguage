@@ -1,6 +1,4 @@
 """真实 Xe 命令行工具的参数、交互、EOF 与资源清理测试。"""
-from pathlib import Path
-from contextlib import contextmanager
 import errno
 import os
 import re
@@ -10,6 +8,8 @@ import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 
 if os.name == "posix":
     import pty
@@ -22,7 +22,7 @@ from compiler.xe_ast.source import Source
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "examples/feature_check/main.xe"
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 FEATURES = (
     "numeric", "comparison-chain", "short-circuit", "evaluation-order",
     "struct-copy-methods", "resource-drop", "generics", "tuple-alias",

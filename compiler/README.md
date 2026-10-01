@@ -6,6 +6,41 @@
 不熟悉编译器实现时先读 [维护指南](MAINTAINING.md)，再按诊断阶段定位模块。
 规范与实际功能的最新逐项核对见 [第 30 章](../doc/30.md)，冻结语法不代表全部后端功能已完成。
 
+## 统一工具入口（推荐）
+
+先在仓库根运行 `uv sync --frozen`。`./xe` 自动使用根目录 `.venv`，不另建环境，
+不改变调用者工作目录；从其他项目用仓库入口的绝对路径也可运行。
+Xe 自举子集暂时保留独立，不替换本文的 stage0。
+
+```sh
+./xe --help
+./xe doctor
+./xe ast tests/stage999/enum.xe -o -
+./xe check examples/feature_check/main.xe --message-format=json
+./xe emit-c tests/stage999/struct_methods.xe
+./xe run examples/args/main.xe -- hello "two words" "你好 Xe" ""
+./xe build --manifest-path examples/toolchain --release
+./xe run --manifest-path examples/toolchain --bin smoke
+./xe test examples/toolchain/src/bin/smoke.xe --sanitize
+./xe fmt --manifest-path examples/toolchain --check
+./xe lint examples/feature_check/main.xe
+./xe doc --manifest-path examples/toolchain
+./xe clean --manifest-path examples/toolchain --dry-run
+./xe test --compiler
+```
+
+有清单时 build/run 默认选择 src/main.xe，doc 优先 src/lib.xe，--bin name 选择
+src/bin/name.xe。缓存始终重做 Xe 检查，只复用核对内容和工具身份后的系统 C 编译结果。
+编译失败保留旧程序；可读 C 和收据保留在本项目 target，clean 只删除登记且未修改的产物。
+旧入口的默认输出位置不变；无清单的显式文件由统一入口输出到其所在目录的 target。
+
+fmt 目前只保守整理已有行的缩进/尾空白，写入前验证 AST 和注释不变。
+test 要求明确提供带 main 的 Xe 文件，--compiler 才运行 Python 回归；没有新增测试语法
+或自动执行风险样例。doc 输出 Markdown/JSON API 清单，不执行文档示例。
+完整接口、JSON 流与退出码、缓存边界、安全清理见 [第 32 章](../doc/32.md)。
+也可使用 `python -m compiler` 或 `make xe XE_ARGS='...'`；`make toolchain-test`
+运行工具链专项回归，`make toolchain-demo` 运行可直接阅读的多文件示例。
+
 ## 从仓库根运行
 
 ```sh
@@ -41,14 +76,50 @@ uv run --project . --frozen --offline python compiler/main.py tests/stage999/enu
 make ast 默认输出 target/ast/<源文件名>.ast.json。-o - 只输出 JSON，不混入状态文字。
 统一环境配置为根目录 pyproject.toml / uv.lock，虚拟环境位于根目录 .venv。
 首次准备环境运行 uv sync --frozen，之后 make 命令可离线使用已经安装的锁定依赖。
-Python 项目不需要第三方依赖；旧版专用的 ply、llvmlite 等依赖已移除。
+编译器运行只使用标准库；开发检查用 Pyright/Ruff，版本由根目录 uv.lock 锁定。
+旧版专用的 ply、llvmlite 等依赖已移除。
 旧编译器源码已移除并忽略，不影响本目录的入口 compiler/main.py。
 
 Makefile 已固定 --project . --frozen --offline，使用根目录 uv.lock，不更新依赖或访问网络。
 环境需满足根项目的 Python 3.13+ 要求；新前端代码仍可在 Python 3.12 下单独测试。
 compiler/ 不再含独立项目配置；曾生成的 compiler/.venv 不会再被这些命令使用。
 
+## VS Code 与 Python 检查
+
+请打开仓库根目录作为工作区。`.vscode/settings.json` 指向根 `.venv/bin/python`，
+Pylance 使用 standard 检查；Pyright 的 Python 版本、扫描范围和根环境均在
+pyproject.toml 中规定，Ruff 也优先读取同一项目配置，不依赖个人编辑器的默认规则。
+
+```sh
+uv sync --frozen
+make python-check
+```
+
+Pyright 的命令行工具需要 Node.js；当前开发环境已提供 Node，编译器本身不需要 Node。
+只运行编译器且不需要开发检查时，可以用 `uv sync --frozen --no-dev`。
+Makefile 的 uv run 默认会使用开发组，因此运行这些目标仍需提前安装开发依赖。
+
+如果 VS Code 曾经选过 `/usr/bin/python3`，改默认设置不一定清除其已有的选择：
+按 Ctrl+Shift+P，运行 **Python: Select Interpreter**，选根 `.venv/bin/python`；
+必要时再运行 **Developer: Reload Window**。这只影响本工作区，不改用户全局设置。
+
+静态检查不会代替运行测试。Python AST 本来就是异构 dict/list：相应边界用 Any 表达
+真实的数据形状，不把所有字典推断成同一种值；确定不会返回的诊断函数标 NoReturn。
+容器/并发辅助类只混入对应宿主，用 TYPE_CHECKING/cast 告诉检查器宿主接口，
+不增加运行时循环导入，也不更改 Xe 的类型、指针或所有权规则。
+
 ## 模块边界
+
+统一入口与语言实现分开，避免 CLI 中重复实现语义：
+
+- toolchain.py / __main__.py：统一子命令、参数转发、诊断和退出码；
+- project.py：定位 xe.toml、项目入口与产物名，仍由原加载器处理模块；
+- driver.py：生成 C、计算构建指纹、复用或重建外部 C 编译结果；
+- artifacts.py：产物收据、哈希及保守清理；
+- formatting.py：保留词法内容并验证 AST 的格式变换；
+- documentation.py：可达公开 API、源码位置与文档注释。
+
+以下语言模块位于 xe_ast/，运行库与测试另列：
 
 - source.py：原文、行列、半开范围及 Diagnostic；
 - lexer.py：字面量、最长标点、嵌套注释；1> / 2> 不使用全局特殊 token；
@@ -139,7 +210,13 @@ IO 合同、输入边界与 Xe 命令行例子见 [第 24 章](../doc/24.md)。
 
 ## 后续工作建议
 
-优先用已有子集编写 Xe 前端，补真正阻塞它的库和发射能力，再完成自编译阶段链。
+首个 Xe 前端与自编译阶段链已在 [bootstrap/](../bootstrap/README.md) 实现。
+`make bootstrap` 验收三代未经规范化的 C 字节相同；`make bootstrap-test` 验证跨代
+正反例和 sanitizer。它是独立的受限子集，还不是此处 Python stage0 的替代品；
+没有接管本文的 AST JSON、多文件加载与完整检查命令。
+自举项目暂缓扩展，继续保留现有源码与阶段链；范围见 [第 31 章](../doc/31.md)。
+原版工具链下一步可完善全量格式化、源码调试映射和语言服务器，但不先发明未经审核的
+测试发现、依赖锁或包配置规则；当前已实现的工具边界见第 32 章。
 泛型 Copy/Drop、通用静态 Trait、尚缺的资源替换清理和更准确的风险 warning 仍需完善。
 HIR/MIR 可在降低维护复杂度时逐步引入，但不是开始自举的先决条件；
 不为此先重写解析算法或实现机器码优化器。详细步骤与待审核接口见第 30 章。

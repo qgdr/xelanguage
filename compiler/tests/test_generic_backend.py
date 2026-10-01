@@ -4,17 +4,17 @@ The semantic checker selects concrete signatures; the backend only lowers those
 checked instances. Tests compile and run the resulting C, including resource
 instances under ASan/UBSan, instead of merely searching generated source text.
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.source import Diagnostic
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 ROOT = Path(__file__).resolve().parents[2]
 
 

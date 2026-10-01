@@ -3,16 +3,16 @@
 These are end-to-end tests: parsing and checking alone cannot detect a double drop
 in generated C. Sanitized executions cover the resource paths as well.
 """
-from pathlib import Path
-import shutil
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 ROOT = Path(__file__).resolve().parents[2]
 
 

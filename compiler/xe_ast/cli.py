@@ -6,14 +6,15 @@
 import argparse
 import json
 import os
-from pathlib import Path
+import subprocess
 import sys
 import tempfile
-import subprocess
+from pathlib import Path
+
 from .ast import document
+from .build import BuildError
 from .parser import parse_source
 from .source import Diagnostic, Source
-from .build import BuildError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,15 +74,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if backend:
             from .backend_c import lower_to_c
-            from .build import emit_c, build_executable
+            from .build import build_executable, emit_c
             if args.emit_c:
                 if args.output == "-":
                     source_text = args.source.read_bytes().decode("utf-8")
                     sys.stdout.write(lower_to_c(source_text, str(args.source), args.check_borrows, warnings=warnings))
                 else:
+                    assert output is not None  # -o - 已由上一分支处理。
                     emit_c(args.source, output, args.check_borrows, warnings=warnings)
                     print(f"C 已输出：{output}")
             else:
+                assert output is not None  # 构建/运行总有默认或显式程序路径。
                 build_executable(args.source, output, args.check_borrows, args.cc, warnings=warnings)
                 if args.run:
                     report_warnings()
@@ -93,8 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         source_text = args.source.read_bytes().decode("utf-8")
         tree = parse_source(source_text, str(args.source))
         if args.check:
-            from .semantic import Checker
             from .modules import load_program
+            from .semantic import Checker
             source_info, tree = load_program(args.source, source_text)
             checker = Checker(source_info, tree, args.check_borrows)
             diagnostics = checker.check()

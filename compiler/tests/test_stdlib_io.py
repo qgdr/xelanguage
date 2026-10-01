@@ -3,7 +3,6 @@
 输入按 bytes 传递，避免 Python 的文本换行/解码替我们修正错误输入。
 正常输出以及 IO 错误都通过真正编译的 Xe 程序验证，而非模拟标准库。
 """
-from pathlib import Path
 import os
 import selectors
 import shutil
@@ -11,12 +10,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "标准 IO 验收需要系统 C 编译器")
@@ -124,6 +124,7 @@ class StdlibIoExecutionTests(unittest.TestCase):
         process = subprocess.Popen([str(program)], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
+            assert process.stdout is not None  # stdout 明确配置为 PIPE。
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 self.assertTrue(selector.select(timeout=5), "输入前提示文字没有刷新")
@@ -136,7 +137,8 @@ class StdlibIoExecutionTests(unittest.TestCase):
                 process.kill()
                 process.communicate()
             for stream in (process.stdin, process.stdout, process.stderr):
-                stream.close()
+                if stream is not None:
+                    stream.close()
 
     def test_constant_can_shadow_unqualified_readline(self):
         program = self.compile('''const readline: i32 = 7;

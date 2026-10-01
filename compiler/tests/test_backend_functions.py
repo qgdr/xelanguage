@@ -3,19 +3,19 @@
 The language already distinguishes fn values from captured closures. These tests
 exercise that existing distinction without introducing an implicit capture rule.
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
+from compiler.xe_ast import parse_source
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
-from compiler.xe_ast import parse_source
 from compiler.xe_ast.semantic import Checker
-from compiler.xe_ast.source import Diagnostic, Source
+from compiler.xe_ast.source import Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 ROOT = Path(__file__).resolve().parents[2]
 
 

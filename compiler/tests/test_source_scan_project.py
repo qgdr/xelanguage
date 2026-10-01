@@ -1,9 +1,9 @@
 """源码扫描项目：三个 Xe 模块、真实 argv/文件/UTF-8/动态数组。"""
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 

@@ -1,14 +1,13 @@
 """Step[T] C 后端：标签、具体泛型、融合停止与资源清理的实际运行测试。"""
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 
-
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")

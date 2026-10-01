@@ -1,0 +1,6 @@
+//! 默认命令行程序；不是自举编译器项目。
+use crate::math::square;
+
+fn main() {
+    println("square(7) = {}", square(7));
+}

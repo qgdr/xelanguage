@@ -3,14 +3,14 @@
 悬垂例只检查/编译，从不解引用执行；正常别名例实际编译运行。
 unsafe 是数据流注记，不是免除类型、写权限或资源所有权检查的许可。
 """
-from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -18,9 +18,9 @@ from compiler.xe_ast.cli import main
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
-from compiler.xe_ast.typesys import Type, has_unsafe, ptr
+from compiler.xe_ast.typesys import Type, ptr
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class PointerWarningsTests(unittest.TestCase):

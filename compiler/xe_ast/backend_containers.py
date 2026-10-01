@@ -3,12 +3,19 @@
 Vec 内存可搬动，元素所有权只转交一次。递归的 Vec[Node] 通过具名
 清理函数处理，避免在生成 C 时无限展开节点的析构代码。
 """
-from .typesys import Type, UNIT, NEVER, BOOL, USIZE
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from .backend_c import CBackend
+
 from .semantic_sync import SYNC_TYPES
+from .typesys import BOOL, NEVER, UNIT, USIZE, Type
 
 
 class ContainerBackend:
+    # 本类只混入 CBackend。cast 明示宿主接口，不运行时导入后端造成循环依赖。
     def vector_reserve(self, pointer, element, additional):
+        self = cast("CBackend", self)
         ctype = self.ctype(element)
         if element.name in self.checker.types:
             self.define_type(element)
@@ -16,6 +23,7 @@ class ContainerBackend:
                   f"({pointer})->len, &({pointer})->cap, {additional});")
 
     def vector_new(self, node, member):
+        self = cast("CBackend", self)
         type_ = self.type_at(node)
         capacity = None
         if member == "with_capacity":
@@ -28,6 +36,7 @@ class ContainerBackend:
         return result
 
     def vector_method(self, node, base, pointer, name, arguments):
+        self = cast("CBackend", self)
         element = base.args[0]
         if name in {"len", "capacity"}:
             return self.temp(USIZE, f"({pointer})->{'len' if name == 'len' else 'cap'}")
@@ -59,9 +68,11 @@ class ContainerBackend:
         return self.temp(UNIT, "0")
 
     def vector_helper(self, type_):
+        self = cast("CBackend", self)
         return self.container_helper(type_)
 
-    def container_helper(self, type_):
+    def container_helper(self, type_: Type):
+        self = cast("CBackend", self)
         if type_ not in self.container_helpers:
             def depth(type_):
                 return 1 + max((depth(t) for t in type_.args), default=0)
@@ -70,12 +81,14 @@ class ContainerBackend:
                 self.checker.fail(declaration,
                     "容器清理的具体类型超过实例化限制；请检查递归泛型是否不断扩大类型参数",
                     "XE-GENERIC-0002")
-            label = {"Vec": "vector_drop", "Box": "box_drop"}.get(type_.name, type_.name.lower() + "_drop")
+            labels: dict[str, str] = {"Vec": "vector_drop", "Box": "box_drop"}
+            label = labels.get(type_.name, type_.name.lower() + "_drop")
             self.container_helpers[type_] = self.fresh(label)
         return self.container_helpers[type_]
 
     def emit_container_helpers(self):
         """先登记后生成；递归元素引用函数，保持生成过程有界。"""
+        self = cast("CBackend", self)
         saved_lines, saved_indent = self.lines, self.indent
         bodies, index = [], 0
         while index < len(self.container_helpers):
@@ -127,6 +140,7 @@ class ContainerBackend:
 
     def box_new(self, node, owner):
         """先按普通参数规则取得 T，再分配；失败也必须恰好清理一次 T。"""
+        self = cast("CBackend", self)
         element = owner.args[0]
         value = self.argument(self.expression(node["arguments"][0], element))
         if value.type == NEVER:
@@ -154,6 +168,7 @@ class ContainerBackend:
         return result
 
     def box_method(self, node, base, pointer, name, receiver):
+        self = cast("CBackend", self)
         element = base.args[0]
         if name in {"ptr", "ptr_mut"}:
             return self.temp(self.type_at(node), f"({pointer})->data")
@@ -169,6 +184,7 @@ class ContainerBackend:
         self.fail(node, f"Box::{name} 尚未实现")
 
     def text_next(self, node, base, pointer):
+        self = cast("CBackend", self)
         type_ = Type("Step", (Type("u8" if base.name == "Bytes" else "char"),))
         result = self.temp(type_, f"({self.ctype(type_)}){{.tag = {self.variant_tag(type_, 'Stop', node)}}}")
         self.line(f"if (({pointer})->position < ({pointer})->text.len) {{")

@@ -1,0 +1,24 @@
+// 函数之间共享一个可写计数器，初值只在程序启动前建立一次。
+let[mut] COUNT: i32 = 0;
+
+fn tick() -> i32 {
+    COUNT = COUNT + 1;
+    COUNT
+}
+
+fn count_address() -> i32@[mut] { COUNT@[mut] }
+fn read_count() -> i32 { COUNT }
+
+fn main() {
+    println("tick={}", tick());
+    println("tick={}", tick());
+
+    let pointer = count_address();
+    pointer# = 10;
+    println("through-pointer={}", read_count());
+
+    // 局部同名绑定遮蔽全局名字，不替换全局存储。
+    let[mut] COUNT = COUNT;
+    COUNT = 100;
+    println("local={} global={}", COUNT, read_count());
+}

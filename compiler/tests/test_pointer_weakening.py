@@ -2,18 +2,18 @@
 
 只读权限与 unsafe 风险独立；风险样例只检查，正常地址实际经过 C 执行。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class PointerWeakeningTests(unittest.TestCase):

@@ -2,7 +2,6 @@
 import contextlib
 import copy
 import io
-from pathlib import Path
 import os
 import re
 import shutil
@@ -10,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from compiler.xe_ast import parse_source
@@ -22,7 +22,7 @@ from compiler.xe_ast.stdlib_env import ENV_ARGS_RESULT, env_function
 from compiler.xe_ast.typesys import IO_ERROR, STR, Type
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class EnvSemanticTests(unittest.TestCase):
@@ -38,6 +38,7 @@ class EnvSemanticTests(unittest.TestCase):
 
     def test_registry_returns_existing_readonly_slice_and_error_types(self):
         signature = env_function("std::env::args")
+        assert signature is not None
         self.assertEqual(signature.parameters, ())
         self.assertEqual(signature.result, ENV_ARGS_RESULT)
         self.assertEqual(ENV_ARGS_RESULT.args, (Type("Slice", (STR,)), IO_ERROR))
@@ -72,6 +73,7 @@ class EnvSemanticTests(unittest.TestCase):
         documentation = (ROOT / "doc/25.md").read_text(encoding="utf-8")
         example = re.search(r"```xe\n(.*?)\n```", documentation, re.DOTALL)
         self.assertIsNotNone(example)
+        assert example is not None
         self.assertEqual(example.group(1).strip(), source.strip())
         self.check(source)
 
@@ -240,7 +242,8 @@ class EnvExecutionTests(unittest.TestCase):
                         process.kill()
                         process.communicate()
                     for stream in (process.stdin, process.stdout, process.stderr):
-                        stream.close()
+                        if stream is not None:
+                            stream.close()
 
     @unittest.skipUnless(os.name == "posix", "原始字节参数验收依赖 POSIX")
     def test_minimal_tool_reports_unreadable_arguments(self):

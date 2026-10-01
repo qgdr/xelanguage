@@ -1,6 +1,6 @@
 """闭包环境的所有权、写权限、身份和返回来源：不依赖生成 C 的细节。"""
-from copy import deepcopy
 import unittest
+from copy import deepcopy
 
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker

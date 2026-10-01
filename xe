@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""本地 xe 启动器：优先使用根目录环境，不改变使用者工作目录。
+
+通过绝对路径或 PATH 从另一个项目启动仍能定位编译器；不需要安装依赖包。
+"""
+import os
+from pathlib import Path
+import sys
+
+root = Path(__file__).resolve().parent
+environment = root / ".venv"
+interpreter = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+if interpreter.is_file() and Path(sys.prefix).resolve() != environment.resolve():
+    try:
+        os.execv(str(interpreter), [str(interpreter), str(Path(__file__).resolve()), *sys.argv[1:]])
+    except OSError as error:
+        print(f"无法启动根目录环境：{error}；请运行 uv sync --frozen", file=sys.stderr)
+        raise SystemExit(2)
+if sys.version_info < (3, 13):
+    print("xe 需要根目录 Python 3.13+ 环境；请运行 uv sync --frozen", file=sys.stderr)
+    raise SystemExit(2)
+
+from compiler.toolchain import main
+
+raise SystemExit(main())

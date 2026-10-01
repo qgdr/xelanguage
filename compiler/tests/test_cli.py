@@ -2,9 +2,10 @@
 import contextlib
 import io
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
+
 from compiler.xe_ast.cli import main
 
 

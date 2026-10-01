@@ -1,0 +1,40 @@
+// 模块可变绑定有整段程序共享的存储；初始化不执行函数。
+struct Point { x: i32, y: i32, }
+impl Copy for Point;
+
+let[mut] COUNT: i32 = 0;
+let[mut] POINT: Point = Point { .x = 1; .y = 2; };
+let[mut] PAIR: tuple[i32, i32] = tuple[10, 20];
+let[mut] VALUES: Array[i32, 2] = [1, 2];
+let[mut] LABELS: Array[str, 2] = ["first", "second"];
+
+// 静态地址可以先于目标声明；地址不会因函数返回而失效。
+let[mut] ADDRESS: i32@[mut] = COUNT@[mut];
+
+fn tick() { COUNT = COUNT + 1; }
+fn count_address() -> i32@ { COUNT@ }
+
+fn main() {
+    tick();
+    tick();
+    println("count={} address={}", COUNT, count_address()#);
+
+    POINT.x = 7;
+    9 >> POINT.y;
+    PAIR = tuple[20, 40];
+    VALUES[0] = 3;
+    let element = VALUES[1]@[mut];
+    element# = 4;
+    println("point={},{} pair={},{} values={},{}", POINT.x, POINT.y,
+        PAIR.0, PAIR.1, VALUES[0], VALUES[1]);
+
+    LABELS[1] = "changed";
+    println("labels={},{}", LABELS[0], LABELS[1]);
+
+    { let[mut] COUNT = COUNT; COUNT = 99;
+      println("shadow={} global={}", COUNT, ADDRESS#); };
+
+    // 全局名字在闭包正文直接可见，无需捕获局部变量。
+    let callback = fn() -> i32 { ADDRESS# = ADDRESS# + 1; COUNT };
+    println("closure={} global={}", callback(), COUNT);
+}

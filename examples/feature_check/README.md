@@ -2,7 +2,18 @@
 
 这是用 Xe 编写的命令行功能验收程序。`check` 会运行 16 个已编译的检查，
 比较结果并输出 `PASS` / `FAIL` 和统计。它不读取、解析或类型检查任意 Xe
-源码文件；检查其他文件仍使用 `python3 -m compiler.xe_ast 文件.xe --check`。
+源码文件；检查其他文件使用 `./xe check 文件.xe`，旧入口也仍可用。
+
+统一工具入口可以直接构建、缓存并运行，`--` 后是程序自己的参数：
+
+```sh
+./xe run examples/feature_check/main.xe -- check
+./xe run examples/feature_check/main.xe -- echo "你好 Xe" ""
+./xe run examples/feature_check/main.xe
+```
+
+最后一行进入交互模式，保留终端提示和颜色；新入口默认产物位于本例的 target，
+不改变下方旧 Makefile 入口的 target/debug/xe-feature-check 路径。
 
 从仓库根目录构建并运行：
 

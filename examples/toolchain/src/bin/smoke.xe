@@ -1,0 +1,12 @@
+//! 目前不增加测试语法；通过普通 main 的退出码验收。
+use crate::math::square;
+
+fn main() -> i32 {
+    if square(7) == 49 and square(0) == 0 {
+        println("PASS square");
+        0
+    } else {
+        eprintln("FAIL square");
+        1
+    }
+}

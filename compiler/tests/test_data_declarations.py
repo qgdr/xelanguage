@@ -1,7 +1,8 @@
 """数据声明的专门回归：既检查 AST 形状，也检查对应语义/能力边界。"""
-from pathlib import Path
 import unittest
-from compiler.xe_ast import parse_source, check_source
+from pathlib import Path
+
+from compiler.xe_ast import check_source, parse_source
 
 ROOT = Path(__file__).resolve().parents[2]
 

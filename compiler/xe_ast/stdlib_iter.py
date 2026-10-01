@@ -6,7 +6,6 @@ FromFn[F] 的 F 是具体回调类型（可为匿名闭包），不是元素类�
 """
 from .typesys import Type
 
-
 FROM_FN = "std::iter::from_fn"
 
 

@@ -3,14 +3,22 @@
 复用已有资源临时变量与活跃标记，成功才转交；失败立即清理普通
 实参。线程入口拥有闭包环境，线程结果归 join 或句柄析构二选一。
 """
-from .typesys import Type, NEVER
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from .backend_c import CBackend
+
+from .typesys import NEVER
 
 
 class SyncBackend:
+    # 与容器辅助类相同，只用于 CBackend；保留对宿主方法的真实类型检查。
     def sync_value_drop(self, owner):
+        self = cast("CBackend", self)
         return self.container_helper(owner) + "_value"
 
     def sync_new(self, node, owner):
+        self = cast("CBackend", self)
         element = owner.args[0]
         value = self.argument(self.expression(node["arguments"][0], element))
         if value.type == NEVER:
@@ -51,6 +59,7 @@ class SyncBackend:
 
     def sync_container_body(self, type_, name):
         """与 Vec/Box 共用清理缓存，跨容器递归仍先原型后函数体。"""
+        self = cast("CBackend", self)
         element = type_.args[0]
         if type_.name in {"Shared", "Mutex"}:
             self.line(f"static void {name}_value(void *data) {{")
@@ -71,6 +80,7 @@ class SyncBackend:
         self.line("}")
 
     def sync_method(self, node, base, pointer, name, receiver):
+        self = cast("CBackend", self)
         result_type = self.type_at(node)
         state = f"({pointer})->state"
         element = base.args[0]
@@ -114,6 +124,7 @@ class SyncBackend:
         self.fail(node, f"并发接口 {base}::{name} 尚未实现")
 
     def thread_spawn(self, node, owner):
+        self = cast("CBackend", self)
         callback = self.argument(self.expression(node["arguments"][0]))
         if callback.type == NEVER:
             return callback
@@ -160,6 +171,7 @@ class SyncBackend:
         return result
 
     def emit_thread_jobs(self):
+        self = cast("CBackend", self)
         saved_lines, saved_indent = self.lines, self.indent
         prototypes, bodies = [], []
         for (callback, element), name in self.thread_jobs.items():

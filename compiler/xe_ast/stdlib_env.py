@@ -7,7 +7,6 @@
 from .stdlib import StandardFunction
 from .typesys import IO_ERROR, STR, Type, maybe
 
-
 ENV_ARGS_RESULT = maybe(Type("Slice", (STR,)), IO_ERROR)
 ENV_FUNCTIONS = {"std::env::args": StandardFunction((), ENV_ARGS_RESULT)}
 

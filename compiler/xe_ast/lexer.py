@@ -3,8 +3,10 @@
 这里没有自造 DFA 等复杂算法；正则匹配数字，少量状态处理字符串和嵌套注释。
 词法单元始终携带原文与范围，Literal AST 保存 raw，防止大整数或转义损失。
 """
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
+from typing import NoReturn
+
 from .source import Diagnostic, Source
 
 KEYWORDS = set("""let var const fn return if else while for in break continue
@@ -34,7 +36,7 @@ class Lexer:
         self.tokens: list[Token] = []
         self.comments: list[dict] = []
 
-    def fail(self, start: int, end: int, message: str) -> None:
+    def fail(self, start: int, end: int, message: str) -> NoReturn:
         raise Diagnostic(self.source, start, end, message, "XE-LEX-0001")
 
     def scan(self) -> list[Token]:

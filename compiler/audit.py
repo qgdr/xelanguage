@@ -9,15 +9,15 @@
 未实现由编译器能力诊断码识别；普通类型/所有权错误不会冒充未实现。
 """
 import argparse
-from collections import Counter
 import hashlib
 import json
 import math
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
+from pathlib import Path
 
 # 兼容直接运行脚本和 python -m；不依赖当前工作目录恰好是仓库根目录。
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +27,10 @@ if __package__ in {None, ""}:
 from compiler.xe_ast.ast import SYNTAX_VERSION
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import atomic_text, protect_source
-from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.modules import load_program
+from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
-from compiler.xe_ast.source import Diagnostic, Source
+from compiler.xe_ast.source import Diagnostic
 
 PHASES = ("ast", "semantic", "c", "compile", "run")
 CAPABILITY_CODES = {"XE-SEM-0001", "XE-BACKEND-0001"}

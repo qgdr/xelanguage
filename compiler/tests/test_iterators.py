@@ -1,9 +1,9 @@
 """迭代协议与闭包回调：实际执行、退出清理及类型错误都要验收。"""
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -12,7 +12,7 @@ from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 COUNTER = '''struct Counter { current: i32, end: i32, }
 impl Counter { fn next(self: Self@[mut]) -> Step[i32] {
     if self.current >= self.end { Step::Stop } else {

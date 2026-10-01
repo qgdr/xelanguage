@@ -1,8 +1,8 @@
 """前端契约测试：只验证 AST/语法，不把语义错误当语法错误。"""
-from pathlib import Path
 import unittest
-from compiler.xe_ast import Diagnostic, Source, parse_source
-from compiler.xe_ast.lexer import Lexer
+from pathlib import Path
+
+from compiler.xe_ast import Diagnostic, parse_source
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -138,6 +138,7 @@ class DeclarationTests(unittest.TestCase):
         with self.assertRaises(Diagnostic) as caught:
             parse_source("fn identity[T](value: T) -> T { value }")
         self.assertIn("已移动到 fn 后", caught.exception.message)
+        assert caught.exception.hint is not None
         self.assertIn("fn[T] identity", caught.exception.hint)
 
     def test_generic_closures_not_declared_and_captures_unchanged(self):

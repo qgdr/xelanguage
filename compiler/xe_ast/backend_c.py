@@ -6,19 +6,36 @@
 这样条件移动、提前返回及部分字段移动不需要依赖 Python 的线性分析状态。
 未支持的节点必须报诊断，不能产生空代码或忽略语义。
 """
-from dataclasses import dataclass, field
-from pathlib import Path
 import string
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from pathlib import Path
+from typing import NoReturn
+
+from .backend_containers import ContainerBackend
+from .backend_globals import GlobalBackend, literal_string
+from .backend_sync import SyncBackend
 from .parser import parse_source
 from .semantic import Checker, Signature
-from .source import Source
-from .stdlib_io import IO_NATIVE_FUNCTIONS, normalize_io_name
-from .stdlib_env import env_function
-from .stdlib_iter import FROM_FN, callback_type, next_result
-from .backend_containers import ContainerBackend
-from .backend_sync import SyncBackend
 from .semantic_sync import SYNC_TYPES
-from .typesys import Type, UNIT, NEVER, BOOL, STR, STRING, NONE, INT_LITERAL, I32, NUMERIC, ptr, substitute
+from .source import Source
+from .stdlib_env import env_function
+from .stdlib_io import IO_NATIVE_FUNCTIONS, normalize_io_name
+from .stdlib_iter import FROM_FN, callback_type, next_result
+from .typesys import (
+    BOOL,
+    I32,
+    INT_LITERAL,
+    NEVER,
+    NONE,
+    NUMERIC,
+    STR,
+    STRING,
+    UNIT,
+    Type,
+    ptr,
+    substitute,
+)
 
 
 class AnnotatedChecker(Checker):
@@ -49,7 +66,7 @@ class AnnotatedChecker(Checker):
 class Slot:
     name: str
     type: Type
-    flags: dict[tuple[str, ...], str] = field(default_factory=dict)
+    flags: dict[tuple[str, ...], str] = dataclass_field(default_factory=dict)
     order: str | None = None
     epoch: str | None = None
     # 捕获环境的非拥有字段别名不参与当前函数的 Drop；原位替换仍要释放旧值。
@@ -66,8 +83,8 @@ class CValue:
 
 @dataclass
 class Scope:
-    names: dict[str, Slot] = field(default_factory=dict)
-    owned: list[Slot] = field(default_factory=list)
+    names: dict[str, Slot] = dataclass_field(default_factory=dict)
+    owned: list[Slot] = dataclass_field(default_factory=list)
     epoch: str | None = None
 
 
@@ -76,20 +93,14 @@ def identifier(name):
     return "xe_" + "".join(c if c.isascii() and c.isalnum() else f"_{ord(c):x}_" for c in name)
 
 
-def literal_string(text):
-    data = text.encode("utf-8")
-    # 三位八进制转义不会像 \\x 那样吞掉后续十六进制字符。
-    encoded = "".join(f"\\{byte:03o}" for byte in data)
-    return f'(XeStr){{(const unsigned char *)"{encoded}", {len(data)}}}'
-
-
-class CBackend(SyncBackend, ContainerBackend):
-    def __init__(self, checker):
+class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
+    def __init__(self, checker: AnnotatedChecker):
         self.checker = checker
         self.tree = checker.tree
         self.lines, self.scopes, self.loop_scopes = [], [], []
+        self.global_slots = {}
         self.counter, self.indent = 0, 0
-        self.signature = None
+        self.signature: Signature | None = None
         self.definitions, self.defining = {}, set()
         self.tuple_names, self.layout_types = {}, {}
         self.function_typedefs, self.function_typedef_names = {}, {}
@@ -102,7 +113,7 @@ class CBackend(SyncBackend, ContainerBackend):
         self.thread_jobs, self.thread_definitions = {}, {}
         self.sync_used = False
 
-    def fail(self, node, message):
+    def fail(self, node, message) -> NoReturn:
         self.checker.fail(node, message, "XE-BACKEND-0001",
                           "该程序可能已通过语义检查，但此功能尚未接入 C 后端")
 
@@ -395,7 +406,12 @@ class CBackend(SyncBackend, ContainerBackend):
         for scope in reversed(self.scopes):
             if name in scope.names:
                 return self.value(scope.names[name])
-        self.fail(node, f"后端找不到局部变量 {name}")
+        if name in self.global_slots:
+            return self.value(self.global_slots[name])
+        self.fail(node, f"后端找不到变量 {name}")
+
+    def global_field_name(self, name):
+        return identifier(name)
 
     def field_code(self, code, path):
         for name in path:
@@ -660,6 +676,7 @@ class CBackend(SyncBackend, ContainerBackend):
                 if not target.path:
                     self.initialized(target.slot)
         elif kind == "Return":
+            assert self.signature is not None
             value = self.expression(node["value"], self.signature.result) if node["value"] else CValue("0", UNIT)
             returned = self.storage(self.signature.result, "early_return")
             self.assign(returned, value, node)
@@ -711,6 +728,7 @@ class CBackend(SyncBackend, ContainerBackend):
                 self.scopes[-1].names[target["name"]] = slot
             else:
                 slot = self.lookup(target["name"], target).slot
+                assert slot is not None  # lookup 成功必然返回具名变量的存储位置。
                 if not self.checker.copyable(slot.type):
                     self.cleanup_slot(slot)
                 self.assign(slot, member, target)
@@ -749,6 +767,8 @@ class CBackend(SyncBackend, ContainerBackend):
             parts = node["path"]["parts"]
             name = "::".join(parts)
             if len(parts) == 1 and any(name in scope.names for scope in self.scopes):
+                return self.lookup(name, node)
+            if name in self.global_slots:
                 return self.lookup(name, node)
             if name in self.checker.functions:
                 return self.temp(type_, self.function_name(name))
@@ -1001,6 +1021,7 @@ class CBackend(SyncBackend, ContainerBackend):
         self.indent += 1
         self.scopes.append(Scope())
         if propagate:
+            assert self.signature is not None  # 传播只在正在生成的函数体中出现。
             returned = self.storage(self.signature.result, "propagated_error",
                                     f"({self.ctype(self.signature.result)}){{.tag = 1}}")
             if subject.type.args[1] != NONE:
@@ -1147,6 +1168,7 @@ class CBackend(SyncBackend, ContainerBackend):
         if signature.generics:
             self.fail(signature.node, "泛型调用实例化尚未接入 C 后端")
         if values is None:
+            assert nodes is not None  # 调用入口必须提供 AST 或已求值的实参。
             values = []
             for argument, parameter in zip(nodes, signature.parameters):
                 value = self.expression(argument, parameter)
@@ -1230,6 +1252,7 @@ class CBackend(SyncBackend, ContainerBackend):
         if callable_type.name not in {"fn", "closure"}:
             self.fail(node, "此值没有已验证的函数或闭包调用类型")
         if values is None:
+            assert nodes is not None
             values = []
             for argument, parameter in zip(nodes, callable_type.args[:-1]):
                 value = self.expression(argument, parameter)
@@ -1422,7 +1445,7 @@ class CBackend(SyncBackend, ContainerBackend):
             function = self.callable_argument(self.expression(callee), node)
             return self.invoke_function_value(function, node, nodes=node["arguments"])
         name = "::".join(callee["path"]["parts"])
-        if any(name in scope.names for scope in self.scopes):
+        if any(name in scope.names for scope in self.scopes) or name in self.global_slots:
             function = self.callable_argument(self.expression(callee), node)
             return self.invoke_function_value(function, node, nodes=node["arguments"])
         if name in self.checker.functions:
@@ -1814,11 +1837,13 @@ class CBackend(SyncBackend, ContainerBackend):
         return CValue("0", UNIT)
 
     def generate(self):
+        for name, binding in getattr(self.checker, "globals", {}).items():
+            self.global_slots[name] = Slot(identifier("global_" + name), binding.type)
         for item in self.tree["items"]:
             if item["kind"] == "Constant":
                 value = item["value"]
                 if value["kind"] != "Literal" and not (value["kind"] == "Unary" and value["operand"]["kind"] == "Literal"):
-                    self.fail(item, "首版后端的 const 只支持字面量及其一元正负号，不重复执行常量初始化函数")
+                    self.fail(item, "首版后端的模块级只读绑定只支持字面量及其一元正负号，不重复执行常量初始化函数")
         for name, declaration in self.checker.types.items():
             if not declaration.get("generics") and declaration["kind"] in {"Struct", "Enum"}:
                 self.define_type(name)
@@ -1828,6 +1853,10 @@ class CBackend(SyncBackend, ContainerBackend):
         signatures += [(self.method_name(owner, n), s) for (owner, n), s in self.checker.methods.items()
                        if not s.generics]
         prototypes = [self.prototype(s, n) + ";" for n, s in signatures]
+        # Register all storage before rendering any address initializers. Rendering
+        # layouts here also ensures every global type reaches the definition table.
+        global_declarations = self.global_declarations()
+        global_definitions = self.global_definitions()
         main = self.checker.functions.get("main")
         if not main or main.parameters or main.generics or main.result not in {UNIT, I32}:
             self.fail(self.tree, "可执行入口必须为 fn main() 或 fn main() -> i32")
@@ -1892,6 +1921,8 @@ class CBackend(SyncBackend, ContainerBackend):
                 "\n\n".join(self.io_function_definitions.values()) + "\n\n" +
                 "\n\n".join(self.env_function_definitions.values()) + "\n\n" +
                 "\n".join(prototypes + container_prototypes + thread_prototypes) + "\n\n" +
+                "\n".join(global_declarations) + "\n\n" +
+                "\n".join(global_definitions) + "\n\n" +
                 "\n\n".join(container_bodies + thread_bodies) + "\n\n" + "\n".join(self.lines) + "\n")
 
 

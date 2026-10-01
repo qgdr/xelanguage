@@ -4,12 +4,12 @@
 计数器观察 Drop 时机，ASan/UBSan 同时检查资源字段的重复释放和遗漏清理。
 """
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -17,8 +17,7 @@ from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
-
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 TRACKED = '''struct Tracked {counter:i32@[mut],weight:i32,text:String,}
 impl Drop for Tracked {
     fn drop(self:Self@[mut]){self.counter#=self.counter#+self.weight;}

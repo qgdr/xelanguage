@@ -1,18 +1,18 @@
 """用真实 Xe 项目验收编译器，而非只对 AST 或生成 C 做字符串断言。"""
-from pathlib import Path
 import json
 import random
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "examples/calculator/main.xe"
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class CalculatorProjectTests(unittest.TestCase):

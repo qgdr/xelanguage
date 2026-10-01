@@ -1,19 +1,19 @@
 """可变声明的公开附件与隐藏别名：解析、语义、真正编译执行。"""
-from pathlib import Path
 import contextlib
 import io
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast import Diagnostic, parse_source
-from compiler.xe_ast.semantic import check_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.cli import main
+from compiler.xe_ast.semantic import check_source
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 def shape(value):

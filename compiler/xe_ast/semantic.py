@@ -4,20 +4,44 @@
 地址来源分析只产生 warning，不把普通指针当作独占借用，也不证明内存安全。
 类型、写权限和资源所有权错误仍然阻止编译。标准库接口有明确白名单。
 """
-from copy import deepcopy
-from dataclasses import dataclass, field
 import string
-from typing import Any
+from copy import deepcopy
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from typing import Any, NoReturn
+
 from .parser import parse_source
-from .source import Source, Diagnostic
-from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
+from .semantic_globals import GlobalChecker
+from .semantic_sync import SYNC_MARKERS, SYNC_TYPES, SyncChecker
+from .source import Diagnostic, Source
 from .stdlib_env import env_function
+from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
 from .stdlib_iter import FROM_FN, callback_type, next_result
-from .semantic_sync import SyncChecker, SYNC_TYPES, SYNC_MARKERS
 from .typesys import (
-    Type, NUMERIC, PRIMITIVES, STANDARD, UNIT, NEVER, BOOL, STR, I32, USIZE,
-    INT_LITERAL, UNKNOWN, NONE, STRING, FILE, IO_ERROR, CONVERSION_ERROR,
-    ptr, maybe, callable_type, substitute, has_unsafe, mark_unsafe, merge_unsafe,
+    BOOL,
+    CONVERSION_ERROR,
+    FILE,
+    I32,
+    INT_LITERAL,
+    IO_ERROR,
+    NEVER,
+    NONE,
+    NUMERIC,
+    PRIMITIVES,
+    STANDARD,
+    STR,
+    STRING,
+    UNIT,
+    UNKNOWN,
+    USIZE,
+    Type,
+    callable_type,
+    has_unsafe,
+    mark_unsafe,
+    maybe,
+    merge_unsafe,
+    ptr,
+    substitute,
 )
 
 Node = dict[str, Any]
@@ -54,7 +78,7 @@ class Binding:
     mutable: bool = False
     initialized: bool = True
     moved: bool = False
-    moved_fields: set[tuple[str, ...]] = field(default_factory=set)
+    moved_fields: set[tuple[str, ...]] = dataclass_field(default_factory=set)
     origins: tuple[tuple[int, bool], ...] = ()
     last_use: int = -1
     parameter: bool = False
@@ -68,13 +92,13 @@ class Signature:
     node: Node
     parameters: list[Type]
     result: Type
-    generics: set[str] = field(default_factory=set)
+    generics: set[str] = dataclass_field(default_factory=set)
     self_type: Type | None = None
     # None 表示尚未分析/外部函数，保守依赖所有借用输入。
     # 本地函数检查后记录返回结果依赖的参数位置，包含错误路径。
     borrow_parameters: frozenset[int] | None = None
     unsafe_result: bool = False
-    type_substitutions: dict[str, Type] = field(default_factory=dict)
+    type_substitutions: dict[str, Type] = dataclass_field(default_factory=dict)
     instance_context: str | None = None
 
 
@@ -116,7 +140,7 @@ def names_used(node: Any) -> dict[str, int]:
     return result
 
 
-class Checker(SyncChecker):
+class Checker(SyncChecker, GlobalChecker):
     def __init__(self, source: Source, tree: Node, check_borrows: bool = True):
         # 旧参数仅为调用兼容保留；写权限和所有权始终检查，不再切换借用模式。
         self.source, self.tree, self.check_borrows = source, tree, True
@@ -129,6 +153,10 @@ class Checker(SyncChecker):
         self.functions: dict[str, Signature] = {}
         self.methods: dict[tuple[str, str], Signature] = {}
         self.constants: dict[str, Value] = {}
+        # 静态存储与函数局部存储分开：没有函数退出 Drop，也不随调用重建。
+        # 每个全局有稳定 uid，地址来源分析不能把它误当成返回的栈地址。
+        self.globals: dict[str, Binding] = {}
+        self.static_roots: set[int] = set()
         self.drop_types: set[str] = set()
         self.copy_types: set[str] = set()
         self.scopes: list[dict[str, Binding]] = []
@@ -235,7 +263,7 @@ class Checker(SyncChecker):
         self.fail(node, "这里需要具体类型参数（例如 i32、String、i32@ 或 Holder[i32]）",
                   "XE-GENERIC-0001")
 
-    def specialize_node(self, node, substitutions, self_type=None):
+    def specialize_node(self, node, substitutions, self_type=None) -> Any:
         """递归替换类型及类型限定路径，不替换同名的普通值变量。"""
         if isinstance(node, list):
             return [self.specialize_node(n, substitutions, self_type) for n in node]
@@ -366,7 +394,7 @@ class Checker(SyncChecker):
         self.functions[name] = concrete
         return concrete
 
-    def fail(self, node: Node, message: str, code="XE-TYPE-0001", hint=None):
+    def fail(self, node: Node, message: str, code="XE-TYPE-0001", hint=None) -> NoReturn:
         span = node["span"]
         for internal, display in sorted(self.tree.get("_display_names", {}).items(), key=lambda item: -len(item[0])):
             message = message.replace(internal, display)
@@ -432,8 +460,9 @@ class Checker(SyncChecker):
         binding.type = mark_unsafe(binding.type)
         self.record_type(binding.node, binding.type, binding.name)
         # C 后端的声明侧表也更新；风险不改变底层类型或布局。
-        if hasattr(self, "binding_types"):
-            self.binding_types[id(binding.node)] = binding.type
+        binding_types: dict[int, Type] | None = getattr(self, "binding_types", None)
+        if binding_types is not None:
+            binding_types[id(binding.node)] = binding.type
 
     def invalidate_storage(self, uid, node, reason, exclude_uids=()):
         """移动、替换或作用域结束可能使地址失效；别名本身并不是错误。"""
@@ -607,7 +636,7 @@ class Checker(SyncChecker):
     def collect(self):
         seen = set()
         for node in self.tree["items"]:
-            if node["kind"] in {"Struct", "Enum", "Trait", "Function", "Constant", "TypeAlias"}:
+            if node["kind"] in {"Struct", "Enum", "Trait", "Function", "Constant", "TypeAlias", "GlobalBinding"}:
                 name = node["name"]
                 if name in seen:
                     self.fail(node, f"顶层名称 {name} 重复", "XE-NAME-0002")
@@ -770,12 +799,32 @@ class Checker(SyncChecker):
     def check(self) -> list[Diagnostic]:
         try:
             self.collect()
+            # 先注册所有全局类型/位置，再检查初值，允许静态地址引用后声明对象。
+            for node in self.tree["items"]:
+                if node["kind"] != "GlobalBinding":
+                    continue
+                type_ = self.type_of(node["type"])
+                if not self.copyable(type_):
+                    self.fail(node, "当前全局变量只支持 Copy 类型；资源的全局初始化与退出清理尚未实现",
+                              "XE-GLOBAL-0001", "把 String、Vec 等资源在函数内创建，通过参数传递")
+                self.uid += 1
+                self.globals[node["name"]] = Binding(self.uid, node["name"], type_, node, mutable=True)
+                self.static_roots.add(self.uid)
+                self.record_type(node, type_, node["name"])
             for node in self.tree["items"]:
                 if node["kind"] == "Constant":
                     value = self.infer(node["value"], self.type_of(node["type"]))
                     self.constants[node["name"]] = self.convert(value, self.type_of(node["type"]))
                     if not self.copyable(value.type):
-                        self.fail(node, "当前 const 只支持可复制值；资源请在函数内创建", "XE-SEM-0001")
+                        self.fail(node, "当前模块级只读绑定只支持可复制值；资源请在函数内创建", "XE-SEM-0001")
+            for binding in self.globals.values():
+                node = binding.node
+                self.static_initializer(node["value"])
+                value = self.convert(self.infer(node["value"], binding.type), binding.type)
+                self.check_static_numbers(node["value"], binding.type)
+                binding.origins = value.origins
+                binding.type = value.type
+                self.record_type(node, binding.type, binding.name)
         except Diagnostic as error:
             return [error]
         def concrete_signatures():
@@ -829,7 +878,7 @@ class Checker(SyncChecker):
         self.result = signature.result
         self.last_uses = names_used(signature.node["body"])
         self.loop_depths, self.temporary_loans = [], []
-        self.parameter_roots = set()
+        self.parameter_roots = set(self.static_roots)
         self.return_origins = set()
         self.invalid_roots = {}
         self.function_unsafe_return = False
@@ -877,7 +926,7 @@ class Checker(SyncChecker):
         return binding
 
     def lookup(self, name, node, read=True, partial=False):
-        binding = next((scope[name] for scope in reversed(self.scopes) if name in scope), None)
+        binding = next((scope[name] for scope in reversed(self.scopes) if name in scope), self.globals.get(name))
         if binding is None:
             self.fail(node, f"未定义名称 {name}", "XE-NAME-0001")
         if read:
@@ -888,7 +937,8 @@ class Checker(SyncChecker):
         return binding
 
     def by_uid(self, uid):
-        return next((b for scope in self.scopes for b in scope.values() if b.uid == uid), None)
+        return next((b for scope in self.scopes for b in scope.values() if b.uid == uid),
+                    next((b for b in self.globals.values() if b.uid == uid), None))
 
     def bindings(self):
         return {b.uid: b for scope in self.scopes for b in scope.values()}
@@ -949,7 +999,7 @@ class Checker(SyncChecker):
     def escape(self, value, leaving=None, function_exit=False):
         leaving = leaving or set()
         for uid, _ in value.origins:
-            if uid in leaving or (function_exit and uid not in self.parameter_roots):
+            if uid in leaving or (function_exit and uid not in self.parameter_roots and uid not in self.static_roots):
                 self.warn_pointer(value, "地址或视图可能超过所指存储的生存时间", "XE-PTR-0001")
                 break
         if function_exit and has_unsafe(value.type):
@@ -1142,7 +1192,12 @@ class Checker(SyncChecker):
         if node["kind"] == "Group":
             return self.place(node["expression"], read)
         if node["kind"] == "Name" and len(node["path"]["parts"]) == 1:
-            binding = self.lookup(node["path"]["parts"][0], node, read, partial=True)
+            name = node["path"]["parts"][0]
+            # 模块只读值有名称，但没有局部变量的可写/可取址存储。
+            # 先尊重局部遮蔽，再用普通值诊断非法写入，而非谎报“未定义”。
+            if name in self.constants and not any(name in scope for scope in self.scopes):
+                return self.infer(node)
+            binding = self.lookup(name, node, read, partial=True)
             return Value(binding.type, node, (binding.uid, ()), binding.origins,
                          borrowed=binding.capture_borrowed, access_uid=binding.uid,
                          writable=binding.capture_writable if binding.capture_borrowed else None)
@@ -1168,11 +1223,16 @@ class Checker(SyncChecker):
         source_node = node["left"] if operator == ">>" else node["right"]
         target = self.place(target_node, read=False)
         binding = self.by_uid(target.place[0]) if target.place else None
-        initializing = bool(binding and not binding.initialized and not target.place[1])
+        initializing = bool(binding and not binding.initialized and target.place and not target.place[1])
         if not initializing and not self.mutable_place(target):
             self.fail(target_node, "不能修改不可变绑定或只读指针", "XE-MUT-0001")
         self.note_closure_access(target, "mut")
         value = self.convert(self.infer(source_node, target.type), target.type)
+        if binding and binding.uid in self.static_roots and any(
+                uid not in self.static_roots for uid, _ in value.origins):
+            # 即便写在自己的函数体里，这些地址会在函数返回后留在全局对象中。
+            # 普通指针风险依旧只 warning；不会阻止编译，也不延长局部对象生命。
+            self.warn_pointer(value, "写入全局变量的地址或视图可能比所指对象活得更久", "XE-PTR-0001")
         # 写入发生在右侧求值完成之后。仍活跃的共享借用不能被写操作绕过，
         # 但仅在右侧最后一次使用的借用可以在真正写入前结束。
         write_origins = (target.origins if target.borrowed else
@@ -1209,6 +1269,7 @@ class Checker(SyncChecker):
         if target.place and not target.borrowed:
             self.loan(((target.place[0], True),), node, exclude=target.access_uid)
         if binding and not target.borrowed:
+            assert target.place is not None  # binding 由这个具名位置查询而得。
             if not initializing and not self.copyable(target.type):
                 self.invalidate_storage(binding.uid, node, "已被替换，旧资源可能已析构")
             binding.initialized, binding.moved = True, False
@@ -1323,7 +1384,7 @@ class Checker(SyncChecker):
             return Value(NONE, node)
         if kind == "Name":
             name = "::".join(node["path"]["parts"])
-            if len(node["path"]["parts"]) == 1 and any(name in s for s in self.scopes):
+            if len(node["path"]["parts"]) == 1 and (name in self.globals or any(name in s for s in self.scopes)):
                 binding = self.lookup(name, node)
                 if binding.type.name != "ptr":
                     self.loan(((binding.uid, False),), node, exclude=binding.uid)
@@ -1446,6 +1507,7 @@ class Checker(SyncChecker):
                 fields = {f["name"]: f for f in definition.get("fields", [])} if definition else {}
                 if node["field"] not in fields:
                     self.fail(node, f"{base} 没有字段 {node['field']}", "XE-NAME-0001")
+                assert definition is not None
                 self.member_access(fields[node["field"]], node)
                 field_type = self.type_of(fields[node["field"]]["type"], self.generic_set(definition))
                 field_type = substitute(field_type, {"$"+p["name"]: t for p, t in
@@ -1545,7 +1607,11 @@ class Checker(SyncChecker):
             else:
                 if not values and (value_expected is None or value_expected.name != "Array"):
                     self.fail(node, "空数组需要显式 Array[T, 0] 类型注解")
-                common = self.common(values, node) if values else Value(value_expected.args[0], node)
+                if values:
+                    common = self.common(values, node)
+                else:
+                    assert value_expected is not None  # 上方已拒绝无类型注解的空数组。
+                    common = Value(value_expected.args[0], node)
                 if common.type == INT_LITERAL:
                     self.convert(common, I32)
                 type_ = Type("Array", (self.default(common.type), Type(str(len(values)))))
@@ -1711,6 +1777,7 @@ class Checker(SyncChecker):
             if signature:
                 self.member_access(signature.node, node)
             if signature and owner:
+                assert signature.self_type is not None
                 substitutions = {}
                 self.unify_generic(signature.self_type, owner, substitutions, node)
                 if substitute(signature.self_type, substitutions) != owner:
@@ -1722,6 +1789,7 @@ class Checker(SyncChecker):
             signature = self.methods.get((owner.name, node["member"]))
             if not signature:
                 return None
+            assert signature.self_type is not None
             self.member_access(signature.node, node)
             substitutions = {}
             self.unify_generic(signature.self_type, owner, substitutions, node)
@@ -1761,12 +1829,14 @@ class Checker(SyncChecker):
         base = value.type.args[0] if value.type.name == "ptr" else value.type
         if base.name not in {"Array", "Slice", "SliceMut", "Vec"} or len(node["arguments"]) != 1:
             self.fail(node, "此处 [] 只能构造枚举载荷或索引数组/切片", "XE-SEM-0001")
+        assert base.args  # 这些容器类型均已解析出元素类型。
+        element_type = base.args[0]
         index = self.infer(node["arguments"][0], USIZE)
         self.convert(index, USIZE)
         if base.name == "Array" and isinstance(index.literal, int) and len(base.args) > 1:
             if not 0 <= index.literal < int(base.args[1].name):
                 self.fail(node, "数组索引越界", "XE-TYPE-0004")
-        origins = value.origins
+        origins: tuple[tuple[int, bool], ...] = value.origins
         if base.name in {"Array", "Vec"} and value.place and not value.borrowed and value.type.name != "ptr":
             owner = self.by_uid(value.place[0])
             origins = tuple(set(origins + ((value.place[0], bool(owner and owner.mutable)),)))
@@ -1780,7 +1850,6 @@ class Checker(SyncChecker):
         writable = (False if base.name == "Slice" else
                     value.type.mutable if value.type.name == "ptr" else
                     base.name == "SliceMut" or self.mutable_place(value))
-        element_type = base.args[0]
         if has_unsafe(value.type) and self.carries_borrow(element_type):
             element_type = mark_unsafe(element_type)
         return Value(element_type, node, value.place, origins, borrowed=True,
@@ -1850,7 +1919,7 @@ class Checker(SyncChecker):
             name = "::".join(callee["path"]["parts"])
             if self.variant(name, expected, callee, True):
                 self.fail(node, "枚举载荷使用 []，不是函数调用 ()", "XE-TYPE-0005", "例如 Token::Integer[42]")
-            local = any(name in scope for scope in self.scopes)
+            local = name in self.globals or any(name in scope for scope in self.scopes)
             if name in self.functions and not local:
                 return self.apply_signature(self.functions[name], node["arguments"], node)
             if "::" in name:
@@ -2101,6 +2170,7 @@ class Checker(SyncChecker):
         receiver = self.place(callee["object"])
         base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
         name = callee["field"]
+        element = base.args[0] if base.args else I32
         if base.name in {"FromFn", "Bytes", "Chars"} and name == "next":
             if nodes or type_arguments is not None:
                 self.fail(node, "next() 不接受参数或类型附件", "XE-CALL-0001")
@@ -2118,6 +2188,7 @@ class Checker(SyncChecker):
         if signature:
             if not signature.parameters or signature.node["parameters"][0]["name"] != "self":
                 self.fail(node, "关联函数不能使用对象调用", "XE-CALL-0001")
+            assert signature.self_type is not None
             substitutions = {}
             self.unify_generic(signature.self_type, base, substitutions, node)
             owner = substitute(signature.self_type, substitutions)
@@ -2149,7 +2220,7 @@ class Checker(SyncChecker):
                 # 只有非 Copy 的 self: Self 才需要资源所有权而被拒绝。
                 receiver = Value(base, receiver.node, receiver.place, receiver.origins, True, receiver.access_uid)
             result = self.apply_signature(signature, nodes, node, substitutions, [receiver])
-            concrete = self.functions.get(self.call_targets.get(id(node)), signature)
+            concrete = self.functions.get(self.call_targets.get(id(node), ""), signature)
             depends_on_receiver = concrete.borrow_parameters is None or 0 in concrete.borrow_parameters
             if (temporary_receiver and self_parameter.name == "ptr" and self.carries_borrow(result.type)
                     and (depends_on_receiver or not self.copyable(base))):
@@ -2158,7 +2229,6 @@ class Checker(SyncChecker):
         elif base.name == "maybe" and name == "expect":
             parameters, result, owning = [STR], base.args[0], True
         else:
-            element = base.args[0] if base.args else I32
             table = {
                 ("String", "len"): ([], USIZE, False), ("str", "len"): ([], USIZE, False),
                 ("Array", "len"): ([], USIZE, False),
@@ -2418,6 +2488,7 @@ class Checker(SyncChecker):
 
     def loop(self, node):
         source, element, iterator = None, None, False
+        signature: Signature | None = None
         if node["kind"] != "While":
             source = self.infer(node["source"])
             if source.type == NEVER:
@@ -2440,6 +2511,7 @@ class Checker(SyncChecker):
                     result = Type("Step", (Type("u8" if base.name == "Bytes" else "char"),))
                     self.for_iterators[id(node)] = base.name
                 elif signature:
+                    assert signature.self_type is not None
                     substitutions = {}
                     self.unify_generic(signature.self_type, base, substitutions, node)
                     if (len(signature.parameters) != 1 or
@@ -2448,7 +2520,7 @@ class Checker(SyncChecker):
                         self.fail(node, "迭代器需要 fn next(self: Self@[mut]) -> Step[T]", "XE-ITER-0001")
                     result = self.apply_signature(signature, [], node, substitutions,
                         [Value(ptr(base, True), node, origins=source.origins)]).type
-                    self.for_iterators[id(node)] = self.functions.get(self.call_targets.get(id(node)), signature)
+                    self.for_iterators[id(node)] = self.functions.get(self.call_targets.get(id(node), ""), signature)
                 else:
                     self.fail(node, "for 需要范围、数组、切片或提供 next(self: Self@[mut]) -> Step[T] 的对象",
                               "XE-ITER-0001")
@@ -2467,6 +2539,7 @@ class Checker(SyncChecker):
         if node["kind"] == "While":
             self.convert(self.infer(node["condition"]), BOOL)
         else:
+            assert source is not None and element is not None  # for 的源与元素已在上方解析。
             annotation = self.type_of(node["type"]) if node["type"] else self.default(element)
             self.convert(Value(element, node), annotation)
             origins = source.origins
@@ -2474,8 +2547,10 @@ class Checker(SyncChecker):
                 owner = self.declare("$iteration-owner", source.type, node, mutable=True, origins=origins)
                 if source.type.name == "FromFn":
                     origins = self.from_fn_result(Value(source.type, node, (owner.uid, ()), origins), node).origins
-                elif self.carries_borrow(element) and (signature.borrow_parameters is None or 0 in signature.borrow_parameters):
-                    origins = tuple(set(origins + ((owner.uid, False),)))
+                elif self.carries_borrow(element):
+                    assert signature is not None  # 内置 Bytes/Chars 只产生基本类型。
+                    if signature.borrow_parameters is None or 0 in signature.borrow_parameters:
+                        origins = tuple(set(origins + ((owner.uid, False),)))
             elif iterator and source.type.name == "ptr" and source.type.args[0].name == "FromFn":
                 origins = self.from_fn_result(source, node).origins
             elif element.name == "ptr" and source.type.name in {"Array", "Vec"} and not source.place:
@@ -2535,7 +2610,7 @@ class Checker(SyncChecker):
         try:
             self.scopes, self.result = [{}], self.type_of(node["result"])
             self.last_uses, self.loop_depths, self.temporary_loans = names_used(node["body"]), [], []
-            self.parameter_roots = {uid for _, value in captures for uid, _ in value.origins}
+            self.parameter_roots = self.static_roots | {uid for _, value in captures for uid, _ in value.origins}
             self.return_origins, self.invalid_roots = set(), {}
             self.function_unsafe_return = False
             self._closure_bindings, self._closure_mode = {}, "read"

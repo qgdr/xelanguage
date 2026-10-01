@@ -9,9 +9,14 @@ Trait 属于目标语言，当前主要实现 Copy、Drop 和 Copy 泛型约束�
 
 ## 当前状态
 
-`doc/` 描述目标语言规范；当前编译器位于 `compiler/`，实现 AST、语义检查和第一版
-C 后端，尚未覆盖完整规范。旧版 `excompiler/` 和根目录 `main.py` 已移除并加入忽略规则；
+`doc/` 描述目标语言规范；Python stage0 位于 `compiler/`，实现 AST、语义检查和第一版
+C 后端，尚未覆盖完整规范。`bootstrap/compiler.xe` 已实现能编译自身的 Xe 编译器子集，
+尚未替代功能更完整的 stage0。旧版 `excompiler/` 和根目录 `main.py` 已移除并加入忽略规则；
 需要查阅旧实现时可从 Git 历史恢复。
+
+自举编译器暂作为独立项目保留；日常开发使用原版 Python stage0。
+仓库根已提供统一入口 `./xe`，共用根目录 `.venv`，支持检查、构建、运行、测试、
+格式整理、API 文档和安全清理。完整命令与当前边界见 [工具链说明](doc/32.md)。
 
 `tests/stage9xx` 保存目标语法样例，`tests/fails` 保存必须失败的程序。
 `tests/warnings` 保存指针风险程序：应当 warning 但仍可编译，不能统一执行。
@@ -50,6 +55,12 @@ Xe 主动放弃 Rust 式独占借用证明，降低这部分概念负担，同�
 方法自动取地址、地址捕获别名和容器 for 的元素指针是已经明确约定的便利规则，
 仍需要学习；`<<` / `>>` 不对称，方括号也有多种上下文含义，不能称为没有学习成本。
 
+实际写编译器时，**拥有者集中管理缓冲区，小记录显式 Copy，节点通过 ID 连接**是一套
+好理解的 Xe 写法：Token 用 str 查看原文，Vec 保存 AST，整数 ID 不随 Vec 扩容失效；
+`Program@` / `Program@[mut]` 直接说明函数能否修改状态，块尾表达式返回解析结果，
+String/Vec/File 正常退出自动清理。编译器源码和实践中的优缺点见
+[第 31 章](doc/31.md)。这些是可复现的经验，不是最优性能或完整地址安全的证明。
+
 ## 功能闭环与自举距离
 
 当前已能完成“Xe 源码 → 类型/所有权检查 → C → 可执行程序”的应用开发链：
@@ -57,22 +68,29 @@ Calculator 实现扫描与优先级解析，Source Scan 展示多文件、容器
 Feature Check 展示交互式命令行，线程示例展示共享数据与作用域解锁。
 这些程序验证了功能组合，但 Calculator 是算术解释器，不是 Xe 编译器。
 
-**已有核心足以开始编写 Xe 版自举编译器；尚不能宣称已经完成自举，或完整规范全部可用。**
-首版可以用枚举表示 Token/AST、Vec 加整数 ID 保存节点、普通函数组织编译阶段，
-并输出 C；不必为了开始自举先实现 yield、动态 Trait 或 LLVM。
+**第一个 Xe 子集自举编译器已经完成并验证；完整 Xe 0.9 尚未自举。**
+[`bootstrap/compiler.xe`](bootstrap/compiler.xe) 实现分词、扁平 AST、类型/写权限/
+资源检查和 C 发射。`make bootstrap` 先用 Python stage0 编译 seed，然后由 Xe
+可执行文件连续三次编译同一份源码；三代生成的 C 按原始字节完全相同，不做规范化。
+`make bootstrap-test` 另验收正反例及实际程序，`make bootstrap-sanitize` 验收
+ASan/UBSan 自编译。源码、运行库、工具版本和产物哈希写入 `target/bootstrap/report.json`。
+
+这个新编译器能编译自身和文件扫描工具，但尚无 enum/分支、用户泛型、方法 impl、
+模块、tuple、闭包等前端支持；仍用命名整数标签表示 AST 种类，不能冒充完整规范实现。
+支持范围、保守资源规则及运行命令见 [自举编译器说明](bootstrap/README.md)。
+现有 Python stage0 功能更多，仍是日常编译入口，且也没有覆盖全部目标语言：
 通用 Trait、泛型 Copy/Drop、组合/元组/负载过滤匹配、extern ABI、一般常量表达式、
 Debug 格式化及完整标准库仍有缺口；部分非 String 资源的下标/指针原位替换也尚未接入后端。
 当前 Xe 库也没有运行子进程的接口，不能独立调用系统
 C 编译器；第一版可以明确采用外部构建驱动，后续补进程或平台接口。
 
-真正的验收是：Python stage0 编译 Xe 编译器 → Xe 编译器编译同一份源码 → 再编译并
-比较规范化产物及测试行为。**现在还缺 Xe 编译器源码和这条验证链。**
-使用少量 C 运行库和系统 C 编译器并不妨碍自举。
+使用 C 运行库、系统 C 编译器和外部构建驱动不妨碍上述子集自举；固定点也不证明
+编译器没有错误，必须继续与参考实现对照行为并完善完整回归。
 
 目标是借鉴 OCaml 的类型化数据结构与表达式组合，减少 Rust 式地址证明的学习负担，
 同时保留底层数据与资源控制。当前还没有证据证明达到 OCaml 的编译器开发体验或
 C/C++ 的系统编程覆盖：FFI、布局/对齐控制、位操作及底层平台接口仍需补齐或审核设计。
-最新逐项审查、待商议边界和自举步骤见 [第 30 章：语言核心与自举能力审核](doc/30.md)。
+全语言审查与待商议边界见 [第 30 章](doc/30.md)，最新自举结果与写作经验见 [第 31 章](doc/31.md)。
 
 ## 语法速览
 
@@ -125,10 +143,37 @@ fn main() {
 
 ## 工具链
 
-独立 AST 前端位于 compiler/。运行 make ast 生成
-target/ast/ 下的 JSON；make check 加载可达模块，检查类型、所有权和写权限，并报告指针风险，
-make check-safety 为兼容别名，make compiler-test 运行全部回归测试。实现边界见 [第 18 章](doc/18.md)。详细命令见
-[compiler/README.md](compiler/README.md)；下方 xe 命令仍是后续目标工具接口。
+首次准备环境运行 `uv sync --frozen`，之后在仓库根直接运行：
+
+```sh
+./xe doctor
+./xe check examples/feature_check/main.xe
+./xe run examples/feature_check/main.xe -- check
+./xe run examples/args/main.xe -- "two words" "你好 Xe" ""
+./xe build --manifest-path examples/toolchain --release
+./xe test examples/toolchain/src/bin/smoke.xe
+./xe fmt --manifest-path examples/toolchain --check
+./xe doc --manifest-path examples/toolchain
+```
+
+`run` 的 `--` 后原样传给程序，交互输入和调用者工作目录保持不变。`xe` 是仓库内的
+可执行入口，不要求全局安装；也可用 `make xe XE_ARGS='check 文件.xe'` 或
+`uv run --project . --frozen --offline python -m compiler ...`。
+进入有 `xe.toml` 的项目后，`xe build/run` 默认选择 `src/main.xe`，`--bin name`
+选择 `src/bin/name.xe`。没有清单的显式文件在其所在目录的 `target/` 下生成产物。
+
+构建缓存核对输入、生成 C、编译器和选项，只省略系统 C 编译，仍重新检查 Xe 并报告 warning。
+`--rebuild` 强制重建；`--sanitize` 启用 ASan/UBSan，保留默认泄漏检测。
+`fmt` 是验证 AST 不变的保守缩进整理器；`test` 目前运行显式指定的普通 main 程序，
+不擅自执行错误/指针风险样例；`doc` 生成公开 API 的 Markdown/JSON，不执行文档代码。
+`clean --dry-run` 可预览；只清理登记且未手动修改的本项目产物，不递归删 target，
+也不处理自举产物。示例工程见 [examples/toolchain](examples/toolchain/README.md)。
+
+旧 Makefile 命令和 `compiler/main.py` 继续兼容，原默认输出路径不变。
+`make ast` 生成 `target/ast/` 下的 JSON；`make check` 加载可达模块，检查类型、
+所有权和写权限，并报告指针风险。`make compiler-test` 或 `./xe test --compiler`
+运行全部回归。实现边界见 [第 18 章](doc/18.md)，详细用法见
+[compiler/README.md](compiler/README.md) 与 [第 32 章](doc/32.md)。
 
 第一版 C 后端已能运行结构体、方法、管道、枚举、Maybe、数组/切片、文件读取和错误传播：
 make run 默认运行 struct_move.xe。
@@ -157,22 +202,12 @@ make emit-c 输出可读 C，make build 生成可执行文件；实际运行边�
 实际项目：[Xe Calculator](examples/calculator/README.md)，用约 330 行 Xe 实现扫描器、
 优先级解析、算术检查、定位诊断和文件输入。运行 `make demo`；修改 input.calc 即可试验。
 `make audit` 逐例执行 AST/语义/C/编译/运行，写入 target/audit/stage999.json。
-报告证明这些样例通过相应阶段，不证明规范全部实现或已完成自举。
+audit 报告只证明样例通过相应阶段；自举有独立构建链，也不证明完整规范全部实现。
 
-目标工具统一使用 `xe` 命令：
-
-```sh
-xe check
-xe build
-xe run
-xe test
-xe fmt
-xe doc
-```
-
-包配置写在 `xe.toml`；本地 path 依赖已实现，注册表和 `xe.lock` 尚未实现。目标是把依赖版本
-固定在锁文件中。对象文件、接口缓存和链接细节统一放在
-`target/`，普通使用者不需要手动管理。
+包配置写在 `xe.toml`；本地 path 依赖已实现，注册表和 `xe.lock` 尚未实现。
+当前统一工具把程序、C、AST、文档和构建收据放在本项目 `target/`；
+模块对象/接口缓存、增量语义分析、交叉编译、LSP 和自动单元/文档测试尚未实现。
+新增语言或测试发现规则仍需先审核，不将工具的默认设置冒充语言规范。
 公开接口统一在声明前写 `pub`；默认私有，公开类型不自动公开其字段或方法。
 已确认的模块可见性与例子见 [第 09 章](doc/09.md)。
 

@@ -3,18 +3,18 @@
 这里集中测试类型附件、具体所有权、缓存和风险传播之间的交互。
 未使用的模板不生成机器代码；已实例化的程序必须重新检查并实际执行。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 class GenericIntegrationTests(unittest.TestCase):

@@ -1,14 +1,14 @@
 """Tuple values/destructuring and transparent aliases execute safely as C."""
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 
-CC = shutil.which("cc")
+CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")

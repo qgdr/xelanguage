@@ -5,10 +5,10 @@
 """
 import unittest
 
-from compiler.xe_ast import parse_source, Diagnostic
+from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
-from compiler.xe_ast.typesys import Type, CONVERSION_ERROR, maybe
+from compiler.xe_ast.typesys import CONVERSION_ERROR, Type, maybe
 
 
 class RecordingChecker(Checker):
@@ -69,6 +69,7 @@ class ResultConversionTests(unittest.TestCase):
                 parse_source(f"fn f(n: i32) {{ n as[{modifier}] u8; }}")
             self.assertEqual(caught.exception.code, "XE-PARSE-0001")
             self.assertIn("try_from", caught.exception.message)
+            assert caught.exception.hint is not None
             self.assertIn("?[panic]", caught.exception.hint)
 
     def test_panic_unwrap_is_postfix_and_does_not_require_maybe_return(self):

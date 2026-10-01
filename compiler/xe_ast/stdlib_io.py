@@ -5,8 +5,7 @@
 还不是已经实现了可变参数泛型/Trait 的普通 Xe 函数。
 """
 from .stdlib import StandardFunction
-from .typesys import BOOL, IO_ERROR, STR, STRING, UNIT, Type, maybe
-
+from .typesys import BOOL, IO_ERROR, STR, STRING, UNIT, maybe
 
 # 一次读取有两层可能性：操作是否成功，以及成功时是否还有一行。
 # None 只表示 EOF。空行是 Yes[String("")]，不能与 EOF 混淆。

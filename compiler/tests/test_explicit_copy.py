@@ -3,17 +3,17 @@
 这里同时验证成功程序和具体错误编号，防止“编译失败了”却失败在
 别的规则上。内建组合类型只在其实际成员可复制时可复制。
 """
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
-from compiler.xe_ast.typesys import Type, I32, STRING, ptr, maybe
+from compiler.xe_ast.typesys import I32, STRING, Type, maybe, ptr
 
 
 class ExplicitCopyTests(unittest.TestCase):
