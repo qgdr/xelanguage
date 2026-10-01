@@ -9,6 +9,7 @@
 | --- | --- |
 | 缺分号、括号不闭合、分支头写错 | parser.py；文字/字面量本身错误看 lexer.py |
 | 名字不存在、类型不符、资源移动后使用 | semantic.py，按诊断编号找 fail 调用 |
+| 找不到模块、导入冲突、跨模块访问私有声明 | modules.py；字段/方法权限也由 semantic.py 检查 |
 | 检查通过，但报告后端尚未实现 | backend_c.py，增加真实编译执行验收 |
 | 系统 C 编译器报错 | 生成的 <程序>.c 与 build.py；不是让用户改 Xe 来迁就错误 C |
 | 程序崩溃、泄漏、重复释放 | 生成 C 的资源活跃标记、清理路径和 runtime/xe_runtime.h |
@@ -87,7 +88,7 @@ callback 作为普通函数参数传递仍可能移动，不能混淆这两个�
 闭包所有权用已有 Slot.flags、fields 和 drop_complete 管理，避免另造一套析构机制。
 
 for_iterators 记录自定义 next 的具体实例；FromFn 布局是 callback + done。
-next 调用内部闭包的可写指针，保留环境；首次 None 以后不再执行回调。
+next 调用内部闭包的可写指针，保留环境；首次 Step::Stop 以后不再执行回调。
 iterator_loop 外层 scope 拥有迭代器，内层 scope 拥有本轮元素，break/continue/return
 必须覆盖不同清理范围。条件块内声明的资源临时 Slot 不能留到块外清理，否则生成 C
 会引用超出作用域的变量。修改后运行 test_backend_closures 与 test_iterators 的实际 sanitizer 验收。
@@ -112,6 +113,47 @@ Checker.instantiate 保存实例缓存和具体签名，call_targets 把调用/�
 unsafe 不区分 C ABI，也不能让第一次调用的地址风险污染后来的安全地址。
 缓存存储使用结构类型，调用的数据流仍单独传播风险；源码显式的 [unsafe] 不能被清除。
 泛型布局的字段/载荷按具体类型代入，自动清理仍恰好执行一次。
+
+## 加载模块与拥有容器
+
+modules.py 从入口递归加载可达文件，先登记模块和声明，再解析导入与函数正文。
+同包环不按文件顺序决定含义；包依赖环另行报错。内部模块名称以 !module! 标识，
+不能使用 $ 前缀，因为语义层已用它表示泛型变量。
+所有内部 AST 节点保留 _file / _module；泛型实例的新节点也必须保留来源，
+否则会报错到错误文件，或绕过私有方法检查。默认 AST JSON 仍来自未改写的单文件树。
+
+Vec 的布局为 data / len / cap，缓冲区只被拥有容器释放。push 移交元素，pop 移出
+并减少长度，clear 逆序释放元素但保留缓冲区；复制指针或切片不复制元素所有权。
+backend_containers.py 为具体 Vec 类型登记清理函数，先生成原型再生成函数体，
+让 Vec[Node] 的递归清理使用函数调用而不是无限展开生成代码。
+扩容必须检查乘法/加法溢出；旧地址可能失效，语义层传播风险但不宣称安全。
+维护这部分时运行 test_bootstrap_library、test_modules 和 test_source_scan_project，
+不能用关闭 LeakSanitizer 的方式掩盖重复释放或泄漏。
+
+Box 的布局只有 data，Box@ 指向描述符，ptr()/ptr_mut() 才返回其中的 T@。
+new 先按普通参数规则取得 T，再用可失败的 xe_box_alloc 分配；失败分支要立即清理
+该实参并撤销临时拥有标志，不能留到函数退出时重复 drop。成功则把所有权转进 Box。
+into_value 转出 T 后只 free 外壳，绝不能调用 Box drop 再析构已转出的 T。
+backend_containers.py 将 Vec/Box 放在同一具体类型清理缓存中，互相递归只调用已登记函数；
+实例深度/数量限制沿用现有诊断，不能递归展开到 Python 崩溃。
+test_box 用临时生成的 C 替换 xe_box_alloc 模拟 malloc 失败，不在正式语法加入测试附件。
+Box 按绑定来源追踪指针风险，跨移动堆地址身份尚不精确；允许保守 warning，不拒绝程序。
+内部 Value.borrowed 是“不具备资源移出权限的存储访问”标志，不是用户类型或借用协议；
+数组/向量下标的类型仍是 T，显式 @ 才返回指针。
+
+## 并发库：计数、数据、环境分开
+
+semantic_sync.py 拒绝实际 Guard 存储跨线程（包括包装），函数签名不等于捕获存储。
+原始指针风险仍给 warning，不将未完成的 Send/Sync 求解伪装成静态安全保证。
+backend_sync.py 为具体类型生成描述符、T 析构回调和线程 job；线程 job 的第一个字段
+是 T 结果，后面是具体闭包环境。spawn 前初始化环境，成功后环境归线程，失败则归调用者。
+join 等待后转出 T 并释放 job；自动析构等待后 drop T。两条路径不可同时清理结果。
+pthread_mutex_t 存在稳定控制块中，不能按值复制或把它直接放入可移动的 Xe 描述符。
+Guard 自己保留一个控制块计数，释放顺序为检查线程归属、解锁、减少计数。
+Shared/Weak 计数规则与互斥保护数据的规则分离；最后强计数的隐含弱计数保护 T 析构过程。
+运行 test_sync（含失败注入、并发弱升级、跳转析构、ASan/UBSan 与泄漏检测）。
+生成 C 使用并发运行库时，build.py 和 audit.py 自动加 -pthread；普通程序不引入 pthread。
+ASan/UBSan 不检测所有数据竞争，不能将通过这些测试写成 ThreadSanitizer 已通过。
 
 ## 回归测试地图
 

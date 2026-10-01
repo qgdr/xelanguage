@@ -58,6 +58,14 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(row["stages"]["compile"]["status"], "skipped")
         self.assertEqual(row["stages"]["c"]["diagnostics"][0]["code"], "XE-BACKEND-0001")
 
+    @unittest.skipUnless(CC, "需要 C 编译器")
+    def test_reachable_modules_are_checked_and_run(self):
+        entry = self.source("main.xe", 'use crate::helper::answer;fn main(){println("{}",answer());}')
+        self.source("helper.xe", 'pub fn answer()->i32 {42}')
+        row = audit_file(entry)
+        self.assertEqual(row['outcome'],'passed',row)
+        self.assertEqual(row['stages']['run']['stdout'],'42\n')
+
     def test_semantic_capability_and_compiler_crash_are_distinct(self):
         path = self.source("valid.xe", "fn main(){}")
         diagnostic = Diagnostic(Source(path.read_text(), str(path)), 0, 2,

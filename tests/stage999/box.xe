@@ -1,0 +1,21 @@
+// Box 管理堆对象；@ 始终取得左侧对象自己的地址，不自动“穿透” Box。
+fn main() {
+    let[mut] owner: Box[i32] << Box[i32]::new(10)?[panic];
+    let read: i32@ = owner.ptr();
+    let write: i32@[mut] = owner.ptr_mut();
+    write# = 20;
+    println("{}", read#); // 20；两个普通指针可以指向相同存储。
+
+    let handle: Box[i32]@ = owner@;
+    println("{}", handle.ptr()#); // handle 指向 Box 描述符，不是里面的 i32。
+
+    let value: i32 = owner.into_value();
+    println("{}", value); // 20；owner 已消耗，堆内存已释放。
+    // 此后不能使用 owner；read/write 也已失效，不要解引用。
+
+    let words << Box[String]::new(String::from("Xe heap"))?[panic];
+    println("{}", words.ptr());
+    let text: String << words.into_value();
+    println("{}", text);
+    // text 正常 drop；不能因取出资源重复析构它。
+}

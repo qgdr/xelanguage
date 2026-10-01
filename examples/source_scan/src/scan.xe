@@ -1,0 +1,50 @@
+// 扫描器只保存字节位置，不保存指向 String/Vec 内部的地址。
+// 这是一份最小扫描练习，不是完整 Xe lexer：注释/字符串中的单词也会被扫描。
+pub struct Word {
+    pub start: usize,
+    pub end: usize,
+}
+impl Copy for Word;
+
+fn is_letter(byte: u8) -> bool {
+    b'a' <= byte <= b'z' or b'A' <= byte <= b'Z' or byte == b'_'
+}
+
+fn is_digit(byte: u8) -> bool { b'0' <= byte <= b'9' }
+
+pub fn words(source: str) -> Vec[Word] {
+    let[mut] found << Vec[Word]::new();
+    let[mut] position: usize = 0;
+    while position < source.len() {
+        if is_letter(source.byte_at(position)) {
+            let start = position;
+            position = position + 1;
+            while position < source.len() {
+                let byte = source.byte_at(position);
+                if not (is_letter(byte) or is_digit(byte)) { break; }
+                position = position + 1;
+            }
+            found.push(Word { .start = start; .end = position; });
+        } else {
+            position = position + 1;
+        }
+    }
+    found
+}
+
+pub fn line_count(source: str) -> usize {
+    if source.len() == 0 { return 0; }
+    let[mut] count: usize = 0;
+    for byte: u8 in source.bytes() {
+        if byte == b'\n' { count = count + 1; }
+    }
+    // 末尾没有换行的非空最后一行也算一行。
+    if source.byte_at(source.len() - 1) != b'\n' { count = count + 1; }
+    count
+}
+
+pub fn character_count(source: str) -> usize {
+    let[mut] count: usize = 0;
+    for scalar: char in source.chars() { count = count + 1; }
+    count
+}

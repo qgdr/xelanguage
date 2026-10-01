@@ -1,0 +1,13 @@
+use crate::scan::Word;
+
+// 接收容器的只读指针：观察元素，不能取走元素的所有权。
+// 报告拥有自己的 String，返回时不依赖 source 或 found 的存活。
+pub fn render(source: str, found: Vec[Word]@) -> String {
+    let[mut] output << String::new();
+    for word: Word@ in found {
+        let name = source.slice_bytes(word.start..word.end)?[panic];
+        output.push_str(name);
+        output.push_char('\n');
+    }
+    output
+}

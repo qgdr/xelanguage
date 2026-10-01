@@ -1,4 +1,4 @@
-"""单文件命令行入口；AST 输出只在解析成功后写入，--check 不写 AST。
+"""命令行入口；AST 描述一个文件，检查/构建加载可达模块。
 
 输出使用同目录临时文件 + 原子替换，避免中断留下半份 JSON。
 失败时不创建 AST，也不覆盖上一次成功产物。源码错误退出码 1，I/O 错误退出码 2。
@@ -17,9 +17,9 @@ from .build import BuildError
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Xe 单文件编译器：AST、语义检查、C 输出、构建与运行",
+    parser = argparse.ArgumentParser(description="Xe 编译器：AST、模块检查、C 输出、构建与运行",
         epilog="--run 时，-- 后的参数原样传给 Xe 程序，例如：main.xe --run -- check")
-    parser.add_argument("source", type=Path, help="UTF-8 .xe 源文件")
+    parser.add_argument("source", type=Path, help="UTF-8 .xe 入口文件；检查/构建递归加载模块")
     parser.add_argument("-o", "--output", help="AST/C/程序输出路径；- 仅用于文本标准输出")
     parser.add_argument("--diagnostic-format", choices=("text", "json"), default="text")
     actions = parser.add_mutually_exclusive_group()
@@ -94,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         tree = parse_source(source_text, str(args.source))
         if args.check:
             from .semantic import Checker
-            checker = Checker(Source(source_text, str(args.source)), tree, args.check_borrows)
+            from .modules import load_program
+            source_info, tree = load_program(args.source, source_text)
+            checker = Checker(source_info, tree, args.check_borrows)
             diagnostics = checker.check()
             warnings = checker.warnings
             if args.diagnostic_format == "json":

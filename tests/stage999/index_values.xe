@@ -1,0 +1,16 @@
+// 下标访问元素本身，类型为 T；只有显式 @ 才得到 T@。
+fn main() {
+    let[mut] array: Array[i32, 3] = [10, 20, 30];
+    let value: i32 = array[1];
+    let pointer: i32@ = array[1]@;
+    println("{} {}", value, pointer#);
+
+    let[mut] vector << Vec[i32]::new();
+    vector.push(40);
+    let element: i32 = vector[0];
+    let address: i32@ = vector[0]@;
+    println("{} {}", element, address#);
+
+    // for 是另一个明确约定：数组/向量迭代绑定元素指针。
+    for p: i32@ in vector { println("{}", p#); }
+}

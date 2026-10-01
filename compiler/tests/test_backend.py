@@ -236,8 +236,8 @@ class BackendFailureTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "XE-MOVE-0002")
 
     def test_unimplemented_features_report_language_diagnostic(self):
-        # 捕获环境已实现；Vec 的运行布局仍是明确未实现能力。
-        for source in ["fn main() { let values: Vec[i32]; }"]:
+        # Vec/Box 已有运行布局；Map 仍需明确报告未实现，不能生成占位 C。
+        for source in ["fn main() { let values: Map[i32, i32]; }"]:
             with self.subTest(source=source):
                 with self.assertRaises(Diagnostic) as caught:
                     lower_to_c(source)
@@ -296,7 +296,7 @@ class BackendFailureTests(unittest.TestCase):
                 status = main([str(source), "--emit-c", "-o", "-"])
             self.assertEqual(status, 0, err.getvalue())
             self.assertIn("int main(int argc, char **argv)", out.getvalue())
-            source.write_text("fn main() { let values: Vec[i32]; }")
+            source.write_text("fn main() { let values: Map[i32, i32]; }")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 status = main([str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])

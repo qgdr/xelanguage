@@ -4,6 +4,7 @@
 构建可执行程序时调用系统 GCC/Clang 兼容的 C 编译器。
 与仓库其余工具共用根目录 uv 项目和 .venv；源码按 [Bootstrap Syntax 0.9](../doc/17.md) 解析。
 不熟悉编译器实现时先读 [维护指南](MAINTAINING.md)，再按诊断阶段定位模块。
+规范与实际功能的最新逐项核对见 [第 30 章](../doc/30.md)，冻结语法不代表全部后端功能已完成。
 
 ## 从仓库根运行
 
@@ -54,7 +55,9 @@ compiler/ 不再含独立项目配置；曾生成的 compiler/.venv 不会再被
 - parser.py：声明/类型/块递归解析，表达式按优先级解析；
 - ast.py：JSON schema_version = 1 的信封；
 - typesys.py：语义类型及类型变量替换，与 AST 分离；
-- semantic.py：单文件名称、类型、移动、分支、写权限和指针风险分析；
+- modules.py：可达文件加载、导入/可见性、本地依赖、内部名称及多文件来源；
+- semantic.py：名称、类型、移动、分支、写权限和指针风险分析；
+- backend_containers.py：Vec 具体布局/清理和文本 Step 迭代；
 - backend_c.py：语义类型侧表、C 降低、结构体方法及资源清理；
 - build.py：生成 C、调用系统编译器和原子发布程序；
 - runtime/xe_runtime.h：小型字符串、文件及数值运行库，包含标准 IO 实现；
@@ -85,7 +88,7 @@ HandlerBinding 与 AnonymousFunction 分开保存：前者 return 属于外层�
 
 ## 已实现与未实现
 
-实现冻结语法的单文件解析和 JSON 输出，以及第一版单文件语义检查。
+实现冻结语法的单文件解析和 JSON 输出；语义检查与构建递归加载可达模块。
 make ast 仍然只解析；make check 检查名称、类型、初始化、移动和写权限，并报告可识别的指针风险。
 make check-safety 为兼容别名。禁止通过指针移走资源。
 可变声明使用 let[mut]，参数统一写 name: Type，绑定只读。
@@ -100,12 +103,20 @@ Maybe 的通道/传播/显式 panic、Array/Slice 基础运行与 File 读取已
 泛型 callback、嵌套环境、重复调用和退出清理已真实执行验收，见第 15 章。
 自定义 `next() -> Step[T]` 与返回 `Step[T]` 的 `std::iter::from_fn` 支持拥有/可写指针 `for`；`Step::Item[value]` 交付元素，`Step::Stop` 结束，运行 `make iterator-demo`。
 闭包动态类型、公共 Call Trait 和 yield 暂停恢复尚未实现，见第 26 章。
-单文件泛型函数可推导或显式代入，具体结构体/枚举实例已有 C 布局与资源清理。
-泛型实例按具体类型重新检查和缓存；尚无完整模块/Trait 或完整后端覆盖。
+泛型函数可推导或显式代入，跨模块具体结构体/枚举实例已有 C 布局与资源清理。
+泛型实例按具体类型重新检查和缓存；尚无完整 Trait 或完整后端覆盖。
 tuple[...] 支持新绑定与已有变量的浅层解包，拥有资源被 _ 忽略时仍清理。
 顶层透明 type 别名支持前向引用与链，循环给定位诊断，不产生新的 C 布局或 Copy 能力。
 标准 IO 提供 print/println/readline 与 std::io:: 完整路径；readline 返回拥有的
-String??[io::Error]，区分空行、EOF 和 IO 失败。C 实现位于 stdlib/io，并未实现普通 use 模块加载。
+String??[io::Error]，区分空行、EOF 和 IO 失败。C 实现位于 stdlib/io，支持标准接口 use 导入。
+Vec[T]、UTF-8 bytes/chars、String::new/push_char 与 File::create/write_all/flush 已运行验收。
+Box[T] 的可失败 new、普通指针 ptr/ptr_mut、消耗 into_value 和递归资源清理已实现，
+见 [第 28 章](../doc/28.md)。warning 不阻止正常构建或运行；Box 移动后的指针风险
+目前可能保守误报，不改变堆对象地址稳定的实际行为。
+Shared/Weak、Mutex/MutexGuard 和 Thread 已支持 C 生成和 POSIX 实际运行；
+构建自动为并发接口添加 -pthread。运行 make thread-demo；第 29 章说明线程归属、
+自动等待、创建失败清理，以及不能宣称完整竞争检查的边界。
+本地模块与 path 依赖示例运行 make source-scan；完整边界见 [第 27 章](../doc/27.md)。
 readline 的固定签名支持函数值；异构格式化输出目前只支持直接调用或固定签名包装函数。
 make feature-check 执行 Xe 编写的 16 组功能检查；make feature-run 可交互输入 help/check/echo/quit。
 std::env::args 返回 Slice[str]?[io::Error]，成功视图只读且在整个 Xe main 执行期间有效。
@@ -126,10 +137,9 @@ IO 合同、输入边界与 Xe 命令行例子见 [第 24 章](../doc/24.md)。
 语法旧写法应当报迁移提示，不静默转换。输出同路径原子替换；失败保留已有产物。
 对同名但不同目录输入，请用 -o 指定不同路径，避免默认输出名碰撞。
 
-## 后续实现顺序
+## 后续工作建议
 
-1. 模块加载、泛型 Copy/Drop 扩展及通用 Trait 能力；
-2. 在已运行的 Maybe/数组基础上引入更明确的有类型 HIR 和控制流 MIR；
-3. 确定性 Drop 清理点和更准确、可追踪的指针风险 warning；
-4. C 后端、小运行库和可执行标准库；
-5. 用 Xe 编写同等功能前端，完成自举固定点验证。
+优先用已有子集编写 Xe 前端，补真正阻塞它的库和发射能力，再完成自编译阶段链。
+泛型 Copy/Drop、通用静态 Trait、尚缺的资源替换清理和更准确的风险 warning 仍需完善。
+HIR/MIR 可在降低维护复杂度时逐步引入，但不是开始自举的先决条件；
+不为此先重写解析算法或实现机器码优化器。详细步骤与待审核接口见第 30 章。

@@ -18,7 +18,7 @@ std::env::args() -> Slice[str]?[io::Error]
 
 固定签名支持函数值：`let reader = std::env::args;` 后调用 `reader()`。
 没有把 `args` 加入 prelude；使用完整路径明确表明参数来自进程环境，不改变 `fn main()`。
-普通 `use` 模块加载仍未实现，这些接口由编译器预先登记。
+支持 `use std::env::args;`；标准接口仍由编译器预先登记，本地文件模块已可加载。
 
 stage0 实现位于 [xe_env.h](xe_env.h)。C 入口保存 argc/argv，首次调用分配并缓存
 只读描述符表，成功或失败都可重复查询；Xe main 完成所有资源清理之后才释放此表，

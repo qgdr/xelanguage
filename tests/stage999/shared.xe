@@ -1,0 +1,16 @@
+// share() 增加拥有者，不复制 String；Weak 不阻止 String 析构。
+fn main() {
+    let observer << {
+        let owner << Shared[String]::new(String::from("shared Xe"))?[panic];
+        let other << owner.share();
+        let weak << owner.weak();
+        println("{}", other.ptr());
+        weak.upgrade()?
+            1> live: Shared[String] -> println("{}", live.ptr())
+            2> _ -> println("unexpected expiration");
+        weak
+    };
+    observer.upgrade()?
+        1> _ -> println("unexpected owner")
+        2> error: Expired -> println("{}", error);
+}

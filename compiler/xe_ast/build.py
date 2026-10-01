@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-from .backend_c import lower_to_c
+from .backend_c import lower_program_to_c
+from .modules import load_program
 
 
 class BuildError(Exception):
@@ -35,8 +36,10 @@ def protect_source(source: Path, targets):
 
 def emit_c(source: Path, output: Path, check_borrows=True, warnings=None):
     protect_source(source, [output])
-    text = source.read_bytes().decode("utf-8")
-    generated = lower_to_c(text, str(source), check_borrows, warnings=warnings)
+    source_info, tree = load_program(source)
+    for filename in tree["_sources"]:
+        protect_source(Path(filename), [output])
+    generated = lower_program_to_c(source_info, tree, check_borrows, warnings=warnings)
     atomic_text(output, generated)
     return output
 
@@ -45,12 +48,18 @@ def build_executable(source: Path, output: Path, check_borrows=True,
                      cc="cc", extra_flags=(), warnings=None):
     c_path = output.with_name(output.name + ".c")
     protect_source(source, [output, c_path])
-    emit_c(source, c_path, check_borrows, warnings=warnings)
+    source_info, tree = load_program(source)
+    for filename in tree["_sources"]:
+        protect_source(Path(filename), [output, c_path])
+    generated = lower_program_to_c(source_info, tree, check_borrows, warnings=warnings)
+    atomic_text(c_path, generated)
     with tempfile.TemporaryDirectory(prefix=".xe-build-", dir=output.parent) as directory:
         executable = Path(directory) / "program"
         command = [cc, "-std=c11", "-O0", "-g",
                    "-Werror=implicit-function-declaration", "-Werror=incompatible-pointer-types",
                    "-Werror=return-type", *extra_flags, str(c_path.resolve()), "-o", str(executable)]
+        if "#include <pthread.h>" in generated:
+            command.insert(1, "-pthread")
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         except FileNotFoundError as error:

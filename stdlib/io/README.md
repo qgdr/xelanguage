@@ -2,7 +2,7 @@
 
 stage0 提供 `print`、`println`、`readline`，也接受完全相同的 `std::io::print`、
 `std::io::println`、`std::io::readline`。简短名称属于当前预先声明的接口。
-完整路径仍由同一接口表解析，不表示 `use` 或普通文件模块加载已经实现。
+完整路径与 use std::io 导入都指向同一接口表；普通文件模块加载也已实现，见第 27 章。
 
 | 接口 | 行为 |
 | --- | --- |

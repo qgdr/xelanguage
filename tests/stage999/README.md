@@ -17,6 +17,9 @@
 - anonymous_function.xe：fn 匿名函数和返回已有函数。
 - closure_capture.xe：拥有捕获、默认重复只读调用和分支返回闭包，已能编译运行。
 - closure_borrow_alias.xe：地址捕获保留正文变量的原类型；按值捕获已有指针仍需显式 `#`。
+- index_values.xe：Array/Vec 下标是 T，显式 @ 才是 T@，不自动转换类型。
+- box.xe：可失败堆分配、描述符地址、只读/可写普通指针及消耗取出资源，已能运行。
+- shared.xe：share 增加强拥有者、Weak 升级及失效；线程/锁示例见 ../../examples/threads。
 
 全部新样例按统一的检查策略验收；通过语义检查不表示已有后端运行支持。
 tuple_pointer.xe 展示 tuple[...] 元组、str 描述符指针、无损转换及显式 Copy。

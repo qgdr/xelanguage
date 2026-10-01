@@ -1,0 +1,4 @@
+[package]
+name = "source_scan"
+version = "0.1.0"
+edition = "2027"

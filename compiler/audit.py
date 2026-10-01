@@ -28,6 +28,7 @@ from compiler.xe_ast.ast import SYNTAX_VERSION
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import atomic_text, protect_source
 from compiler.xe_ast.parser import parse_source
+from compiler.xe_ast.modules import load_program
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Diagnostic, Source
 
@@ -108,7 +109,8 @@ def audit_file(path, *, cc="cc", compile_timeout=10.0, run_timeout=2.0,
         tree = parse_source(text, str(path))
         stages["ast"] = {"status": "passed"}
         current_phase = "semantic"
-        checker = Checker(Source(text, str(path)), tree)
+        source_info, tree = load_program(path, text)
+        checker = Checker(source_info, tree)
         errors = checker.check()
         warnings = [warning.to_dict() for warning in checker.warnings]
         if errors:
@@ -128,11 +130,14 @@ def audit_file(path, *, cc="cc", compile_timeout=10.0, run_timeout=2.0,
             current_phase = "compile"
             resolved_cc = shutil.which(str(cc))
             compiler = str(Path(resolved_cc).resolve()) if resolved_cc else str(cc)
-            stages["compile"] = _process([
+            command = [
                 compiler, "-std=c11", "-O0", "-g",
                 "-Werror=implicit-function-declaration", "-Werror=incompatible-pointer-types",
                 "-Werror=return-type", str(c_path), "-o", str(executable),
-            ], directory, compile_timeout, "compile")
+            ]
+            if "#include <pthread.h>" in generated:
+                command.insert(1, "-pthread")
+            stages["compile"] = _process(command, directory, compile_timeout, "compile")
             if stages["compile"]["status"] != "passed":
                 return failed("compile", stages["compile"])
             if not run_warnings and any(warning["code"].startswith("XE-PTR-")

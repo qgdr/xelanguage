@@ -15,6 +15,9 @@ from .source import Source
 from .stdlib_io import IO_NATIVE_FUNCTIONS, normalize_io_name
 from .stdlib_env import env_function
 from .stdlib_iter import FROM_FN, callback_type, next_result
+from .backend_containers import ContainerBackend
+from .backend_sync import SyncBackend
+from .semantic_sync import SYNC_TYPES
 from .typesys import Type, UNIT, NEVER, BOOL, STR, STRING, NONE, INT_LITERAL, I32, NUMERIC, ptr, substitute
 
 
@@ -80,7 +83,7 @@ def literal_string(text):
     return f'(XeStr){{(const unsigned char *)"{encoded}", {len(data)}}}'
 
 
-class CBackend:
+class CBackend(SyncBackend, ContainerBackend):
     def __init__(self, checker):
         self.checker = checker
         self.tree = checker.tree
@@ -95,6 +98,9 @@ class CBackend:
         self.user_layout_names = {}
         self.io_function_definitions = {}
         self.env_function_definitions = {}
+        self.container_helpers = {}
+        self.thread_jobs, self.thread_definitions = {}, {}
+        self.sync_used = False
 
     def fail(self, node, message):
         self.checker.fail(node, message, "XE-BACKEND-0001",
@@ -123,10 +129,21 @@ class CBackend:
         primitives.update({"bool": "bool", "char": "uint32_t", "str": "XeStr",
                            "String": "XeString", "Unit": "XeUnit", "Never": "XeUnit",
                            "usize": "size_t", "isize": "intptr_t", "f32": "float", "f64": "double",
-                           "None": "XeUnit", "ConversionError": "XeUnit",
-                           "File": "XeFile", "io::Error": "int"})
+                           "None": "XeUnit", "ConversionError": "XeUnit", "AllocError": "XeUnit",
+                           "File": "XeFile", "io::Error": "int", "Bytes": "XeTextIter", "Chars": "XeTextIter",
+                           "Expired": "XeUnit", "SyncError": "int", "ThreadError": "int"})
         if type_.name in primitives:
             return primitives[type_.name]
+        if type_.name in SYNC_TYPES:
+            self.sync_used = True
+            if type_ not in self.tuple_names:
+                cname = identifier(f"{type_.name}_layout_{len(self.tuple_names)}")
+                self.tuple_names[type_] = cname
+                self.layout_types[type_] = type_
+                native = {"Shared": "XeShared *", "Weak": "XeShared *", "Mutex": "XeMutex *",
+                          "MutexGuard": "XeMutexGuard", "Thread": "XeThread *"}[type_.name]
+                self.definitions[type_] = f"struct {cname} {{ {native} state; }};"
+            return self.tuple_names[type_]
         if type_.name == "ptr":
             if type_.args[0].name in self.checker.types:
                 # A pointer only needs its target's forward declaration. Do not
@@ -188,7 +205,7 @@ class CBackend:
                     members.append(f"    {ctype} items[{max(1, int(count.name))}];")
                 self.definitions[type_] = f"struct {cname} {{\n" + "\n".join(members) + "\n};"
             return self.tuple_names[type_]
-        if type_.name in {"Slice", "SliceMut"}:
+        if type_.name in {"Slice", "SliceMut", "Vec", "Box"}:
             if type_ not in self.tuple_names:
                 cname = identifier(f"{type_.name}_layout_{len(self.tuple_names)}")
                 self.tuple_names[type_] = cname
@@ -198,7 +215,9 @@ class CBackend:
                 # Recursive Node -> Slice[Node] is finite just like Node@.
                 ctype = (self.user_layout_name(element, at) if element.name in self.checker.types
                          else self.ctype(element, at))
-                self.definitions[type_] = f"struct {cname} {{ {ctype} *data; size_t len; }};"
+                capacity = " size_t cap;" if type_.name == "Vec" else ""
+                length = " size_t len;" if type_.name != "Box" else ""
+                self.definitions[type_] = f"struct {cname} {{ {ctype} *data;{length}{capacity} }};"
             return self.tuple_names[type_]
         if type_.name == "Range":
             if type_ not in self.tuple_names:
@@ -426,7 +445,7 @@ class CBackend:
                 self.line(f"if ({flag}) xe_string_drop(&({code}));")
             elif type_.name == "File":
                 self.line(f"if ({flag}) xe_file_drop(&({code}));")
-            elif type_.name == "maybe" or self.checker.types.get(type_.name, {}).get("kind") == "Enum":
+            elif type_.name in {"maybe", "Vec", "Box"} | SYNC_TYPES or self.checker.types.get(type_.name, {}).get("kind") == "Enum":
                 self.line(f"if ({flag}) {{")
                 self.indent += 1
                 self.drop_complete(type_, code)
@@ -452,9 +471,12 @@ class CBackend:
         if type_.name == "File":
             self.line(f"xe_file_drop(&({code}));")
             return
+        if type_.name in {"Vec", "Box"} | SYNC_TYPES:
+            self.line(f"{self.container_helper(type_)}(&({code}));")
+            return
         if type_.name == "Array":
             element, count = type_.args
-            # Arrays are indivisible ownership containers; indexing only borrows an element.
+            # 数组没有“空洞”协议：下标访问 T，但不提供移出元素所有权的权限。
             for index in reversed(range(int(count.name))):
                 self.drop_complete(element, f"({code}).items[{index}]")
             return
@@ -938,7 +960,7 @@ class CBackend:
         if obj["kind"] not in {"Name", "AssociatedAccess"} or not self.variants(type_):
             value = self.expression(obj)
             base = value.type.args[0] if value.type.name == "ptr" else value.type
-            if base.name not in {"Array", "Slice", "SliceMut"}:
+            if base.name not in {"Array", "Slice", "SliceMut", "Vec"}:
                 self.fail(node, "切片/动态数组索引尚未接入 C 后端")
             if base.args[0].name in self.checker.types:
                 # C pointer arithmetic requires the complete element layout.
@@ -993,7 +1015,7 @@ class CBackend:
             elif subject.type.args[1] != NONE:
                 error = subject.type.args[1]
                 # Do not invent Display implementations for arbitrary user error types.
-                if error.name in NUMERIC | {"str", "String", "bool", "char", "ConversionError", "io::Error"}:
+                if error.name in NUMERIC | {"str", "String", "bool", "char", "ConversionError", "AllocError", "Expired", "SyncError", "ThreadError", "io::Error"}:
                     self.display(CValue(self.payload_code(subject.code, 'No', 0), error), "stderr", node)
                 else:
                     self.line(f"xe_io_write(stderr, {literal_string(str(error))});")
@@ -1228,6 +1250,36 @@ class CBackend:
 
     def call(self, node):
         callee = node["callee"]
+        if id(node) not in self.checker.call_targets:
+            owner = None
+            member = None
+            if callee["kind"] == "AssociatedAccess":
+                owner = self.checker.expression_type(callee["object"])
+                member = callee["member"]
+            elif callee["kind"] == "Name":
+                parts = callee["path"]["parts"]
+                alias = "::".join(parts[:-1])
+                if len(parts) > 1 and alias in self.checker.aliases:
+                    owner, member = self.checker.resolve_alias(alias), parts[-1]
+            if owner and owner.name in {"Shared", "Mutex"} and member == "new":
+                return self.sync_new(node, owner)
+            if owner and owner.name == "Thread" and member == "spawn":
+                return self.thread_spawn(node, owner)
+        if (callee["kind"] == "AssociatedAccess" and callee["member"] in {"new", "with_capacity"}
+                and self.type_at(node).name == "Vec" and id(node) not in self.checker.call_targets):
+            return self.vector_new(node, callee["member"])
+        if (callee["kind"] == "AssociatedAccess" and callee["member"] == "new"
+                and id(node) not in self.checker.call_targets):
+            owner = self.checker.expression_type(callee["object"])
+            if owner.name == "Box":
+                return self.box_new(node, owner)
+        if callee["kind"] == "Name" and id(node) not in self.checker.call_targets:
+            parts = callee["path"]["parts"]
+            alias = "::".join(parts[:-1])
+            if len(parts) > 1 and parts[-1] == "new" and alias in self.checker.aliases:
+                owner = self.checker.resolve_alias(alias)
+                if owner.name == "Box":
+                    return self.box_new(node, owner)
         target_key = getattr(self.checker, "call_targets", {}).get(id(node))
         if target_key is not None:
             signature = self.checker.functions[target_key]
@@ -1267,6 +1319,9 @@ class CBackend:
             if base.name == "FromFn" and name == "next":
                 pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
                 return self.from_fn_next(CValue(pointer, ptr(base, True)), node)
+            if base.name in {"Bytes", "Chars"} and name == "next":
+                pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
+                return self.text_next(node, base, pointer)
             if base.name == "maybe" and name == "expect":
                 if receiver.type.name == "ptr" and not self.checker.copyable(base):
                     self.fail(node, "expect() 会消耗资源结果；不能通过指针调用")
@@ -1300,6 +1355,15 @@ class CBackend:
                     return value
                 arguments.append(self.argument(value))
             pointer = receiver.code if receiver.type.name == "ptr" else f"&({receiver.code})"
+            if base.name == "Vec":
+                return self.vector_method(node, base, pointer, name, arguments)
+            if base.name == "Box":
+                return self.box_method(node, base, pointer, name, receiver)
+            if base.name in SYNC_TYPES:
+                return self.sync_method(node, base, pointer, name, receiver)
+            if base.name in {"str", "String"} and name in {"bytes", "chars"}:
+                view = f"xe_string_view({pointer})" if base == STRING else f"*({pointer})"
+                return self.temp(self.type_at(node), f"(XeTextIter){{{view}, 0}}")
             if base.name in {"Array", "Slice", "SliceMut"} and name == "len":
                 # 数组长度来自类型；切片长度来自描述符。都不读取元素，
                 # 更不需要取得元素的所有权或可写指针。
@@ -1321,7 +1385,18 @@ class CBackend:
                 if name == "push_str":
                     self.line(f"xe_string_push({pointer}, {arguments[0].code});")
                     return CValue("0", UNIT)
+                if name == "push_char":
+                    self.line(f"xe_string_push_char({pointer}, {arguments[0].code});")
+                    return CValue("0", UNIT)
             if base.name == "File":
+                if name in {"write_all", "flush"}:
+                    result_type = self.type_at(node)
+                    error = self.fresh("io_error")
+                    operation = f"xe_file_write({pointer}, {arguments[0].code})" if name == "write_all" else f"xe_file_flush({pointer})"
+                    self.line(f"int {error} = {operation};")
+                    result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = {error} ? 1 : 0}}")
+                    self.line(f"{self.payload_code(result.code, 'No', 0)} = {error};")
+                    return result
                 if name == "size":
                     return self.temp(Type("usize"), f"xe_file_size({pointer})")
                 if name == "read_to_string":
@@ -1383,7 +1458,9 @@ class CBackend:
             if value.type == NEVER:
                 return value
             return self.temp(STRING, f"xe_string_from({value.code})")
-        if name == "File::open":
+        if name == "String::new":
+            return self.temp(STRING, f"xe_string_from({literal_string('')})")
+        if name in {"File::open", "File::create"}:
             path = self.argument(self.expression(node["arguments"][0], STR))
             if path.type == NEVER:
                 return path
@@ -1391,7 +1468,8 @@ class CBackend:
             result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = 1}}")
             error = self.fresh("io_error")
             self.line(f"int {error} = 0;")
-            self.line(f"{self.payload_code(result.code, 'Yes', 0)} = xe_file_open({path.code}, &{error});")
+            operation = "xe_file_create" if name == "File::create" else "xe_file_open"
+            self.line(f"{self.payload_code(result.code, 'Yes', 0)} = {operation}({path.code}, &{error});")
             self.line(f"({result.code}).tag = {error} ? 1 : 0;")
             self.line(f"{self.payload_code(result.code, 'No', 0)} = {error};")
             return result
@@ -1554,7 +1632,11 @@ class CBackend:
             self.line(f"xe_io_print_char({stream}, {code});")
         elif type_.name == "ConversionError":
             self.line(f"xe_io_write({stream}, {literal_string('integer conversion out of range')});")
-        elif type_.name == "io::Error":
+        elif type_.name == "AllocError":
+            self.line(f"xe_io_write({stream}, {literal_string('heap allocation failed')});")
+        elif type_.name == "Expired":
+            self.line(f"xe_io_write({stream}, {literal_string('shared object expired')});")
+        elif type_.name in {"io::Error", "SyncError", "ThreadError"}:
             self.line(f"xe_io_print_error({stream}, {code});")
         elif type_.name in NUMERIC | {"$integer"}:
             function = "float" if type_.name in {"f32", "f64"} else "u64" if type_.name.startswith("u") else "i64"
@@ -1627,7 +1709,7 @@ class CBackend:
             if source_type == NEVER:
                 return self.expression(source)
             base = source_type.args[0] if source_type.name == "ptr" else source_type
-            if base.name in {"Array", "Slice", "SliceMut"}:
+            if base.name in {"Array", "Slice", "SliceMut", "Vec"}:
                 return self.array_loop(node, base)
             if id(node) in self.checker.for_iterators:
                 return self.iterator_loop(node, base)
@@ -1677,6 +1759,8 @@ class CBackend:
         signature = self.checker.for_iterators[id(node)]
         if signature is None:
             produced = self.from_fn_next(pointer, node)
+        elif isinstance(signature, str):
+            produced = self.text_next(node, base, pointer.code)
         else:
             target = self.checker.call_targets.get(id(node))
             name = self.function_name(target) if target else self.method_name(base.name, "next")
@@ -1782,12 +1866,16 @@ class CBackend:
         self.indent -= 1
         self.line("}")
         compiler_root = Path(__file__).resolve().parents[1]
+        thread_prototypes, thread_bodies = self.emit_thread_jobs()
+        container_prototypes, container_bodies = self.emit_container_helpers()
         runtime = (compiler_root / "runtime/xe_runtime.h").read_text(encoding="utf-8")
         io_library = (compiler_root.parent / "stdlib/io/xe_io.h").read_text(encoding="utf-8")
         env_library = (compiler_root.parent / "stdlib/env/xe_env.h").read_text(encoding="utf-8")
         # emit-C remains self-contained even when compiled from another folder.
         runtime = runtime.replace('#include "../../stdlib/io/xe_io.h"', io_library)
         runtime = runtime.replace('#include "../../stdlib/env/xe_env.h"', env_library)
+        if self.sync_used:
+            runtime += "\n" + (compiler_root.parent / "stdlib/sync/xe_sync.h").read_text(encoding="utf-8")
         # Opaque pointer targets remain forward-only. Do not force completion
         # merely because a type name was needed in a pointer declaration.
         forwards = [f"typedef struct {cname} {cname};" for cname in self.user_layout_names.values()]
@@ -1800,14 +1888,25 @@ class CBackend:
         return ("/* Generated by Xe bootstrap C backend. Do not edit. */\n" + runtime + "\n" +
                 "\n".join(forwards) + "\n" + "\n".join(self.function_typedefs.values()) + "\n" +
                 "\n\n".join(self.definitions.values()) + "\n\n" +
+                "\n\n".join(self.thread_definitions.values()) + "\n\n" +
                 "\n\n".join(self.io_function_definitions.values()) + "\n\n" +
                 "\n\n".join(self.env_function_definitions.values()) + "\n\n" +
-                "\n".join(prototypes) + "\n\n" + "\n".join(self.lines) + "\n")
+                "\n".join(prototypes + container_prototypes + thread_prototypes) + "\n\n" +
+                "\n\n".join(container_bodies + thread_bodies) + "\n\n" + "\n".join(self.lines) + "\n")
 
 
 def lower_to_c(text, filename="<input>", check_borrows=True, warnings=None):
-    source = Source(text, filename)
-    tree = parse_source(text, filename)
+    if Path(filename).is_file():
+        from .modules import load_program
+        source, tree = load_program(filename, text)
+    else:
+        source = Source(text, filename)
+        tree = parse_source(text, filename)
+    return lower_program_to_c(source, tree, check_borrows, warnings)
+
+
+def lower_program_to_c(source, tree, check_borrows=True, warnings=None):
+    """模块加载与语义/C 降低分开，调用者可先保护所有源码输出路径。"""
     checker = AnnotatedChecker(source, tree, check_borrows)
     diagnostics = checker.check()
     if diagnostics:

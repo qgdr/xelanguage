@@ -1,0 +1,42 @@
+// 真实多文件工具：读取 UTF-8 文件，扫描 ASCII 单词，输出统计并写报告。
+use std::env::args;
+use std::io::{println, eprintln};
+use crate::scan::{words, line_count, character_count};
+use crate::report::render;
+
+fn read_source(path: str) -> String?[io::Error] {
+    let file << File::open(path)?[return];
+    file.read_to_string()
+}
+
+fn write_report(path: str, text: str) -> Unit?[io::Error] {
+    let[mut] file << File::create(path)?[return];
+    file.write_all(text)?[return];
+    file.flush()
+}
+
+fn main() -> i32 {
+    let arguments = args()?
+        1> values -> values
+        2> error -> { eprintln("读取参数失败：{}", error); return 1; };
+    if arguments.len() != 3 {
+        eprintln("用法：source-scan <输入 UTF-8 文件> <输出单词报告>");
+        return 2;
+    }
+    let input = arguments[1];
+    let output = arguments[2];
+    // File::create 会截断文件，因此最常见的误用在打开输出之前拦住。
+    // 两个不同路径仍可能指向同一文件；工具要求输出是独立文件。
+    if input == output { eprintln("输入和输出路径不能相同"); return 2; }
+    let source << read_source(input)?
+        1> text -> text
+        2> error -> { eprintln("读取 {} 失败：{}", input, error); return 1; };
+    let text = source.as_str();
+    let found << words(text);
+    let report << render(text, found@);
+    write_report(output, report.as_str())?
+        1> _ -> println("bytes={} chars={} lines={} words={}",
+            text.len(), character_count(text), line_count(text), found.len())
+        2> error -> { eprintln("写入 {} 失败：{}", output, error); return 1; };
+    0
+}

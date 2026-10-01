@@ -17,7 +17,7 @@ PROGRAM ?= target/debug/$(basename $(notdir $(SOURCE)))
 C_OUTPUT ?= target/c/$(notdir $(SOURCE)).c
 CC ?= cc
 
-.PHONY: ast ast-test check check-safety check-borrows compiler-test emit-c build run demo iterator-demo feature-tool feature-run feature-check stdlib-test audit clean
+.PHONY: ast ast-test check check-safety check-borrows compiler-test emit-c build run demo iterator-demo thread-demo source-scan feature-tool feature-run feature-check stdlib-test audit clean
 
 ast:
 	$(UV) run --project . --frozen --offline python compiler/main.py "$(SOURCE)" -o "$(OUTPUT)"
@@ -51,6 +51,15 @@ demo:
 
 iterator-demo:
 	$(UV) run --project . --frozen --offline python compiler/main.py examples/iterators/main.xe --run -o target/debug/iterators --cc "$(CC)" $(BACKEND_FLAGS)
+
+thread-demo:
+	$(UV) run --project . --frozen --offline python compiler/main.py examples/threads/main.xe --run -o target/debug/threads --cc "$(CC)" $(BACKEND_FLAGS)
+
+# 真正的跨文件包；INPUT / REPORT 覆盖扫描路径，输出不是编译器产物。
+INPUT ?= examples/source_scan/src/main.xe
+REPORT ?= target/debug/words.txt
+source-scan:
+	$(UV) run --project . --frozen --offline python compiler/main.py examples/source_scan/src/main.xe --run -o target/debug/source-scan --cc "$(CC)" $(BACKEND_FLAGS) -- "$(INPUT)" "$(REPORT)"
 
 # 无参数交互使用；传入 check 子命令可直接自动验收，不等待 stdin。
 feature-tool:

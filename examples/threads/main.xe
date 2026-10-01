@@ -1,0 +1,25 @@
+// 共享拥有者保护对象生命；Mutex 保护数据读写，两件事各自明确。
+fn main() {
+    let counter << Shared[Mutex[i32]]::new(Mutex[i32]::new(0)?[panic])?[panic];
+    let first << counter.share();
+    let second << counter.share();
+    let a << Thread[i32]::spawn(fn[first]() -> i32 {
+        for n in 0..1000 {
+            let[mut] guard << first.ptr().lock()?[panic];
+            let value: i32@[mut] = guard.ptr_mut();
+            value# = value# + 1;
+        } // 每次循环自动解锁。
+        1000
+    })?[panic];
+    let b << Thread[i32]::spawn(fn[second]() -> i32 {
+        for n in 0..1000 {
+            let[mut] guard << second.ptr().lock()?[panic];
+            let value: i32@[mut] = guard.ptr_mut();
+            value# = value# + 1;
+        }
+        1000
+    })?[panic];
+    let completed = a.join()?[panic] + b.join()?[panic];
+    let guard << counter.ptr().lock()?[panic];
+    println("completed={} counter={}", completed, guard.ptr()#);
+}
