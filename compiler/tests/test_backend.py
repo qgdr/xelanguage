@@ -11,6 +11,7 @@ from pathlib import Path
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import BuildError, build_executable, emit_c
 from compiler.xe_ast.cli import main
+from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.source import Diagnostic
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,14 +42,14 @@ class BackendExecutionTests(unittest.TestCase):
             "block_drop": "drop 2\ndrop 1\nblock finished\ndrop 3\ndrop 0\n",
             "trait_copy_drop": "1 2\ndrop 1\n",
             "ownership": "yours hello\n",
-            "String": "before = hello\nhello, world!\n",
+            "string_resource": "before = hello\nhello, world!\n",
             "comparison_chain": "true false true true\n",
-            "pointer_unchecked": "42\n",
+            "pointer_permissions": "42\n",
         }
         for name, expected in examples.items():
             with self.subTest(name=name):
-                text = (ROOT / "tests/stage999" / (name + ".xe")).read_text()
-                self.assert_output(text, expected, name != "pointer_unchecked")
+                text = (ROOT / "tests/language" / (name + ".xe")).read_text()
+                self.assert_output(text, expected, name != "pointer_permissions")
 
     def test_return_break_continue_and_conditional_moves(self):
         text = (ROOT / "tests/backend/struct_control.xe").read_text()
@@ -159,7 +160,7 @@ class BackendExecutionTests(unittest.TestCase):
 
     def test_sanitized_resource_programs(self):
         for name in ("struct_methods", "ownership", "block_drop"):
-            text = (ROOT / "tests/stage999" / (name + ".xe")).read_text()
+            text = (ROOT / "tests/language" / (name + ".xe")).read_text()
             result = self.run_source(text, flags=("-fsanitize=undefined", "-fno-sanitize-recover=all"))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stderr, "")
@@ -167,7 +168,7 @@ class BackendExecutionTests(unittest.TestCase):
     @unittest.skipUnless(__import__("sys").platform.startswith("linux"), "ASan 的 no-pie 验收当前针对 Linux")
     def test_address_sanitizer_and_leak_checks(self):
         # no-pie 避免部分 Linux/WSL 环境中 ASan 地址空间布局的随机冲突。
-        for relative in ("stage999/struct_methods.xe", "backend/struct_partial_move.xe"):
+        for relative in ("language/struct_methods.xe", "backend/struct_partial_move.xe"):
             text = (ROOT / "tests" / relative).read_text()
             result = self.run_source(text, flags=("-fsanitize=address,undefined",
                                                   "-fno-sanitize-recover=all", "-no-pie"))
@@ -237,12 +238,13 @@ class BackendFailureTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "XE-MOVE-0002")
 
     def test_unimplemented_features_report_language_diagnostic(self):
-        # Vec/Box 已有运行布局；Map 仍需明确报告未实现，不能生成占位 C。
+        # 历史 Map 仍能生成 AST，但必须在 check 阶段报告当前能力缺口。
         for source in ["fn main() { let values: Map[i32, i32]; }"]:
             with self.subTest(source=source):
+                self.assertEqual(parse_source(source)["kind"], "Module")
                 with self.assertRaises(Diagnostic) as caught:
                     lower_to_c(source)
-                self.assertEqual(caught.exception.code, "XE-BACKEND-0001")
+                self.assertEqual(caught.exception.code, "XE-SEM-0001")
 
     def test_unused_generic_template_does_not_force_code_generation(self):
         # 泛型以具体类型使用时才生成 C，不能为未实例化的 T 猜测布局。
@@ -302,4 +304,4 @@ class BackendFailureTests(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 status = main([str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])
             self.assertEqual(status, 1)
-            self.assertEqual(json.loads(err.getvalue())["diagnostics"][0]["code"], "XE-BACKEND-0001")
+            self.assertEqual(json.loads(err.getvalue())["diagnostics"][0]["code"], "XE-SEM-0001")

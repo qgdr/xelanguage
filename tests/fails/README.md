@@ -9,6 +9,9 @@
 - 建议修改能够实际应用，而不是泛泛提示。
 
 失败测试不得因为编译器崩溃、断言或 Python 异常而“通过”。
+这里允许少量明确登记的旧语法迁移反例，因此不能要求所有文件都成功解析。
+语义反例必须先通过解析，再断言指定的名称/类型/权限/所有权错误；
+纯词法及解析边界另集中在 [syntax_fails](../syntax_fails/README.md)，两个分类不是严格互斥。
 
 `format_move.xe` 专门固定一条一致性规则：格式化调用不会替调用者隐式借用移动值，诊断应
 建议根据意图改成 `value@`，或者不再使用已经移动的值。
@@ -17,9 +20,10 @@ borrow_move_resource.xe、borrow_match_move.xe：禁止借指针移走资源。
 pointer_owned_match.xe：新式指针匹配必须显式写 ?[@]。
 channel_missing_parameter.xe：禁止无参数箭头，提示改为 _ -> expression 或零参数函数。
 none_error_result.xe：None 不能代替具体错误负载。
-旧 borrow_alias.xe 已迁移到 stage999/pointer_alias.xe：普通指针别名合法。
+旧 borrow_alias.xe 已迁移到 language/pointer_alias.xe：普通指针别名合法。
 旧 semantic_return_local_borrow.xe 已迁移到 warnings/return_local_pointer.xe：风险 warning 不阻断编译。
-str_pointer.xe 验证只读 str@ 不能修改描述符。
+readonly_str_pointer_write.xe 验证只读 str@ 不能修改描述符。
+string_use_after_move.xe 验证 String 移动后不能再读取；原名 String.xe 容易误解成类型不受支持。
 struct_copy_not_declared.xe 验证用户类型没有显式 Copy 时不能使用 =。
 pointer_weakened_write.xe 验证可写指针降为只读后不能修改所指内容（XE-MUT-0001）。
 generic_resource_copy.xe 验证具体 String 实例不能用 = 复制资源（XE-OWN-0001）。

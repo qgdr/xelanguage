@@ -6,15 +6,17 @@
 这样条件移动、提前返回及部分字段移动不需要依赖 Python 的线性分析状态。
 未支持的节点必须报诊断，不能产生空代码或忽略语义。
 """
-import string
+import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import NoReturn
 
 from .backend_containers import ContainerBackend
-from .backend_globals import GlobalBackend, literal_string
+from .backend_globals import GlobalBackend, integer_static_literal, literal_string
 from .backend_sync import SyncBackend
+from .ffi import external_symbol
+from .formatting import format_argument_issue, format_field_issue, parse_format_template
 from .parser import parse_source
 from .semantic import Checker, Signature
 from .semantic_sync import SYNC_TYPES
@@ -36,6 +38,8 @@ from .typesys import (
     ptr,
     substitute,
 )
+
+RUNTIME_CALL = re.compile(r"\bxe_[A-Za-z0-9_]+\s*\(")
 
 
 class AnnotatedChecker(Checker):
@@ -79,6 +83,9 @@ class CValue:
     type: Type
     slot: Slot | None = None
     path: tuple[str, ...] = ()
+    # Indexed lvalues need their final element address resolved after the RHS:
+    # Vec.data may be reallocated (or its length changed) during that evaluation.
+    rechecks: tuple[tuple[str, dict], ...] = ()
 
 
 @dataclass
@@ -112,6 +119,7 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.container_helpers = {}
         self.thread_jobs, self.thread_definitions = {}, {}
         self.sync_used = False
+        self.runtime_node = None
 
     def fail(self, node, message) -> NoReturn:
         self.checker.fail(node, message, "XE-BACKEND-0001",
@@ -122,6 +130,22 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         return f"{identifier(label)}_{self.counter}"
 
     def line(self, text):
+        # Lowering a child expression temporarily changes runtime_node; when
+        # its value is ready, the parent's operation regains the parent's span.
+        # Insert only before executable helper/function calls, never between an
+        # if and its brace, an else and its body, or before a function prototype.
+        # Helpers and user callees get a useful call site; their own operations
+        # overwrite it with a more precise location if they fail internally.
+        if (self.runtime_node is not None and RUNTIME_CALL.search(text)
+                and not text.lstrip().startswith(("static ", "extern ", "typedef ", "case ", "default:", "else"))):
+            source = self.checker.source_of(self.runtime_node)
+            position = self.runtime_node["span"]["start"]
+            # Byte escapes handle quotes, backslashes, Unicode and unusual
+            # filenames without allowing source names to inject generated C.
+            encoded = "".join(chr(byte) if 32 <= byte < 127 and chr(byte) not in '\\"'
+                              else f"\\{byte:03o}" for byte in source.filename.encode("utf-8"))
+            self.lines.append("    " * self.indent +
+                f'xe_set_location("{encoded}", {position["line"]}, {position["column"]});')
         self.lines.append("    " * self.indent + text)
 
     def type_at(self, node, expected=None):
@@ -467,11 +491,21 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.drop_complete(type_, code)
                 self.indent -= 1
                 self.line("}")
-            elif type_.name in self.checker.drop_types:
-                self.line(f"if ({flag}) {self.method_name(type_.name, 'drop')}(&({code}));")
+            elif self.checker.has_drop(type_):
+                self.line(f"if ({flag}) {self.drop_function(type_)}(&({code}));")
             self.line(f"{flag} = false;")
         if slot.order:
             self.line(f"{slot.order} = 0;")
+
+    def drop_function(self, type_):
+        """析构实例由语义阶段生成并检查；这里仅选择已存在的静态函数。"""
+        signature = self.checker.drop_instances.get(type_)
+        if signature is None:
+            self.fail(self.tree, f"{type_} 缺少已经检查的 Drop 实例")
+        function = next((name for name, candidate in self.checker.functions.items() if candidate is signature), None)
+        if function is not None:
+            return self.function_name(function)
+        return self.method_name(type_.name, "drop")
 
     def drop_complete(self, type_, code):
         """清理枚举中的完整拥有载荷，绝不能触碰非活动变体。
@@ -496,8 +530,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             for index in reversed(range(int(count.name))):
                 self.drop_complete(element, f"({code}).items[{index}]")
             return
-        if type_.name in self.checker.drop_types:
-            self.line(f"{self.method_name(type_.name, 'drop')}(&({code}));")
+        if self.checker.has_drop(type_):
+            self.line(f"{self.drop_function(type_)}(&({code}));")
         variants = self.variants(type_)
         if variants:
             self.line(f"switch (({code}).tag) {{")
@@ -551,8 +585,6 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
     def prototype(self, signature, name, parameter_names=None):
         if signature.generics:
             self.fail(signature.node, "泛型函数实例化尚未接入 C 后端")
-        if signature.node["body"] is None:
-            self.fail(signature.node, "extern ABI 尚未接入 C 后端")
         if signature.self_type and signature.node["parameters"] and signature.node["parameters"][0]["name"] == "self":
             receiver = signature.parameters[0]
             base = receiver.args[0] if receiver.name == "ptr" else receiver
@@ -560,9 +592,30 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.fail(signature.node, "方法 self 类型必须对应 impl 的目标类型")
         parameters = [self.ctype(t, signature.node) + (" " + parameter_names[i] if parameter_names else "")
                       for i, t in enumerate(signature.parameters)]
-        return f"static {self.ctype(signature.result, signature.node)} {name}({', '.join(parameters) or 'void'})"
+        storage = "static inline" if signature.node["body"] is None else "static"
+        wrapper = f"{storage} {self.ctype(signature.result, signature.node)} {name}({', '.join(parameters) or 'void'})"
+        if signature.node["body"] is None and parameter_names is None:
+            result = "void" if signature.result == UNIT else self.ctype(signature.result, signature.node)
+            symbol = external_symbol(self.checker, signature)
+            return f"extern {result} {symbol}({', '.join(parameters) or 'void'});\n{wrapper}"
+        return wrapper
 
     def emit_function(self, signature, name, closure_type=None, owning=True):
+        if signature.node["body"] is None:
+            # Use an ordinary Xe fn bridge so C void becomes Xe Unit, including
+            # when the external function is stored or passed as a function value.
+            names = [self.fresh(p["name"]) for p in signature.node["parameters"]]
+            self.line(self.prototype(signature, name, names) + " {")
+            self.indent += 1
+            call = f"{external_symbol(self.checker, signature)}({', '.join(names)})"
+            if signature.result == UNIT:
+                self.line(call + ";")
+                self.line("return 0;")
+            else:
+                self.line("return " + call + ";")
+            self.indent -= 1
+            self.line("}\n")
+            return
         self.signature = signature
         self.scopes = [Scope()]
         self.loop_scopes = []
@@ -629,6 +682,23 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.line("}")
 
     def statement(self, node):
+        previous = self.runtime_node
+        self.runtime_node = node
+        try:
+            return self.lower_statement(node)
+        finally:
+            self.runtime_node = previous
+
+    def emit_index_recheck(self, check):
+        code, index_node = check
+        previous = self.runtime_node
+        self.runtime_node = index_node
+        try:
+            self.line(code)
+        finally:
+            self.runtime_node = previous
+
+    def lower_statement(self, node):
         kind = node["kind"]
         if kind == "Binding":
             type_ = self.checker.binding_types[id(node)]
@@ -645,11 +715,22 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             left = node["right"] if node["operator"] == ">>" else node["left"]
             right = node["left"] if node["operator"] == ">>" else node["right"]
             target = self.expression(left)
-            address = self.temp(ptr(target.type), f"&({target.code})")
-            target = CValue(f"*({address.code})", target.type, target.slot, target.path)
-            value = self.expression(right, target.type)
+            # For ordinary places, preserve the original address before RHS
+            # evaluation (notably when it is reached through a pointer).  An
+            # indexed place instead keeps its evaluated base/index expressions,
+            # and resolves the element address against current storage below.
+            address = None if target.rechecks else self.temp(ptr(target.type), f"&({target.code})")
+            # 右侧先成为独立的拥有临时值，再释放左侧旧值。旧值的 Drop
+            # 可以观察或修改其他变量，不能让它改变尚未保存的右侧结果。
+            value = self.argument(self.expression(right, target.type))
             if value.type == NEVER:
                 return True
+            if target.rechecks:
+                for check in target.rechecks:
+                    self.emit_index_recheck(check)
+                address = self.temp(ptr(target.type), f"&({target.code})")
+            assert address is not None
+            target = CValue(f"*({address.code})", target.type, target.slot, target.path)
             # 替换拥有值时先析构旧值，指针原位替换也必须释放旧资源。
             if not self.checker.copyable(target.type):
                 if target.slot and target.slot.borrowed:
@@ -663,10 +744,10 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                     flags = {path[prefix:]: flag for path, flag in target.slot.flags.items()
                              if path[:prefix] == target.path}
                     self.cleanup_slot(Slot(target.code, target.type, flags=flags))
-                elif target.type == STRING:
-                    self.line(f"xe_string_drop(&({target.code}));")
                 else:
-                    self.fail(node, "该资源字段的原位替换清理尚未实现")
+                    # 数组/Vec 元素以及经普通指针访问的位置没有本地 Slot；
+                    # 它们的旧值仍是完整活跃对象，使用同一递归析构入口。
+                    self.drop_complete(target.type, target.code)
             self.transfer(value)
             self.line(f"{target.code} = {value.code};")
             if target.slot:
@@ -735,6 +816,14 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         return False
 
     def expression(self, node, expected=None):
+        previous = self.runtime_node
+        self.runtime_node = node
+        try:
+            return self.lower_expression(node, expected)
+        finally:
+            self.runtime_node = previous
+
+    def lower_expression(self, node, expected=None):
         kind = node["kind"]
         type_ = self.type_at(node, expected)
         if kind in {"Tuple", "Array"} and type_ == NEVER:
@@ -822,7 +911,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.define_type(base)
             operator = "->" if value.type.name == "ptr" else "."
             return CValue(f"({value.code}){operator}{identifier(node['field'])}", type_,
-                          value.slot if operator == "." else None, value.path + (node["field"],))
+                          value.slot if operator == "." else None, value.path + (node["field"],),
+                          value.rechecks if operator == "." else ())
         if kind in {"StructLiteral", "Tuple"}:
             slot = self.storage(type_)
             fields = dict(self.fields(type_))
@@ -925,6 +1015,9 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             value = self.expression(node["operand"], type_)
             if node["operator"] == "not":
                 return self.temp(BOOL, f"!({value.code})")
+            if node["operator"] == "bitnot":
+                # C 会把 u8/i8 等提升到 int。转回结果类型才能保持 Xe 的位宽。
+                return self.temp(type_, f"({self.ctype(type_)})~({value.code})")
             if node["operator"] == "+":
                 return value
             code = f"xe_sub_{type_.name}(0, {value.code})" if type_.name in NUMERIC - {"f32", "f64"} else f"-({value.code})"
@@ -944,7 +1037,14 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.indent -= 1
                 self.line("}")
                 return self.value(result)
+            if operator in {"bitshl", "bitshr"}:
+                right = self.expression(node["right"])
+                # 负次数转换为大无符号值，runtime 的 >= width 检查仍会拒绝它。
+                return self.temp(type_, f"xe_{operator}_{type_.name}({left.code}, (uint64_t)({right.code}))")
             right = self.expression(node["right"], type_)
+            if operator in {"bitand", "bitor", "bitxor"}:
+                symbol = {"bitand": "&", "bitor": "|", "bitxor": "^"}[operator]
+                return self.temp(type_, f"({self.ctype(type_)})(({left.code}) {symbol} ({right.code}))")
             if operator == "%" and type_.name in {"f32", "f64"}:
                 self.fail(node, "浮点余数运算尚未接入 C 后端")
             operations = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "rem"}
@@ -985,12 +1085,30 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             if base.args[0].name in self.checker.types:
                 # C pointer arithmetic requires the complete element layout.
                 self.define_type(base.args[0])
+            if value.type.name == "ptr":
+                # A pointer-valued base is itself evaluated once.  Its target
+                # remains ordinary pointer storage, with the usual alias risks.
+                pointer = self.argument(value)
+                array = f"*({pointer.code})"
+                rechecks = ()
+            elif value.rechecks:
+                # A nested element can move when an outer Vec reallocates.
+                # Keep its already-snapshotted base/index, not an old address.
+                array = value.code
+                rechecks = value.rechecks
+            else:
+                container = self.temp(ptr(value.type), f"&({value.code})")
+                array = f"*({container.code})"
+                rechecks = ()
             index = self.argument(self.expression(node["arguments"][0], Type("usize")))
-            array = f"*({value.code})" if value.type.name == "ptr" else value.code
+            # The inner index expression itself may resize an outer Vec.
+            for prior_check in rechecks:
+                self.emit_index_recheck(prior_check)
             count = base.args[1].name if base.name == "Array" else f"({array}).len"
-            self.line(f"if ({index.code} >= {count}) xe_panic(\"array index out of bounds\");")
+            check = f"if ({index.code} >= {count}) xe_panic(\"array index out of bounds\");"
+            self.line(check)
             items = "items" if base.name == "Array" else "data"
-            return CValue(f"({array}).{items}[{index.code}]", type_)
+            return CValue(f"({array}).{items}[{index.code}]", type_, rechecks=rechecks + ((check, node),))
         name = obj["member"] if obj["kind"] == "AssociatedAccess" else obj["path"]["parts"][-1]
         for tag, (variant, types) in enumerate(self.variants(type_)):
             if variant != name:
@@ -1097,6 +1215,72 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.line("}")
         return CValue("0", NEVER) if type_ == NEVER else self.value(result)
 
+    def literal_test(self, value, literal):
+        """常量选择不产生拥有临时值，也不调用用户代码。"""
+        category, raw = literal["literal_kind"], literal["value"]
+        if value.type == STR:
+            return f"xe_str_compare({value.code}, {literal_string(raw)}) == 0"
+        if category == "unit":
+            code = "0"
+        elif category in {"true", "false"}:
+            code = "true" if raw else "false"
+        elif category in {"CHAR", "BYTE"}:
+            code = str(ord(raw))
+        elif category == "INTEGER":
+            code = integer_static_literal(raw)
+        else:
+            code = str(raw)
+        if value.type.name in NUMERIC:
+            # f32 常量必须先舍入到被比较的类型，不能把其提升后与原
+            # f64 字面量比较，否则 0.1 模式无法命中 f32 的 0.1。
+            code = f"({self.ctype(value.type)})({code})"
+        return f"({value.code}) == ({code})"
+
+    def filter_test(self, selector, value):
+        kind = selector["kind"]
+        if kind == "WildcardSelector":
+            return None
+        if kind == "LiteralSelector":
+            return self.literal_test(value, selector["value"])
+        if kind == "OrSelector":
+            tests = [self.filter_test(choice, value) for choice in selector["choices"]]
+            return None if None in tests else " || ".join(f"({test})" for test in tests)
+        self.fail(selector, "载荷过滤不能递归解构")
+
+    def selector_tests(self, selector, subject):
+        """返回测试及原位载荷；组合模式只选择地址，不复制未选载荷。"""
+        kind = selector["kind"]
+        if kind == "OrSelector":
+            return [case for choice in selector["choices"] for case in self.selector_tests(choice, subject)]
+        if kind == "WildcardSelector":
+            return [(None, [subject])]
+        if kind == "LiteralSelector":
+            return [(self.literal_test(subject, selector["value"]), [subject])]
+        if kind == "VariantSelector":
+            name = selector["path"]["parts"][-1]
+            tag, (_, types) = next((i, variant) for i, variant in enumerate(self.variants(subject.type))
+                                    if variant[0] == name)
+            tests = [f"({subject.code}).tag == {tag}"]
+            payloads = [CValue(self.payload_code(subject.code, name, i), type_) for i, type_ in enumerate(types)]
+            filter_values = payloads
+            filters = selector.get("filters")
+        elif kind == "TupleSelector":
+            tests = []
+            filter_values = [CValue(self.field_code(subject.code, (str(i),)), type_)
+                             for i, type_ in enumerate(subject.type.args)]
+            # 元组选择按位置检查，但 :> 接收一个完整元组，不偷偷
+            # 按成员展开参数。需要解包时由正文 let tuple[...] 明示。
+            payloads = [subject]
+            filters = selector["elements"]
+        else:
+            self.fail(selector, "该选择器没有后端实现")
+        if filters:
+            tests.extend(test for filter_, value in zip(filters, filter_values)
+                         if (test := self.filter_test(filter_, value)) is not None)
+        # && 短路先验证枚举标签，再读取当前变体的载荷；不读取未活动位。
+        condition = " && ".join(f"({test})" for test in tests) if tests else None
+        return [(condition, payloads)]
+
     def branch(self, node, type_):
         result = self.storage(UNIT if type_ == NEVER else type_, "branch_result")
         self.line("{")
@@ -1121,24 +1305,22 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             selector = ({"kind": "VariantSelector", "path": {"parts": ["Maybe", variants[arm["channel"] - 1][0]]}}
                         if channel else arm["selector"])
             kind = selector["kind"]
-            if kind == "WildcardSelector":
-                condition, payloads, wildcard = None, [subject], True
-            elif kind == "VariantSelector":
-                name = selector["path"]["parts"][-1]
-                tag, (_, types) = next((i, v) for i, v in enumerate(variants) if v[0] == name)
-                condition = f"({subject.code}).tag == {tag}"
-                payloads = [CValue(self.payload_code(subject.code, name, i), t) for i, t in enumerate(types)]
-            elif kind == "LiteralSelector":
-                literal = selector["value"]
-                value = literal["value"]
-                if base == STR:
-                    condition = f"xe_str_compare({subject.code}, {literal_string(value)}) == 0"
-                else:
-                    code = "true" if value is True else "false" if value is False else str(ord(value)) if isinstance(value, str) else str(value)
-                    condition = f"({subject.code}) == ({code})"
-                payloads = [subject]
-            else:
-                self.fail(selector, "该组合选择模式尚未接入 C 后端")
+            alternatives = self.selector_tests(selector, subject)
+            conditions = [test for test, _ in alternatives]
+            condition = None if None in conditions else " || ".join(f"({test})" for test in conditions)
+            wildcard = wildcard or condition is None
+            payloads = alternatives[-1][1]
+            if len(alternatives) > 1:
+                # 同一处理器可来自不同变体；其参数数量/类型已由前端验证。
+                # 用选中载荷的地址拼接，而非先复制两边，更不移走未选资源。
+                selected = []
+                for position, payload in enumerate(payloads):
+                    address = f"&({payload.code})"
+                    for test, values in reversed(alternatives[:-1]):
+                        address = (f"&({values[position].code})" if test is None else
+                                   f"(({test}) ? &({values[position].code}) : ({address}))")
+                    selected.append(CValue(f"*({address})", payload.type))
+                payloads = selected
             prefix = "if" if index == 0 else "else if"
             self.line((f"{prefix} ({condition}) " if condition else "else " if index else "") + "{")
             self.indent += 1
@@ -1146,7 +1328,7 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             if borrowed:
                 payloads = [CValue(f"&({p.code})", ptr(p.type, mutable))
                             for p in payloads]
-            elif kind == "VariantSelector" and any(not self.checker.copyable(p.type) for p in payloads):
+            elif kind != "WildcardSelector" and any(not self.checker.copyable(p.type) for p in payloads):
                 # 所有活动载荷现在各自拥有：旧枚举壳不再负责释放这些位。
                 payloads = [self.argument(p) for p in payloads]
                 self.transfer(subject)
@@ -1642,6 +1824,9 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         return result
 
     def display(self, value, stream, node):
+        issue = format_argument_issue(value.type, "")
+        if issue:
+            self.fail(node, issue)
         code, type_ = value.code, value.type
         if type_.name == "ptr":
             code, type_ = f"*({code})", type_.args[0]
@@ -1679,19 +1864,21 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             values.append(self.argument(value))
         stream = "stderr" if name == "eprintln" else "stdout"
         index = 0
-        for text, field, spec, conversion in string.Formatter().parse(template["value"]):
+        for text, field, spec, conversion in parse_format_template(template["value"]):
             if text:
                 self.line(f"xe_io_write({stream}, {literal_string(text)});")
             if field is None:
                 continue
-            if field != "" or conversion or spec not in {"", "p"}:
-                self.fail(template, "首版格式化只支持 {} 与 {:p}")
+            issue = format_field_issue(field, spec, conversion)
+            if issue:
+                self.fail(template, issue)
             value = values[index]
             index += 1
             code, type_ = value.code, value.type
             if spec == "p":
-                if type_.name != "ptr":
-                    self.fail(node, "{:p} 需要指针")
+                issue = format_argument_issue(type_, spec)
+                if issue:
+                    self.fail(node, issue)
                 self.line(f"xe_io_print_pointer({stream}, (const void *)({code}));")
                 continue
             self.display(value, stream, node)
@@ -1839,11 +2026,6 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
     def generate(self):
         for name, binding in getattr(self.checker, "globals", {}).items():
             self.global_slots[name] = Slot(identifier("global_" + name), binding.type)
-        for item in self.tree["items"]:
-            if item["kind"] == "Constant":
-                value = item["value"]
-                if value["kind"] != "Literal" and not (value["kind"] == "Unary" and value["operand"]["kind"] == "Literal"):
-                    self.fail(item, "首版后端的模块级只读绑定只支持字面量及其一元正负号，不重复执行常量初始化函数")
         for name, declaration in self.checker.types.items():
             if not declaration.get("generics") and declaration["kind"] in {"Struct", "Enum"}:
                 self.define_type(name)

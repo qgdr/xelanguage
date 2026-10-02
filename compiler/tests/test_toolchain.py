@@ -314,16 +314,18 @@ class BuildToolTests(ToolchainFixtures):
 
     def test_cc_flags_and_executable_permissions_invalidate_cache(self):
         source = self.package()
+        selected_cc = shutil.which(os.environ.get("CC", "cc")) or CC
         args = ("build", source, "--message-format=json")
         data = json.loads(self.cli(*args)[1]); program = Path(data["program"])
         program.chmod(0o600)
         self.assertFalse(json.loads(self.cli(*args)[1])["cached"])
         self.assertTrue(os.access(program, os.X_OK))
-        # cc 与它在 PATH 中的同一绝对路径是同一个工具，不应人为缓存失效。
-        self.assertTrue(json.loads(self.cli(*args, "--cc", CC)[1])["cached"])
+        # 环境指定的默认工具和它在 PATH 中的绝对路径是同一个工具。
+        # 不假定默认一定叫 cc：发布验收显式选择 CC=gcc。
+        self.assertTrue(json.loads(self.cli(*args, "--cc", selected_cc)[1])["cached"])
         if os.name == "posix":
             import shlex
-            wrapper = self.file("different-cc", '#!/bin/sh\nexec ' + shlex.quote(CC) + ' "$@"\n')
+            wrapper = self.file("different-cc", '#!/bin/sh\nexec ' + shlex.quote(selected_cc) + ' "$@"\n')
             wrapper.chmod(0o755)
             self.assertFalse(json.loads(self.cli(*args, "--cc", wrapper)[1])["cached"])
 
@@ -412,8 +414,10 @@ class BuildToolTests(ToolchainFixtures):
 
 
 class FormattingTests(ToolchainFixtures):
-    def test_all_stage999_examples_roundtrip_and_are_idempotent(self):
-        for path in sorted((ROOT / "tests/stage999").glob("*.xe")):
+    def test_all_language_examples_roundtrip_and_are_idempotent(self):
+        paths = sorted((ROOT / "tests/language").glob("*.xe"))
+        self.assertTrue(paths, "现行语言样例目录不能为空；检查迁移后的路径")
+        for path in paths:
             with self.subTest(file=path.name):
                 original = path.read_bytes().decode("utf-8")
                 formatted = format_source(original, str(path))
@@ -424,9 +428,9 @@ class FormattingTests(ToolchainFixtures):
             "fn main() {\n\tlet[mut] x = 1;  \n     if x == 1 {\nx = 2;\n }\n}\n",
             'fn main() {\nprintln("中 😀 { }\\0");\n// do not trim this comment   \n/* keep\n    this\n block */\n}\n',
             'fn main() {\r\nlet x = tuple[\r\n1,\r\n2,\r\n];\r\n}\r\n',
-            (ROOT / "tests/stage999/enum.xe").read_text(),
-            (ROOT / "tests/stage999/branch_pipeline.xe").read_text(),
-            (ROOT / "tests/stage999/iterator_step.xe").read_text(),
+            (ROOT / "tests/language/enum.xe").read_text(),
+            (ROOT / "tests/language/branch_pipeline.xe").read_text(),
+            (ROOT / "tests/language/iterator_step.xe").read_text(),
         ]
         for number, text in enumerate(samples):
             with self.subTest(number=number):

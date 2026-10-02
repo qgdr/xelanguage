@@ -1,0 +1,14 @@
+// 保持整数位宽；位操作使用单词，不复用所有权符号。
+let READ: u8 = 0b0000_0001;
+let WRITE: u8 = 0b0000_0010;
+
+fn main() {
+    let[mut] flags: u8 = READ;
+    flags = flags bitor WRITE;
+    println("write={}", flags bitand WRITE != 0);
+    flags = flags bitand bitnot WRITE;
+    let all: u8 = bitnot 0;
+    println("flags={} all={}", flags, all); // flags=1 all=255
+    let count: usize = 3;
+    println("shift={} xor={}", flags bitshl count, all bitxor flags); // 8 254
+}

@@ -37,6 +37,20 @@ def protect_source(source: Path, targets):
         raise BuildError("输出路径不能覆盖输入源码")
 
 
+def resolve_link_inputs(link_inputs, targets=()):
+    """Explicit C sources/objects/libraries are inputs, never owned outputs."""
+    paths = []
+    for supplied in link_inputs:
+        path = Path(supplied).resolve()
+        if not path.is_file():
+            raise BuildError(f"外部链接输入不存在或不是普通文件：{supplied}")
+        if path.suffix not in {".c", ".o", ".obj", ".a", ".so", ".dylib", ".lib"}:
+            raise BuildError(f"外部链接输入需要 C 源码、对象或库文件：{supplied}")
+        protect_source(path, targets)
+        paths.append(path)
+    return tuple(paths)
+
+
 def emit_c(source: Path, output: Path, check_borrows=True, warnings=None):
     protect_source(source, [output])
     source_info, tree = load_program(source)
@@ -48,24 +62,27 @@ def emit_c(source: Path, output: Path, check_borrows=True, warnings=None):
 
 
 def build_executable(source: Path, output: Path, check_borrows=True,
-                     cc="cc", extra_flags=(), warnings=None):
+                     cc="cc", extra_flags=(), warnings=None, *, link_inputs=()):
     c_path = output.with_name(output.name + ".c")
+    link_inputs = resolve_link_inputs(link_inputs, [output, c_path])
     protect_source(source, [output, c_path])
     source_info, tree = load_program(source)
     for filename in tree["_sources"]:
         protect_source(Path(filename), [output, c_path])
     generated = lower_program_to_c(source_info, tree, check_borrows, warnings=warnings)
     atomic_text(c_path, generated)
-    return compile_generated(generated, c_path, output, cc=cc, extra_flags=extra_flags)
+    return compile_generated(generated, c_path, output, cc=cc, extra_flags=extra_flags,
+                             link_inputs=link_inputs)
 
 
 def compile_generated(generated: str, c_path: Path, output: Path, *, cc="cc",
-                      extra_flags=(), timeout=30, published_hashes=None):
+                      extra_flags=(), timeout=30, published_hashes=None, link_inputs=()):
     """编译不可变的 C 快照；旧入口与统一工具链共用同一个外部工具边界。
 
 私有 C 输入防止并发写可查看的 .c 文件改变此次实际编译内容。
 可执行文件仍在同文件系统完成后原子发布，失败保留旧版本。
 """
+    link_inputs = resolve_link_inputs(link_inputs, [output, c_path])
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".xe-build-", dir=output.parent) as directory:
         executable = Path(directory) / "program"
@@ -73,7 +90,8 @@ def compile_generated(generated: str, c_path: Path, output: Path, *, cc="cc",
         private_c.write_text(generated, encoding="utf-8", newline="\n")
         command = [cc, "-std=c11", "-O0", "-g",
                    "-Werror=implicit-function-declaration", "-Werror=incompatible-pointer-types",
-                   "-Werror=return-type", *extra_flags, str(private_c), "-o", str(executable)]
+                   "-Werror=return-type", *extra_flags, str(private_c),
+                   *(str(path) for path in link_inputs), "-o", str(executable)]
         if "#include <pthread.h>" in generated:
             command.insert(1, "-pthread")
         try:

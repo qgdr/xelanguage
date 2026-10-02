@@ -1,0 +1,9 @@
+Xelanguage
+Copyright 2026 Xelanguage contributors
+
+This project's original compiler, runtime, standard library, examples and
+documentation are licensed under the Apache License, Version 2.0.
+See LICENSE for the full license text.
+
+Development tools installed separately through uv, Python and the system C
+toolchain are not bundled in the source release and retain their own licenses.

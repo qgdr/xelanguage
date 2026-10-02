@@ -73,11 +73,15 @@ class GenericSemanticTests(unittest.TestCase):
         error = self.fails(text, "XE-GENERIC-0002", limit=8)
         self.assertIn("递归实例化", error.message)
 
-    def test_generic_drop_fails_before_c_backend(self):
-        self.fails("struct[T] Holder{value:T,} impl[T] Drop for Holder[T]{fn drop(self:Self@[mut]){}} fn main(){}", "XE-SEM-0001")
+    def test_generic_drop_is_a_checked_concrete_instance(self):
+        checker = self.succeeds("struct[T] Holder{value:T,} impl[T] Drop for Holder[T]{fn drop(self:Self@[mut]){}} fn main(){let h<<Holder[i32]{.value=42;};}")
+        self.assertEqual({str(t) for t in checker.drop_instances}, {"Holder[i32]"})
 
     def test_generic_copy_is_not_accidentally_global_by_type_name(self):
-        self.fails("struct[T] Holder{value:T,} impl Copy for Holder[i32]; fn main(){}", "XE-SEM-0001")
+        checker = self.succeeds("struct[T] Holder{value:T,} impl Copy for Holder[i32]; fn main(){let h=Holder[i32]{.value=42;};}")
+        from compiler.xe_ast.typesys import I32, STRING, Type
+        self.assertTrue(checker.copyable(Type("Holder", (I32,))))
+        self.assertFalse(checker.copyable(Type("Holder", (STRING,))))
 
     def test_bare_generic_struct_requires_context_or_explicit_types(self):
         self.fails("struct[T] Holder{value:T,} fn main(){let h<<Holder{42 >> .value;};}", "XE-GENERIC-0001")

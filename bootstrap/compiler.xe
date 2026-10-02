@@ -254,7 +254,9 @@ fn reserved_name(name: str) -> bool {
     name == "pub" or name == "use" or name == "as" or name == "crate" or name == "self" or
     name == "super" or name == "region" or name == "extern" or name == "unsafe" or
     name == "true" or name == "false" or name == "unit" or name == "None" or
-    name == "not" or name == "and" or name == "or" or name == "tuple" or name == "type"
+    name == "not" or name == "and" or name == "or" or name == "tuple" or name == "type" or
+    name == "bitand" or name == "bitor" or name == "bitnot" or name == "bitxor" or
+    name == "bitshl" or name == "bitshr"
 }
 fn find_type(p: Program@, name: str) -> usize {
     let[mut] index: usize = 0;
@@ -322,8 +324,12 @@ fn binary_priority(op: str) -> i32 {
     if op == "or" { return 1; }
     if op == "and" { return 2; }
     if op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" { return 3; }
-    if op == "+" or op == "-" { return 4; }
-    if op == "*" or op == "/" or op == "%" { return 5; }
+    if op == "bitor" { return 4; }
+    if op == "bitxor" { return 5; }
+    if op == "bitand" { return 6; }
+    if op == "bitshl" or op == "bitshr" { return 7; }
+    if op == "+" or op == "-" { return 8; }
+    if op == "*" or op == "/" or op == "%" { return 9; }
     0
 }
 fn parse_expression(p: Program@[mut], minimum: i32, allow_struct: bool) -> usize {
@@ -387,7 +393,7 @@ fn parse_primary(p: Program@[mut], allow_struct: bool) -> usize {
         if eat(p, "else") { if at(p, "if") { value.c = parse_primary(p, false); } else { value.c = parse_block(p); } }
         return add_node(p, value);
     }
-    if at(p, "not") or at(p, "-") or at(p, "+") {
+    if at(p, "not") or at(p, "bitnot") or at(p, "-") or at(p, "+") {
         let[mut] value = node(N_UNARY, take(p)); value.op = p.tokens[value.token].text;
         value.a = parse_postfix(p, allow_struct); return add_node(p, value);
     }
@@ -602,6 +608,44 @@ fn compatible(p: Program@, from: usize, to: usize) -> bool {
 fn require_type(g: Generator@, from: usize, to: usize, token: usize) {
     if not compatible(g.program, from, to) { error_at(g.program, token, "type mismatch"); }
 }
+fn integer_type(type_id: usize) -> bool {
+    type_id == T_I32 or type_id == T_I64 or type_id == T_USIZE or type_id == T_U8
+}
+fn check_literal_shift(g: Generator@, n: Node, operand: usize, count_type: usize) {
+    // 只检查直接十进制字面量，不假装已经实现通用静态表达式求值。
+    let count_node = g.program.nodes[n.b];
+    if count_node.kind == N_UNARY and count_node.op == "-" {
+        let positive = g.program.nodes[count_node.a];
+        if positive.kind == N_LITERAL and g.program.tokens[positive.token].kind == TOKEN_NUMBER {
+            if decimal(g.program, positive.token, count_type) != 0 {
+                error_at(g.program, count_node.token, "shift count must not be negative");
+            }
+        }
+    }
+    if count_node.kind != N_LITERAL or g.program.tokens[count_node.token].kind != TOKEN_NUMBER { return; }
+    let count = decimal(g.program, count_node.token, count_type);
+    let[mut] width: usize = 0;
+    if operand == T_U8 { width = 8; }
+    else if operand == T_I32 { width = 32; }
+    else if operand == T_I64 { width = 64; }
+    // usize 的位宽由最终 C 工具链决定，runtime 按 sizeof(size_t) 检查。
+    if width == 0 { return; }
+    if count >= width { error_at(g.program, count_node.token, "shift count outside operand width"); }
+    if n.op != "bitshl" { return; }
+    let[mut] left_node = g.program.nodes[n.a]; let[mut] negative = false;
+    if left_node.kind == N_UNARY and left_node.op == "-" {
+        left_node = g.program.nodes[left_node.a]; negative = true;
+    }
+    if left_node.kind != N_LITERAL or g.program.tokens[left_node.token].kind != TOKEN_NUMBER { return; }
+    let value = decimal(g.program, left_node.token, operand);
+    let[mut] maximum: usize = 9223372036854775807;
+    if operand == T_U8 { maximum = 255; }
+    else if operand == T_I32 { maximum = 2147483647; }
+    if negative { maximum = maximum + 1; }
+    let[mut] index: usize = 0;
+    while index < count { maximum = maximum / 2; index = index + 1; }
+    if value > maximum { error_at(g.program, n.token, "left shift result outside operand range"); }
+}
 fn root_symbol(g: Generator@, id: usize) -> usize {
     let n = g.program.nodes[id];
     if n.kind == N_NAME { return lookup(g, spelling(g.program, n.token)); }
@@ -761,14 +805,7 @@ fn infer(g: Generator@[mut], id: usize, expected: usize) -> usize {
                 g.program.nodes[n.a].kind == N_INDEX or g.program.nodes[n.a].kind == N_DEREF) {
             error_at(g.program, n.token, "address requires a storage location");
         }
-        // 模块可写绑定有真正静态存储；只读值仍按值发射，不对临时副本取址。
-        if g.program.nodes[n.a].kind == N_NAME and
-           lookup(g, spelling(g.program, g.program.nodes[n.a].token)) == UNKNOWN {
-            let constant = constant_index(g.program, spelling(g.program, g.program.nodes[n.a].token));
-            if not g.program.constants[constant].writable {
-                error_at(g.program, n.token, "module let has no addressable storage; copy to a local let first");
-            }
-        }
+        // 模块 let 和 let[mut] 都有静态存储，writable_place 统一验证写权限。
         if n.writable and not writable_place(g, n.a) { error_at(g.program, n.token, "cannot take writable address"); }
         result = compound(g.program, TYPE_POINTER, target, 0, n.writable);
     } else if n.kind == N_DEREF {
@@ -788,25 +825,37 @@ fn infer(g: Generator@[mut], id: usize, expected: usize) -> usize {
     } else if n.kind == N_UNARY {
         result = infer(g, n.a, expected);
         if n.op == "not" { require_type(g, result, T_BOOL, n.token); }
+        else if n.op == "bitnot" {
+            if result != T_I32 and result != T_I64 and result != T_USIZE and result != T_U8 {
+                error_at(g.program, n.token, "bitnot requires integer");
+            }
+        }
         else if result != T_I32 and result != T_I64 and result != T_USIZE { error_at(g.program, n.token, "unary sign requires integer"); }
     } else if n.kind == N_BINARY {
         // 普通左项只检查一次：重复递归整个左子树会让长表达式呈指数增长。
         // 只在左项是字面量时，按右侧类型重新定型；不缓存名字，以免漏查移动状态。
         let[mut] left = infer(g, n.a, expected);
         let[mut] operand = left;
-        if g.program.nodes[n.a].kind == N_LITERAL and
-           g.program.tokens[g.program.nodes[n.a].token].kind == TOKEN_NUMBER {
-            operand = infer(g, n.b, expected); left = infer(g, n.a, operand);
-        }
-        let right = infer(g, n.b, operand);
-        require_type(g, right, left, n.token); result = left;
-        if binary_priority(n.op) <= 2 { require_type(g, left, T_BOOL, n.token); result = T_BOOL; }
-        else if binary_priority(n.op) == 3 {
-            if left != T_I32 and left != T_I64 and left != T_USIZE and left != T_U8 and left != T_CHAR and left != T_BOOL and left != T_STR {
-                error_at(g.program, n.token, "unsupported comparison type");
+        if n.op == "bitshl" or n.op == "bitshr" {
+            let count_type = infer(g, n.b, UNKNOWN);
+            if not integer_type(left) { error_at(g.program, n.token, "shift operand requires integer"); }
+            if not integer_type(count_type) { error_at(g.program, n.token, "shift count requires integer"); }
+            check_literal_shift(g, n, left, count_type); result = left;
+        } else {
+            if g.program.nodes[n.a].kind == N_LITERAL and
+               g.program.tokens[g.program.nodes[n.a].token].kind == TOKEN_NUMBER {
+                operand = infer(g, n.b, expected); left = infer(g, n.a, operand);
             }
-            result = T_BOOL;
-        } else if left != T_I32 and left != T_I64 and left != T_USIZE and left != T_U8 { error_at(g.program, n.token, "arithmetic requires integer"); }
+            let right = infer(g, n.b, operand);
+            require_type(g, right, left, n.token); result = left;
+            if binary_priority(n.op) <= 2 { require_type(g, left, T_BOOL, n.token); result = T_BOOL; }
+            else if binary_priority(n.op) == 3 {
+                if not integer_type(left) and left != T_CHAR and left != T_BOOL and left != T_STR {
+                    error_at(g.program, n.token, "unsupported comparison type");
+                }
+                result = T_BOOL;
+            } else if not integer_type(left) { error_at(g.program, n.token, "arithmetic requires integer"); }
+        }
     } else if n.kind == N_STRUCT { result = n.type_id; }
     else if n.kind == N_BLOCK { if expected != UNKNOWN { result = expected; } else { result = infer(g, n.a, UNKNOWN); } }
     else if n.kind == N_IF {
@@ -916,16 +965,31 @@ fn finish_temporaries(g: Generator@[mut], first: usize) {
 fn put_literal(g: Generator@[mut], raw: str) {
     put(g, "((XeStr){(const unsigned char*)"); put(g, raw); put(g, ", sizeof("); put(g, raw); put(g, ")-1})");
 }
+// 位置文件名来自命令行而不是源码字符串，必须逐字节转义，不能直接拼入 C。
+// 固定三位八进制不会吞掉后续数字，也能保留 UTF-8、引号和反斜杠。
+fn put_panic_location(g: Generator@[mut], token: usize) {
+    let path = g.program.path;
+    let location = g.program.tokens[token];
+    put(g, "xe_set_location(\"");
+    let[mut] index: usize = 0;
+    while index < path.len() {
+        let byte = path.byte_at(index) as usize;
+        put(g, "\\");
+        put_number(g, byte / 64);
+        put_number(g, (byte / 8) % 8);
+        put_number(g, byte % 8);
+        index = index + 1;
+    }
+    put(g, "\", "); put_number(g, location.line);
+    put(g, ", "); put_number(g, location.column); put(g, ");\n");
+}
 fn emit_expression(g: Generator@[mut], id: usize, expected: usize) -> Value {
     if id == 0 { return temporary(g, T_UNIT); }
     let n = g.program.nodes[id]; let type_id = infer(g, id, expected);
     if n.kind == N_NAME {
         let name = spelling(g.program, n.token); let symbol = lookup(g, name);
         if symbol != UNKNOWN { return Value { .id = g.symbols[symbol].id; .type_id = type_id; .place = id; }; }
-        if g.program.constants[constant_index(g.program, name)].writable {
-            return Value { .id = UNKNOWN; .type_id = type_id; .place = id; };
-        }
-        let result = temporary(g, type_id); put_id(g, result.id); put(g, " = c_"); put(g, name); put(g, ";\n"); return result;
+        return Value { .id = UNKNOWN; .type_id = type_id; .place = id; };
     }
     if n.kind == N_LITERAL {
         let result = temporary(g, type_id); put_id(g, result.id); put(g, " = ");
@@ -970,6 +1034,7 @@ fn emit_expression(g: Generator@[mut], id: usize, expected: usize) -> Value {
         let object = emit_expression(g, n.a, type_id); let result = temporary(g, type_id);
         put_id(g, result.id); put(g, " = ");
         if n.kind == N_CAST { put(g, "("); put_type(g, type_id); put(g, ")"); }
+        else if n.op == "bitnot" { put(g, "("); put_type(g, type_id); put(g, ")~"); }
         else if n.op == "-" { put(g, "xe_sub_"); put(g, g.program.types[type_id].name); put(g, "(0, "); put_value(g, object); put(g, ");\n"); return result; }
         else { if n.op == "not" { put(g, "!"); } else { put(g, n.op); } }
         put(g, "("); put_value(g, object); put(g, ");\n"); return result;
@@ -1011,11 +1076,20 @@ fn emit_binary(g: Generator@[mut], n: Node, type_id: usize) -> Value {
         put_id(g, result.id); put(g, " = "); put_value(g, right); put(g, ";\n");
         cleanup(g, g.depth); pop_scope(g, first); g.depth = g.depth - 1; put(g, "}\n"); return result;
     }
-    let right = snapshot(g, emit_expression(g, n.b, operand));
+    let[mut] right_expected = operand;
+    if n.op == "bitshl" or n.op == "bitshr" { right_expected = g.program.nodes[n.b].type_id; }
+    let right = snapshot(g, emit_expression(g, n.b, right_expected));
     put_id(g, result.id); put(g, " = ");
     if operand == T_STR {
         put(g, "(xe_str_compare("); put_value(g, left); put(g, ", "); put_value(g, right); put(g, ") "); put(g, n.op); put(g, " 0)");
-    } else if binary_priority(n.op) >= 4 {
+    } else if n.op == "bitshl" or n.op == "bitshr" {
+        put(g, "xe_"); put(g, n.op); put(g, "_"); put(g, g.program.types[operand].name);
+        put(g, "("); put_value(g, left); put(g, ", (uint64_t)("); put_value(g, right); put(g, "))");
+    } else if n.op == "bitand" or n.op == "bitor" or n.op == "bitxor" {
+        put(g, "("); put_type(g, type_id); put(g, ")("); put_value(g, left);
+        if n.op == "bitand" { put(g, " & "); } else if n.op == "bitxor" { put(g, " ^ "); } else { put(g, " | "); }
+        put_value(g, right); put(g, ")");
+    } else if binary_priority(n.op) >= 8 {
         put(g, "xe_");
         if n.op == "+" { put(g, "add_"); } else if n.op == "-" { put(g, "sub_"); }
         else if n.op == "*" { put(g, "mul_"); } else if n.op == "/" { put(g, "div_"); } else { put(g, "rem_"); }
@@ -1270,7 +1344,7 @@ fn compile(p: Program@[mut]) -> String {
     while index < p.constants.len() {
         let constant = p.constants[index]; let literal = p.nodes[constant.value];
         if literal.kind != N_LITERAL or not p.types[constant.type_id].copy { error_at(p, literal.token, "bootstrap module let requires Copy literal"); }
-        put(header@[mut], "static "); if not constant.writable { put(header@[mut], "const "); }
+        put(header@[mut], "static ");
         put_type(header@[mut], constant.type_id); put(header@[mut], " c_"); put(header@[mut], constant.name); put(header@[mut], " = ");
         require_type(header@, infer(header@[mut], constant.value, constant.type_id), constant.type_id, literal.token);
         if constant.type_id == T_STR { put_literal(header@[mut], spelling(p, literal.token)); }
@@ -1375,6 +1449,8 @@ fn emit_call(g: Generator@[mut], n: Node) -> Value {
     if name == "print" or name == "println" or name == "eprintln" { return emit_print(g, n, name); }
     if name == "panic" {
         let message = emit_expression(g, argument_node(g.program, n, 0), T_STR);
+        // 与 stage0 的 Call span 一致，定位函数名，不定位后面的左括号。
+        put_panic_location(g, callee.token);
         put(g, "xe_io_write(stderr, "); put_value(g, message); put(g, "); xe_panic(\"explicit panic\");\n");
         return Value { .id = 0; .type_id = T_NEVER; .place = 0; };
     }

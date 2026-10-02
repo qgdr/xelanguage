@@ -33,7 +33,7 @@ class FunctionValueExecutionTests(unittest.TestCase):
         return result.stdout
 
     def test_existing_anonymous_function_example(self):
-        text = (ROOT / "tests/stage999/anonymous_function.xe").read_text()
+        text = (ROOT / "tests/language/anonymous_function.xe").read_text()
         self.assertEqual(self.run_source(text, sanitize=True), "42\n42\n")
 
     def test_named_values_as_arguments_return_values_and_if_choices(self):

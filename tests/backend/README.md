@@ -14,12 +14,12 @@
     make compiler-test
 
 覆盖 return/break/continue 清理、条件移动、字段部分移动和实际求值顺序。
-已有 stage999/struct_create.xe、struct_methods.xe、block_drop.xe 等同样参加运行验收。
+已有 language/struct_create.xe、struct_methods.xe、block_drop.xe 等同样参加运行验收。
 
 enum_pipeline.xe 展示枚举载荷、借用匹配和拥有管道；enum_resources.xe 验证嵌套
 堆字符串、通配分支及忽略载荷的清理。两者还经过 ASan/UBSan 内存与未定义行为检测。
 管道与枚举专项运行测试位于 compiler/tests/test_backend_branches.py；
-stage999/pipe.xe 和 enum.xe 也实际执行；检查始终开启，旧旗标不改变规则。
+language/pipe.xe 和 enum.xe 也实际执行；检查始终开启，旧旗标不改变规则。
 
 compiler/tests/test_backend_results.py 覆盖 Maybe/传播/panic、数值转换、Array/Slice、
 范围端点和 File。examples/calculator 是真实读取文件的优先级解释器，运行 make demo。

@@ -5,7 +5,7 @@
 
 当前 IO 实现是 [io/xe_io.h](io/xe_io.h) 中的 C 代码，利用已有的小运行库处理
 String、UTF-8 和输出。它是可替换的 stage0 实现，尚不是用 Xe 编写的完整标准库。
-新增可执行接口不改变 `xe-bootstrap-0.9` 语法版本。
+本候选版语法标识为 `xe-1.0`；库接口不擅自添加新的语言符号或运算含义。
 
 `std::iter::from_fn` 把保存状态的回调包装成拉取迭代器，具体布局由 C 后端生成，
 接口见 [iter/README.md](iter/README.md)。首次 Step::Stop 后不再执行回调，尚不支持 yield。

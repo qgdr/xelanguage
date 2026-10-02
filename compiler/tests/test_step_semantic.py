@@ -134,13 +134,13 @@ class StepSemanticTests(unittest.TestCase):
             }
         """, "XE-ITER-0001", "Step[T]")
 
-    def test_placeholder_iterator_does_not_bypass_step_protocol(self):
+    def test_placeholder_iterator_has_a_frontend_capability_diagnostic(self):
         self.check_source("""
             fn inspect(iterator: Iterator[i32]) {
                 for value in iterator {}
             }
             fn main() {}
-        """, "XE-ITER-0001", "Step[T]")
+        """, "XE-SEM-0001", "当前版本尚未实现内建 Iterator")
 
     def test_custom_next_and_from_fn_accept_step(self):
         self.check_source("""

@@ -5,7 +5,7 @@
 
 ```sh
 make source-scan
-make source-scan INPUT=tests/stage999/iterator_step.xe REPORT=target/debug/words.txt
+make source-scan INPUT=tests/language/iterator_step.xe REPORT=target/debug/words.txt
 ./target/debug/source-scan path/to/input.xe path/to/report.txt
 ```
 
@@ -15,7 +15,7 @@ make source-scan INPUT=tests/stage999/iterator_step.xe REPORT=target/debug/words
 
 - `src/main.xe`：参数、读写结果分支、整体流程；
 - `src/scan.xe`：字节扫描、Vec[Word]、字节/字符迭代；
-- `src/report.xe`：借用容器观察元素，用 String 构造独立报告。
+- `src/report.xe`：通过只读普通指针观察容器元素，用 String 构造独立报告。
 
 扫描结果保存字节下标而不是原文内部指针；报告复制文字并拥有自己的内存。
 每个容器/文件在作用域结束时自动释放。模块加载和基础库合同见 [第 27 章](../../doc/27.md)。

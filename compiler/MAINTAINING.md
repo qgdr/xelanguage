@@ -1,7 +1,8 @@
 # 怎样维护这版编译器
 
 这里先回答“修改一个功能去哪里”，不要求先学完整编译原理。
-入口是 compiler/main.py，Makefile 已把环境和常用命令配好。
+统一入口是 ./xe / python -m compiler；compiler/main.py 保留旧脚本兼容。
+Makefile 已把根环境和常用命令配好，整体结构见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
 
 ## 先分清失败在哪一层
 
@@ -13,9 +14,26 @@
 | 检查通过，但报告后端尚未实现 | backend_c.py，增加真实编译执行验收 |
 | 系统 C 编译器报错 | 生成的 <程序>.c 与 build.py；不是让用户改 Xe 来迁就错误 C |
 | 程序崩溃、泄漏、重复释放 | 生成 C 的资源活跃标记、清理路径和 runtime/xe_runtime.h |
+| Trait 契约/条件 Copy/泛型析构不符合预期 | semantic_traits.py；后端只使用已检查的具体实例 |
+| 模式覆盖或过滤结果错误 | patterns.py 的覆盖分析、semantic.py 的选择器验证和 backend_c.py 的条件发射 |
+| 全局初值/地址错误 | semantic_globals.py / backend_globals.py；标量计算共用 static_values.py |
+| 外部函数 ABI/链接问题 | ffi.py 验证签名；build.py / driver.py 处理显式链接输入 |
 
 make ast 只证明解析；make check 不会运行程序；make build 才调用系统编译器。
 make run 真正执行，make audit 记录每一层。先找到失败层，避免同时改动所有文件。
+
+模块 let 和 let[mut] 都注册到 globals/static_roots；constants 只是折叠初值的表，
+不能再用“在 constants 中”推断它没有地址。只读/可写由 Binding.mutable 控制。
+静态计算与运行库必须一致：f32 每一步舍入、整数除法向零截断、MIN % -1 为 0。
+移位 helper 检查次数与左移溢出，不使用 C 的负数左移，也不依赖负数右移的实现定义行为。
+
+Trait 的默认方法要保留其声明的泛型环境，不让 trait T 与 impl T 意外成为同一未知量。
+具体 Drop 登记到前端检查队列，后端不能临时生成未经检查的正文；递归增长必须有明确
+深度/实例预算和诊断，不能以 Python RecursionError 结束。元组选择的过滤成员与 handler
+输入不同：过滤检查各成员，处理器仍接收完整元组，解包由用户显式写出。
+
+C void 与 Xe Unit 的内部表示不同，所以 extern 使用桥接函数；不要把聚合或带捕获闭包
+猜成兼容 C ABI。外部输入构建目前禁用缓存，因为头文件和库的传递依赖尚未完整登记。
 
 标准库签名集中在 stdlib.py 的共用结构，以及 stdlib_io.py / stdlib_env.py 的接口表。
 操作系统实现位于 stdlib/io 与 stdlib/env，生成 C 时内嵌，不依赖构建目录。
@@ -167,6 +185,11 @@ Shared/Weak 计数规则与互斥保护数据的规则分离；最后强计数�
 ASan/UBSan 不检测所有数据竞争，不能将通过这些测试写成 ThreadSanitizer 已通过。
 
 ## 回归测试地图
+
+发布候选验收统一运行 `make release-check CC=gcc`。release_metadata 固定 CLI/AST/
+项目/锁文件版本和旧脚本入口；release_capabilities 固定 check/emit 能力诊断；
+runtime_locations 验收运行期 Xe 位置；release 检查包内容/安全解包与包外实际运行，
+release_ci 只检验工作流策略，不冒称远程执行。源码发布范围见根 RELEASE.md。
 
 0.9 的 tuple[...] 同时用于类型、值和解包，解析时须按明确的语法位置区分。
 解包不能反复计算右侧，也不能把先写入的目标当作后续源成员；资源忽略、旧值替换与

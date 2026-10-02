@@ -128,8 +128,9 @@ class TupleSemanticTests(unittest.TestCase):
     def test_rhs_return_stops_declaring_and_later_statements(self):
         self.check('fn f(){let tuple[a,b] << tuple[String::from("x"),{return;}]; missing;}')
 
-    def test_tuple_selector_still_reports_existing_support_limit(self):
-        self.assert_error('fn f(p:tuple[i32,bool]) {p? {tuple[_,_] :> _ -> {},};}', "XE-SEM-0001")
+    def test_tuple_selector_executes_one_layer_without_recursive_unpacking(self):
+        self.check('fn f(p:tuple[i32,bool]) {p? {tuple[_,_] :> _ -> {},};}')
+        self.check('fn f(p:tuple[i32,bool])->i32 {p? {tuple[_,_] :> whole -> whole.0,}}')
         self.assert_error('fn f(p:tuple[i32,bool]) {p? {tuple[tuple[_],_] :> _ -> {},};}', "XE-PARSE-0001")
 
 

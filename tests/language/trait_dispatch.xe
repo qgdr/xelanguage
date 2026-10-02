@@ -1,4 +1,4 @@
-// 语法合法；通用 Trait 语义尚未实现，当前应报告 XE-SEM-0001。
+// 静态 Trait 契约：具体实例生成直接函数调用，不需要虚表。
 trait Measure { fn measure(self: Self@) -> i32; }
 struct Point { x: i32, }
 impl Measure for Point {
@@ -9,5 +9,5 @@ fn main() {
     println("{}", point.measure());
 }
 
-// 内联 Trait 约束已经能解析，通用 Trait 检查仍待实现。
+// 泛型约束必须由真实 impl 满足，不能只凭方法同名。
 fn[T: Measure] inspect(value: T@) -> i32 { value.measure() }

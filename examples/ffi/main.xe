@@ -1,0 +1,13 @@
+// 声明实际由 C 文件提供的函数；声明不是在 Xe 中重新实现函数。
+extern "C" {
+    fn demo_sum(left: i32, right: i32) -> i32;
+    fn demo_increment(value: i32@[mut]);
+}
+
+fn main() {
+    let[mut] value: i32 = 40;
+    let answer = demo_sum(value, 2);
+    // 普通参数仍显式取址；C 代码得到可写指针，不取得 value 的所有权。
+    demo_increment(value@[mut]);
+    println("sum={} after={}", answer, value); // sum=42 after=41
+}

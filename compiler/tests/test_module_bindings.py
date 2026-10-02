@@ -1,4 +1,4 @@
-"""模块 let 复用 Constant 语义；真实包验证导出路径和 C 后端边界。"""
+"""模块 let 保留 Constant AST，但拥有只读静态存储；验证模块身份和权限。"""
 import shutil
 import subprocess
 import tempfile
@@ -124,13 +124,11 @@ class ModuleBindingTests(unittest.TestCase):
                 self.assertTrue(errors)
                 self.assertEqual(errors[0].code, "XE-MUT-0001")
 
-    def test_module_binding_has_no_borrowable_storage(self):
-        # Constant 当前按值使用，没有模块静态存储；两类借用均不得制造地址。
-        for address in ("VALUE@", "VALUE@[mut]"):
-            with self.subTest(address=address):
-                errors = check_source("let VALUE: i32 = 1; fn main() { let pointer = " + address + "; }")
-                self.assertTrue(errors)
-                self.assertEqual(errors[0].code, "XE-BORROW-0001")
+    def test_module_binding_has_readonly_storage(self):
+        self.assertEqual(check_source("let VALUE: i32 = 1; fn main() { let pointer = VALUE@; }"), [])
+        errors = check_source("let VALUE: i32 = 1; fn main() { let pointer = VALUE@[mut]; }")
+        self.assertTrue(errors)
+        self.assertEqual(errors[0].code, "XE-MUT-0001")
 
     def test_imported_module_binding_remains_readonly(self):
         self.write({"src/settings.xe": "pub let VALUE: i32 = 1;"})
@@ -138,7 +136,7 @@ class ModuleBindingTests(unittest.TestCase):
                 ("use crate::settings::VALUE as imported; fn main() { imported = 2; }", "XE-MUT-0001"),
                 ("fn main() { crate::settings::VALUE = 2; }", "XE-MUT-0001"),
                 ("use crate::settings as settings; fn main() { settings::VALUE << 2; }", "XE-MUT-0001"),
-                ("use crate::settings::VALUE; fn main() { let pointer = VALUE@[mut]; }", "XE-BORROW-0001")):
+                ("use crate::settings::VALUE; fn main() { let pointer = VALUE@[mut]; }", "XE-MUT-0001")):
             with self.subTest(source=text):
                 self.write({"src/main.xe": text})
                 with self.assertRaises(Diagnostic) as caught:
@@ -177,11 +175,10 @@ class ModuleBindingTests(unittest.TestCase):
 
     def test_unsupported_module_forms_report_actionable_parse_errors(self):
         for declaration in (
-                "let[mut] VALUE: i32 = 1;", "var VALUE: i32 = 1;",
-                "let VALUE: i32 << 1;", "pub let[mut] VALUE: i32 = 1;",
-                "pub var VALUE: i32 = 1;", "pub let VALUE: i32 << 1;",
+                "let VALUE: i32 << 1;", "pub let VALUE: i32 << 1;",
                 "let VALUE = 1;", "pub let VALUE = 1;", "let VALUE: i32;",
-                "let VALUE;"):
+                "let VALUE;", "let[mut] VALUE = 1;", "let[mut] VALUE: i32;",
+                "let[mut] VALUE: i32 << 1;"):
             with self.subTest(declaration=declaration):
                 with self.assertRaises(Diagnostic) as caught:
                     parse_source(declaration + " fn main() {}", "module_binding.xe")
@@ -209,15 +206,17 @@ class ModuleBindingTests(unittest.TestCase):
         self.assertEqual(errors[0].code, "XE-SEM-0001")
         self.assertIn("可复制", errors[0].message)
 
-    def test_nonliteral_initializers_keep_existing_backend_boundary(self):
-        for initializer in ("1 + 2", "value()"):
+    def test_dynamic_initializers_are_rejected_before_backend(self):
+        for initializer in ("value()", "{ 3 }"):
             with self.subTest(initializer=initializer):
                 text = (f"let VALUE: i32 = {initializer}; "
                         "fn value() -> i32 { 3 } fn main() {}")
-                self.assertEqual(check_source(text), [])
+                errors = check_source(text)
+                self.assertTrue(errors)
+                self.assertEqual(errors[0].code, "XE-GLOBAL-0002")
                 self.write({"src/main.xe": text})
                 with self.assertRaises(Diagnostic) as caught:
                     emit_c(self.entry, self.root / "program.c")
-                self.assertEqual(caught.exception.code, "XE-BACKEND-0001")
-                self.assertIn("字面量", caught.exception.message)
+                self.assertEqual(caught.exception.code, "XE-GLOBAL-0002")
+                self.assertIn("初始", caught.exception.message)
                 self.assertEqual(caught.exception.source.filename, str(self.entry))

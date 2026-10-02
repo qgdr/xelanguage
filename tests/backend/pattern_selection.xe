@@ -1,0 +1,23 @@
+// 选择器只筛选当前一层；参数绑定仍在 :> 后明确声明。
+enum Value { Left[i32], Right[i32], Empty, }
+
+fn describe(value: Value) -> str {
+    value ? {
+        Value::Left[0 | 1] | Value::Right[0 | 1] :> number -> "small",
+        Value::Left | Value::Right :> number -> "other",
+        Value::Empty :> _ -> "empty",
+    }
+}
+
+fn choose(pair: tuple[bool, bool]) -> i32 {
+    pair ? {
+        tuple[true, _] :> whole -> 1,
+        tuple[false, true] :> whole -> 2,
+        tuple[false, false] :> whole -> 3,
+    }
+}
+
+fn main() {
+    println("{} {} {}", describe(Value::Left[1]), describe(Value::Right[8]), describe(Value::Empty));
+    println("{} {}", choose(tuple[true, false]), choose(tuple[false, false]));
+}

@@ -200,8 +200,8 @@ def write_report(report, output):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="逐例审核 Xe 的解析、语义、C 生成、编译与运行")
-    parser.add_argument("directory", nargs="?", type=Path, default=ROOT / "tests/stage999")
-    parser.add_argument("-o", "--output", type=Path, default=ROOT / "target/audit/stage999.json")
+    parser.add_argument("directory", nargs="?", type=Path, default=ROOT / "tests/language")
+    parser.add_argument("-o", "--output", type=Path, default=ROOT / "target/audit/language.json")
     parser.add_argument("--cc", default="cc")
     parser.add_argument("--compile-timeout", type=float, default=10.0)
     parser.add_argument("--run-timeout", type=float, default=2.0)

@@ -14,8 +14,8 @@ from .source import Diagnostic, Source
 
 Node = dict[str, Any]
 # 比较链单独处理；普通二元运算使用左结合（右侧阈值 +1）。
-BINARY = {"or": 40, "and": 50, "+": 70, "-": 70,
-          "*": 80, "/": 80, "%": 80}
+BINARY = {"or": 40, "and": 50, "bitor": 62, "bitxor": 63, "bitand": 64, "+": 70, "-": 70,
+          "bitshl": 66, "bitshr": 66, "*": 80, "/": 80, "%": 80}
 COMPARE = {"<", "<=", ">", ">=", "==", "!="}
 LITERALS = {"INTEGER", "FLOAT", "STRING", "CHAR", "BYTE", "true", "false", "unit"}
 PATH_START = {"IDENT", "self", "crate", "super"}
@@ -281,7 +281,7 @@ class Parser:
             return self.node("Use", start, public=public, path=path, names=names, alias=alias)
         if kind in {"let", "var", "const"}:
             # 同一声明附件表示同一写权限，不另设 global/static 关键字。
-            # 只读模块值继续兼容已有 Constant；可写对象有独立静态存储。
+            # 保留已有只读 Constant AST；它与 GlobalBinding 都有静态存储。
             if kind == "const":
                 self.take()
                 if self.current.kind == "[":
@@ -629,7 +629,7 @@ class Parser:
 
     def expression(self, minimum: int = 0, allow_struct: bool = True) -> Node:
         start = self.current.start
-        if self.current.kind in {"not", "+", "-"}:
+        if self.current.kind in {"not", "bitnot", "+", "-"}:
             operator = self.take().kind
             left = self.node("Unary", start, operator=operator,
                              operand=self.expression(100, allow_struct))
@@ -762,7 +762,7 @@ class Parser:
 
     def can_start_expression(self) -> bool:
         return self.current.kind in (LITERALS | PATH_START |
-            {"None", "(", "[", "{", "tuple", "fn", "if", "while", "for", "unsafe", "not", "+", "-"})
+            {"None", "(", "[", "{", "tuple", "fn", "if", "while", "for", "unsafe", "not", "bitnot", "+", "-"})
 
     def bracket_arguments(self) -> list[Node]:
         """共享 [] 附件解析；普通表达式与管道目标使用完全相同的类型附件。"""

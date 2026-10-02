@@ -228,7 +228,7 @@ class DeclarationTests(unittest.TestCase):
         self.assertEqual(node["arms"][0]["handler"]["body"]["kind"], "Branch")
 
     def test_all_target_examples(self):
-        paths = sorted((ROOT / "tests/stage999").glob("*.xe"))
+        paths = sorted((ROOT / "tests/language").glob("*.xe"))
         self.assertGreater(len(paths), 20)
         for path in paths:
             with self.subTest(path=path.name):

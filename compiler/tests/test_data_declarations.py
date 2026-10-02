@@ -14,7 +14,7 @@ def fixture(relative):
 
 class DataDeclarationTests(unittest.TestCase):
     def test_struct_creation_fields_preserve_copy_and_move(self):
-        text, path = fixture("stage999/struct_create.xe")
+        text, path = fixture("language/struct_create.xe")
         tree = parse_source(text, path)
         main = next(item for item in tree["items"] if item.get("name") == "main")
         bindings = {s["name"]: s for s in main["body"]["statements"] if s["kind"] == "Binding"}
@@ -30,7 +30,7 @@ class DataDeclarationTests(unittest.TestCase):
         self.assertEqual(check_source(text, path, True), [])
 
     def test_method_receiver_shapes_and_associated_function(self):
-        text, path = fixture("stage999/struct_methods.xe")
+        text, path = fixture("language/struct_methods.xe")
         tree = parse_source(text, path)
         implementations = {item["target"]["path"]["parts"][0]: item for item in tree["items"]
                            if item["kind"] == "Impl" and item["trait"] is None}
@@ -47,7 +47,7 @@ class DataDeclarationTests(unittest.TestCase):
         self.assertEqual(check_source(text, path, True), [])
 
     def test_copy_and_drop_trait_implementation_shapes(self):
-        text, path = fixture("stage999/trait_copy_drop.xe")
+        text, path = fixture("language/trait_copy_drop.xe")
         tree = parse_source(text, path)
         implementations = [item for item in tree["items"] if item["kind"] == "Impl"]
         self.assertEqual([i["trait"]["path"]["parts"] for i in implementations],
@@ -59,8 +59,8 @@ class DataDeclarationTests(unittest.TestCase):
         self.assertIsNone(drop["result"])
         self.assertEqual(check_source(text, path, True), [])
 
-    def test_custom_trait_is_parsed_but_dispatch_reports_capability_limit(self):
-        text, path = fixture("unsupported/trait_dispatch.xe")
+    def test_custom_trait_is_parsed_and_statically_checked(self):
+        text, path = fixture("language/trait_dispatch.xe")
         tree = parse_source(text, path)
         trait = tree["items"][0]
         self.assertEqual(trait["kind"], "Trait")
@@ -70,6 +70,4 @@ class DataDeclarationTests(unittest.TestCase):
         self.assertEqual(implementation["trait"]["path"]["parts"], ["Measure"])
         self.assertEqual(implementation["target"]["path"]["parts"], ["Point"])
         self.assertEqual(implementation["methods"][0]["body"]["tail"]["kind"], "FieldAccess")
-        errors = check_source(text, path, True)
-        self.assertEqual([error.code for error in errors], ["XE-SEM-0001"])
-        self.assertIn("通用 Trait", errors[0].message)
+        self.assertEqual(check_source(text, path, True), [])

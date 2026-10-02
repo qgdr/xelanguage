@@ -39,7 +39,7 @@ class SyncExecutionTests(unittest.TestCase):
             self.assertEqual(result.stdout,expected)
 
     def test_shared_example(self):
-        self.run_xe((ROOT/'tests/stage999/shared.xe').read_text(),
+        self.run_xe((ROOT/'tests/language/shared.xe').read_text(),
                     'shared Xe\nshared Xe\nshared object expired\n')
 
     def test_threads_example(self):

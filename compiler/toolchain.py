@@ -60,6 +60,8 @@ def make_parser():
         command.add_argument("--sanitize", action="store_true", help="启用 ASan/UBSan，保留默认泄漏检查")
         command.add_argument("--rebuild", action="store_true", help="跳过可执行文件缓存")
         command.add_argument("--cflag", action="append", default=[], help="附加单个 C 选项，例如 --cflag=-Wall")
+        command.add_argument("--link-input", type=Path, action="append", default=[],
+                             help="追加外部 C 源码、对象或库文件；可重复，路径相对当前目录")
         command.add_argument("--build-timeout", type=positive_seconds, default=30, help="C 编译超时秒数")
 
     for name, help in (("ast", "输出单文件 AST JSON"), ("check", "检查可达模块"),
@@ -136,7 +138,7 @@ def check_source(source, format):
 def run_compilation(args, source, project, output):
     result = build(project, source, output, cc=args.cc or os.environ.get("CC", "cc"), release=args.release,
                    sanitize=args.sanitize, extra_flags=args.cflag, rebuild=args.rebuild,
-                   timeout=args.build_timeout)
+                   timeout=args.build_timeout, link_inputs=args.link_input)
     report_diagnostics(result.warnings, args.message_format)
     return result
 
@@ -277,7 +279,7 @@ def test_action(args):
     if args.compiler:
         if args.source or args.manifest_path:
             raise BuildError("--compiler 只验收本仓库编译器，不接受 Xe 源码或项目清单")
-        if args.cc or args.release or args.sanitize or args.rebuild or args.cflag or args.build_timeout != 30:
+        if args.cc or args.release or args.sanitize or args.rebuild or args.cflag or args.link_input or args.build_timeout != 30:
             raise BuildError("--compiler 不接受 Xe 构建选项；现有回归自行设置编译参数")
         command = [sys.executable, "-m", "unittest", "discover", "-s", "compiler/tests", "-p", args.pattern, "-v"]
         if args.message_format == "text" and args.timeout is None:

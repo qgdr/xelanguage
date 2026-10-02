@@ -4,16 +4,20 @@
 地址来源分析只产生 warning，不把普通指针当作独占借用，也不证明内存安全。
 类型、写权限和资源所有权错误仍然阻止编译。标准库接口有明确白名单。
 """
-import string
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from itertools import product
 from typing import Any, NoReturn
 
+from .formatting import format_argument_issue, format_field_issue, parse_format_template
 from .parser import parse_source
+from .patterns import SelectorCase, covered, literal_key
 from .semantic_globals import GlobalChecker
 from .semantic_sync import SYNC_MARKERS, SYNC_TYPES, SyncChecker
+from .semantic_traits import TraitChecker, TraitImplementation
 from .source import Diagnostic, Source
+from .static_values import StaticValueError, integer_limits, scalar_static_value
 from .stdlib_env import env_function
 from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
 from .stdlib_iter import FROM_FN, callback_type, next_result
@@ -140,7 +144,7 @@ def names_used(node: Any) -> dict[str, int]:
     return result
 
 
-class Checker(SyncChecker, GlobalChecker):
+class Checker(TraitChecker, SyncChecker, GlobalChecker):
     def __init__(self, source: Source, tree: Node, check_borrows: bool = True):
         # 旧参数仅为调用兼容保留；写权限和所有权始终检查，不再切换借用模式。
         self.source, self.tree, self.check_borrows = source, tree, True
@@ -159,6 +163,11 @@ class Checker(SyncChecker, GlobalChecker):
         self.static_roots: set[int] = set()
         self.drop_types: set[str] = set()
         self.copy_types: set[str] = set()
+        self.trait_implementations: dict[str, list[TraitImplementation]] = {}
+        self.trait_assumptions: set[tuple[Type, Type]] = set()
+        self.drop_instances: dict[Type, Signature] = {}
+        self._drop_type_visits: set[Type] = set()
+        self._traits_ready = False
         self.scopes: list[dict[str, Binding]] = []
         self.uid = 0
         self.result = UNIT
@@ -224,8 +233,9 @@ class Checker(SyncChecker, GlobalChecker):
                     "elements": [self.type_node(t, span) for t in type_.args]}
         if type_.name.isdigit():
             return {"kind": "Literal", "span": span, "value": int(type_.name), "literal_kind": "integer"}
+        name = type_.name[1:] if type_.name.startswith("$") else type_.name
         return {"kind": "NamedType", "span": span,
-                "path": {"kind": "Path", "span": span, "parts": type_.name.split("::")},
+                "path": {"kind": "Path", "span": span, "parts": name.split("::")},
                 "arguments": [self.type_node(t, span) for t in type_.args]}
 
     def expression_type(self, node):
@@ -348,17 +358,12 @@ class Checker(SyncChecker, GlobalChecker):
 
     def instantiate(self, signature, substitutions, node):
         if not signature.generics:
+            self.check_trait_constraints(signature, substitutions, node)
             return signature
         missing = sorted(g for g in signature.generics if "$" + g not in substitutions)
         if missing:
             self.fail(node, "无法推导泛型 " + ", ".join(missing) + "；请显式填写函数类型参数", "XE-GENERIC-0001")
-        for constraint in signature.node.get("constraints", []) + self.implementation_constraints.get(id(signature), []):
-            trait = constraint["trait"]
-            if trait["kind"] != "NamedType" or trait["path"]["parts"] != ["Copy"]:
-                self.fail(constraint, "目前泛型约束只支持 Copy", "XE-SEM-0001")
-            target = substitute(self.type_of(constraint["target"], signature.generics, signature.self_type), substitutions)
-            if not self.copyable(target):
-                self.fail(node, f"{target} 不满足 Copy 约束", "XE-OWN-0001")
+        self.check_trait_constraints(signature, substitutions, node)
         # unsafe 是调用处的地址风险，不是实例身份。缓存不能把首次调用的
         # 风险留在签名内，污染下一次安全地址的调用；显式模板注记仍保留。
         def canonical(type_):
@@ -420,6 +425,7 @@ class Checker(SyncChecker, GlobalChecker):
 
     def record_type(self, node, type_, name=None):
         """语义侧表单独输出；原始 AST 仍只描述源码，不伪造 unsafe 附件。"""
+        self.ensure_drop_type(type_, node)
         entry = {"kind": node["kind"], "span": node["span"],
                  "type": self.display_type(type_), "unsafe": has_unsafe(type_)}
         if node.get("_file"):
@@ -536,6 +542,9 @@ class Checker(SyncChecker, GlobalChecker):
                 return IO_TYPE_ALIASES[name]
             if name not in PRIMITIVES | STANDARD and name not in self.types:
                 self.fail(node, f"未知类型 {name}", "XE-NAME-0001")
+            if name in {"Map", "Set", "Iterator", "Formatter"} and name not in self.types:
+                self.fail(node, f"当前版本尚未实现内建 {name} 类型的运行布局与接口；此声明仅属于后续目标能力",
+                          "XE-SEM-0001", "目前可使用已实现的 Vec/Box/Step 接口，或定义自己的模块类型；不是语言设计上禁止此类类型")
             if name in self.types and self.types[name]["kind"] == "Trait":
                 self.fail(node, f"{name} 是 Trait 约束，不是具体值类型；动态 Trait 对象尚未设计",
                           "XE-SEM-0001")
@@ -595,12 +604,9 @@ class Checker(SyncChecker, GlobalChecker):
                        if not arg.name.isdigit())
         if type_.name in {"Slice", "SliceMut", "Range", "Bytes", "Chars"}:
             return True
-        # 当前集合只记录已验证的非泛型用户类型。不能用名字命中把
-        # Holder[i32] 的 Copy 承诺错误地推广到 Holder[String]。
-        if (not type_.args and type_.name in self.copy_types
-                and type_.name not in self.drop_types):
+        if (type_, Type("Copy")) in self.trait_assumptions:
             return True
-        return False
+        return self.find_trait_implementation(type_, Type("Copy"), visited) is not None
 
     def carries_borrow(self, type_: Type, visited=None) -> bool:
         if type_.name in {"ptr", "str", "Slice", "SliceMut", "closure", "Bytes", "Chars"}:
@@ -629,9 +635,16 @@ class Checker(SyncChecker, GlobalChecker):
         if any(p["category"] == "region" for p in node.get("generics", [])):
             self.fail(node, "命名区域求解尚未实现；目前支持单文件基础借用检查", "XE-SEM-0001")
         generics = self.generic_set(node) | (extra_generics or set())
-        return Signature(node,
+        signature = Signature(node,
             [self.type_of(p["type"], generics, self_type) for p in node["parameters"]],
             self.type_of(node["result"], generics, self_type), generics, self_type)
+        if self_type is not None and node["parameters"] and node["parameters"][0]["name"] == "self":
+            receiver = signature.parameters[0]
+            target = receiver.args[0] if receiver.name == "ptr" else receiver
+            if target != self_type:
+                self.fail(node["parameters"][0], f"方法 self 类型必须是所属类型 {self_type} 或其一层指针，实际为 {receiver}",
+                          "XE-TYPE-0001", "使用 self: Self、self: Self@ 或 self: Self@[mut]")
+        return signature
 
     def collect(self):
         seen = set()
@@ -657,48 +670,7 @@ class Checker(SyncChecker, GlobalChecker):
                     seen.add(function["name"])
         for name in self.aliases:
             self.resolve_alias(name)
-        for node in self.tree["items"]:
-            if node["kind"] == "Impl" and node["trait"]:
-                if node["trait"]["kind"] != "NamedType" or node["target"]["kind"] != "NamedType":
-                    self.fail(node, "此阶段 impl 仅支持命名类型", "XE-SEM-0001")
-                trait = "::".join(node["trait"]["path"]["parts"])
-                target = "::".join(node["target"]["path"]["parts"])
-                if target in self.aliases:
-                    target = self.resolve_alias(target).name
-                if trait not in {"Drop", "Copy"}:
-                    self.fail(node, "通用 Trait 实现检查尚未实现", "XE-SEM-0001")
-                if trait == "Drop":
-                    if node.get("generics") or self.generic_set(self.types.get(target, {})):
-                        self.fail(node, "泛型类型的自定义 Drop 实现尚未支持；具体字段仍会自动析构", "XE-SEM-0001")
-                    self.drop_types.add(target)
-                if trait == "Copy":
-                    self.copy_types.add(target)
-        # 用户 struct/enum 一律需要显式 Copy；字段看起来简单也不自动
-        # 改变公开复制承诺。内建类型的规则由 copyable() 统一定义。
-        # 注册后先检查 impl 目标，避免 `impl Copy for String;` 绕过后面的
-        # 用户字段检查，把一个内建资源错误地变成可重复释放的 Copy 值。
-        copy_implementations = set()
-        for implementation in self.tree["items"]:
-            if (implementation["kind"] != "Impl" or not implementation["trait"]
-                    or implementation["trait"]["kind"] != "NamedType"
-                    or implementation["trait"]["path"]["parts"] != ["Copy"]):
-                continue
-            target_node = implementation["target"]
-            name = "::".join(target_node["path"]["parts"])
-            alias_target = self.resolve_alias(name) if name in self.aliases else None
-            if alias_target:
-                name = alias_target.name
-            declaration = self.types.get(name)
-            if declaration is None or declaration["kind"] not in {"Struct", "Enum"}:
-                self.fail(implementation, "Copy 只能显式实现于用户结构体或枚举；内建类型的复制规则由语言定义",
-                          "XE-OWN-0001")
-            if (declaration.get("generics") or implementation.get("generics") or target_node["arguments"]
-                    or alias_target and alias_target.args):
-                self.fail(implementation, "泛型类型的条件 Copy 实现尚未完成，不能把一个实例的承诺推广到所有实例",
-                          "XE-SEM-0001")
-            if name in copy_implementations:
-                self.fail(implementation, f"{name} 的 Copy 实现重复", "XE-OWN-0001")
-            copy_implementations.add(name)
+        self.collect_traits()
         for node in self.tree["items"]:
             kind = node["kind"]
             if kind == "Function":
@@ -720,16 +692,12 @@ class Checker(SyncChecker, GlobalChecker):
                 if trait == "Copy" and node["methods"]:
                     self.fail(node, "Copy 是无方法标记 Trait", "XE-OWN-0001")
                 for method in node["methods"]:
-                    key = (target.name, method["name"])
-                    if key in self.methods:
-                        self.fail(method, "方法名称重复", "XE-NAME-0002")
-                    self.methods[key] = self.signature(method, target, self.generic_set(node))
-                    self.implementation_constraints[id(self.methods[key])] = node.get("constraints", [])
+                    self.register_impl_method(node, target, method)
             elif kind == "Use":
                 self.fail(node, "当前语义阶段只检查单文件，尚未加载 use 依赖", "XE-SEM-0001",
                           "将相关声明放在同一文件，或等待模块加载阶段")
         # 验证用户数据字段，不能把未知字段类型留给函数体来猜。
-        for name, node in self.types.items():
+        for node in self.types.values():
             if node["kind"] == "Struct":
                 fields = node["fields"]
                 if len({f["name"] for f in fields}) != len(fields):
@@ -743,14 +711,19 @@ class Checker(SyncChecker, GlobalChecker):
                 for variant in variants:
                     for payload in variant["payload"]:
                         self.type_of(payload, self.generic_set(node))
-            if name in self.copy_types:
-                if name in self.drop_types:
-                    self.fail(node, "Copy 与 Drop 互斥", "XE-OWN-0001")
-                payloads = ([f["type"] for f in node.get("fields", [])] +
-                            [t for v in node.get("variants", []) for t in v["payload"]])
-                if any(not self.copyable(self.type_of(t, self.generic_set(node))) for t in payloads):
-                    self.fail(node, "实现 Copy 的类型要求所有字段和枚举负载都实现 Copy", "XE-OWN-0001")
+        for implementations in self.trait_implementations.values():
+            for implementation in implementations:
+                self.validate_trait_implementation(implementation)
+        # 契约自身也必须合法，不能等到函数被调用才发现未知 Trait/类型。
+        for signature in list(self.functions.values()) + list(self.methods.values()):
+            for constraint in signature.node.get("constraints", []) + self.implementation_constraints.get(id(signature), []):
+                self.constraint_types(constraint, signature.generics, signature.self_type, {})
+        self.validate_copy_implementations()
         self.validate_layouts()
+        self._traits_ready = True
+        for signature in list(self.functions.values()) + list(self.methods.values()):
+            for type_ in signature.parameters + [signature.result]:
+                self.ensure_drop_type(type_, signature.node)
 
     def validate_layouts(self):
         """按值递归会要求无限存储；在前端给出源码位置，不留给 C 报错。
@@ -799,16 +772,23 @@ class Checker(SyncChecker, GlobalChecker):
     def check(self) -> list[Diagnostic]:
         try:
             self.collect()
+            from .ffi import validate_externals
+            validate_externals(self)
             # 先注册所有全局类型/位置，再检查初值，允许静态地址引用后声明对象。
             for node in self.tree["items"]:
-                if node["kind"] != "GlobalBinding":
+                if node["kind"] not in {"GlobalBinding", "Constant"}:
                     continue
                 type_ = self.type_of(node["type"])
                 if not self.copyable(type_):
+                    if node["kind"] == "Constant":
+                        self.fail(node, "当前模块级只读绑定只支持可复制值；资源请在函数内创建", "XE-SEM-0001")
                     self.fail(node, "当前全局变量只支持 Copy 类型；资源的全局初始化与退出清理尚未实现",
                               "XE-GLOBAL-0001", "把 String、Vec 等资源在函数内创建，通过参数传递")
                 self.uid += 1
-                self.globals[node["name"]] = Binding(self.uid, node["name"], type_, node, mutable=True)
+                # 模块 let 和 let[mut] 都拥有静态存储，唯一差别是写权限。
+                # Constant 保留为兼容已有 AST 的节点名，不再表示无地址的值。
+                self.globals[node["name"]] = Binding(
+                    self.uid, node["name"], type_, node, mutable=node["kind"] == "GlobalBinding")
                 self.static_roots.add(self.uid)
                 self.record_type(node, type_, node["name"])
             for node in self.tree["items"]:
@@ -873,8 +853,6 @@ class Checker(SyncChecker, GlobalChecker):
         for constraint in signature.node.get("constraints", []):
             if constraint["trait"]["kind"] == "NamedType" and constraint["trait"]["path"]["parts"] == ["Copy"]:
                 self.copy_generics.add(self.type_of(constraint["target"]).name)
-            else:
-                self.fail(constraint, "当前语义阶段只支持 Copy 泛型约束", "XE-SEM-0001")
         self.result = signature.result
         self.last_uses = names_used(signature.node["body"])
         self.loop_depths, self.temporary_loans = [], []
@@ -980,7 +958,7 @@ class Checker(SyncChecker, GlobalChecker):
                 if fields:
                     ancestor = binding.type
                     for part in fields:
-                        if ancestor.name in self.drop_types:
+                        if self.has_drop(ancestor):
                             self.fail(value.node, "自定义 Drop 类型不能移出资源字段（包括嵌套字段）", "XE-OWN-0002")
                         if ancestor.name == "tuple":
                             ancestor = ancestor.args[int(part)]
@@ -1201,6 +1179,15 @@ class Checker(SyncChecker, GlobalChecker):
             return Value(binding.type, node, (binding.uid, ()), binding.origins,
                          borrowed=binding.capture_borrowed, access_uid=binding.uid,
                          writable=binding.capture_writable if binding.capture_borrowed else None)
+        if not read and node["kind"] == "FieldAccess":
+            # 重新初始化已移动的字段不读取旧值。父对象及更早的路径仍
+            # 需要有效：只放过当前精确叶子，不允许越过已移动的父字段。
+            previous = getattr(self, "_writing_target", None)
+            self._writing_target = node
+            try:
+                return self.infer(node)
+            finally:
+                self._writing_target = previous
         return self.infer(node)
 
     def mutable_place(self, value):
@@ -1228,6 +1215,29 @@ class Checker(SyncChecker, GlobalChecker):
             self.fail(target_node, "不能修改不可变绑定或只读指针", "XE-MUT-0001")
         self.note_closure_access(target, "mut")
         value = self.convert(self.infer(source_node, target.type), target.type)
+        # The target was checked before evaluating the RHS, but a nested place
+        # still needs its owner afterwards.  Reinitializing an entire variable
+        # (or an exactly moved field) is legal; indexing into a moved owner is
+        # not.  This is an ownership check for a directly named aggregate, not
+        # an exclusive-borrow rule for ordinary pointers or captured aliases.
+        leaf = target_node
+        while leaf["kind"] == "Group":
+            leaf = leaf["expression"]
+        root = leaf
+        while root["kind"] in {"Group", "FieldAccess", "BracketApply"}:
+            root = root["expression"] if root["kind"] == "Group" else root["object"]
+        if (value.type != NEVER and leaf["kind"] != "Name" and target.place and binding
+                and root["kind"] == "Name" and len(root["path"]["parts"]) == 1
+                and self.lookup(root["path"]["parts"][0], root, read=False).uid == binding.uid):
+            if not binding.initialized:
+                self.fail(target_node, f"{binding.name} 可能尚未初始化", "XE-INIT-0001")
+            if binding.moved:
+                self.fail(target_node, f"{binding.name} 已移动或在某条分支中移动", "XE-MOVE-0001")
+            path = target.place[1]
+            if any(path[:len(moved)] == moved and
+                   (moved != path or leaf["kind"] == "BracketApply")
+                   for moved in binding.moved_fields):
+                self.fail(target_node, "目标的父资源已经移动", "XE-MOVE-0001")
         if binding and binding.uid in self.static_roots and any(
                 uid not in self.static_roots for uid, _ in value.origins):
             # 即便写在自己的函数体里，这些地址会在函数返回后留在全局对象中。
@@ -1519,7 +1529,9 @@ class Checker(SyncChecker, GlobalChecker):
             if place:
                 self.loan(value.origins if borrowed else ((place[0], False),), node, exclude=value.access_uid)
                 binding = self.by_uid(place[0])
-                if binding and any(place[1][:len(m)] == m for m in binding.moved_fields):
+                if binding and any(place[1][:len(m)] == m and not (
+                        getattr(self, "_writing_target", None) is node and m == place[1])
+                        for m in binding.moved_fields):
                     self.fail(node, "该字段已经移动", "XE-MOVE-0001")
             origins = value.origins if borrowed or self.carries_borrow(field_type) else ()
             if has_unsafe(value.type) and self.carries_borrow(field_type):
@@ -1621,6 +1633,14 @@ class Checker(SyncChecker, GlobalChecker):
         if kind == "Call":
             return self.call(node, expected)
         if kind == "Unary":
+            if node["operator"] == "bitnot":
+                target = value_expected if value_expected and value_expected.name in NUMERIC else None
+                value = self.infer(node["operand"], target)
+                integer_type = self.default(value.type)
+                if integer_type.name not in NUMERIC - {"f32", "f64"}:
+                    self.fail(node, "bitnot 需要整数；逻辑取反使用 not", "XE-TYPE-0004")
+                self.convert(value, integer_type)
+                return Value(integer_type, node)
             operand_expected = BOOL if node["operator"] == "not" else None
             if value_expected and value_expected.name in {"f32", "f64"}:
                 operand_expected = value_expected
@@ -1647,6 +1667,32 @@ class Checker(SyncChecker, GlobalChecker):
             return Value(BOOL, node)
         if kind == "Binary":
             left = self.infer(node["left"], value_expected)
+            if node["operator"] in {"bitshl", "bitshr"}:
+                type_ = self.default(left.type)
+                if type_.name not in NUMERIC - {"f32", "f64"}:
+                    self.fail(node, "移位左侧必须是整数", "XE-TYPE-0004")
+                self.convert(left, type_)
+                # 次数是独立的整数，不必与被移位值同宽；没有数值变量的隐式转换。
+                right = self.infer(node["right"])
+                count_type = self.default(right.type)
+                if count_type.name not in NUMERIC - {"f32", "f64"}:
+                    self.fail(node, "移位次数必须是整数", "XE-TYPE-0004")
+                self.convert(right, count_type)
+                constants = {name: value for name, value in self.constants.items()
+                             if not any(name in scope for scope in self.scopes)}
+                try:
+                    count = scalar_static_value(node["right"], constants, count_type)
+                    limits = integer_limits(type_)
+                    assert limits is not None
+                    if count is not None and not 0 <= count < limits[0]:
+                        self.fail(node["right"], f"移位次数必须在 0..{limits[0]} 内", "XE-BIT-0001")
+                    value = scalar_static_value(node["left"], constants, type_)
+                    if node["operator"] == "bitshl" and value is not None and count is not None:
+                        if not limits[1] <= value << count <= limits[2]:
+                            self.fail(node, f"左移结果超出 {type_} 范围", "XE-BIT-0002")
+                except StaticValueError as error:
+                    self.fail(node, str(error), "XE-BIT-0001")
+                return Value(type_, node)
             if node["operator"] in {"and", "or"}:
                 self.convert(left, BOOL)
                 before = deepcopy(self.scopes)
@@ -1658,8 +1704,16 @@ class Checker(SyncChecker, GlobalChecker):
                 return Value(BOOL, node)
             right = self.infer(node["right"], left.type if left.type != INT_LITERAL else value_expected)
             common = self.common([left, right], node)
+            if node["operator"] in {"bitand", "bitor", "bitxor"}:
+                integer_type = self.default(common.type)
+                if integer_type.name not in NUMERIC - {"f32", "f64"}:
+                    self.fail(node, "bitand/bitor/bitxor 两侧必须是同类型整数；逻辑运算使用 and/or", "XE-TYPE-0004")
+                self.convert(common, integer_type)
+                return Value(integer_type, node)
             if common.type.name not in NUMERIC | {"$integer"}:
                 self.fail(node, "算术运算需要数值")
+            if node["operator"] == "%" and common.type.name in {"f32", "f64"}:
+                self.fail(node, "% 只用于整数余数；浮点余数接口尚未设计", "XE-TYPE-0004")
             return Value(common.type, node, literal_sources=common.literal_sources)
         if kind == "Range":
             endpoint = expected.args[0] if expected and expected.name == "Range" else None
@@ -1716,7 +1770,11 @@ class Checker(SyncChecker, GlobalChecker):
         if kind == "AnonymousFunction":
             return self.anonymous(node)
         if kind == "Unsafe":
-            return self.block(node["body"], expected, lift)
+            # 历史解析器保留这个节点供 AST/迁移工具识别，但它从未成为
+            # 已确认的可执行语法。必须在 check 阶段拒绝，不能假装普通块
+            # 检查成功后才让 C 后端报能力错误。风险附件属于指针的类型。
+            self.fail(node, "unsafe 代码块不属于 Xe 当前支持范围；unsafe 是指针风险附件，不是代码块权限",
+                      "XE-SEM-0001", "使用 T@[unsafe] 或 T@[mut, unsafe] 标注指针风险；普通代码块仍写 { ... }")
         self.fail(node, f"尚未支持的语义结构 {kind}", "XE-SEM-0001")
 
     def variant(self, name, expected, node, optional=False):
@@ -2097,7 +2155,10 @@ class Checker(SyncChecker, GlobalChecker):
             # ConversionError 是一个无资源负载的标准错误值，不臆造公开字段。
             # 转换的范围检查在后端执行；这里不将失败改成编译期拒绝。
             return Value(maybe(Type(parts[0]), CONVERSION_ERROR), node)
-        if (standard_signature is not None and standard_signature.formatted) or name == "format":
+        if name == "format":
+            self.fail(node, "内建 format(...) 字符串构造尚未在当前版本实现", "XE-SEM-0001",
+                      "可使用已实现的 print/println，或定义普通 format 函数；不把目标库接口当作已实现能力")
+        if standard_signature is not None and standard_signature.formatted:
             if not nodes:
                 self.fail(node, "格式化调用需要格式字符串", "XE-CALL-0001")
             template = self.convert(self.infer(nodes[0]), STR)
@@ -2105,14 +2166,21 @@ class Checker(SyncChecker, GlobalChecker):
             if template.literal is None:
                 self.fail(nodes[0], "当前阶段要求格式字符串为字面量", "XE-SEM-0001")
             try:
-                fields = [field for _, field, _, _ in string.Formatter().parse(template.literal) if field is not None]
+                parts = parse_format_template(template.literal)
+                fields = [(field, spec, conversion) for _, field, spec, conversion in parts if field is not None]
             except ValueError:
                 self.fail(nodes[0], "格式字符串花括号不匹配", "XE-FORMAT-0001")
             if len(fields) != len(values):
                 self.fail(node, "格式占位符数量与参数不一致", "XE-FORMAT-0001")
-            for value in values:
+            for (field, spec, conversion), value in zip(fields, values):
+                issue = format_field_issue(field, spec, conversion)
+                if issue:
+                    self.fail(nodes[0], issue, "XE-SEM-0001")
+                issue = format_argument_issue(value.type, spec)
+                if issue:
+                    self.fail(value.node, issue, "XE-TYPE-0001" if spec == "p" else "XE-SEM-0001")
                 self.consume(value)
-            return Value(STRING if name == "format" else UNIT, node)
+            return Value(UNIT, node)
         signatures = {"String::from": ([STR], STRING), "String::new": ([], STRING),
                       "File::open": ([STR], maybe(FILE, IO_ERROR)),
                       "File::create": ([STR], maybe(FILE, IO_ERROR)),
@@ -2400,6 +2468,66 @@ class Checker(SyncChecker, GlobalChecker):
         self.scopes.pop()
         return Value(result.type, handler, origins=result.origins)
 
+    def selector_cases(self, selector, base, variants):
+        """验证一层选择器，返回独立的常量/_ 选择行。
+
+        选择器只筛选，不定义参数。枚举完整载荷按原顺序交给处理器，
+        元组则交整个元组；过滤位置的常量或 _ 不改变这个传递规则。
+        """
+        kind = selector["kind"]
+        if kind == "OrSelector":
+            cases = [case for choice in selector["choices"]
+                     for case in self.selector_cases(choice, base, variants)]
+            if any(case.handler_types != cases[0].handler_types for case in cases):
+                self.fail(selector, "组合选择器必须给处理器传入相同数量和类型的载荷",
+                          "XE-MATCH-0004", "不同载荷签名分别写成两个 :> 分支")
+            return cases
+        if kind == "WildcardSelector":
+            return [SelectorCase("*", (), (base,))]
+        if kind == "LiteralSelector":
+            literal = self.convert(self.infer(selector["value"], base), base)
+            key = literal_key(literal.literal, base, selector["value"]["literal_kind"])
+            return [SelectorCase("$value", (key,), (base,))]
+        if kind == "TupleSelector":
+            if base.name != "tuple":
+                self.fail(selector, "tuple 选择器只用于元组", "XE-MATCH-0001")
+            key, types, filters = "$tuple", list(base.args), selector["elements"]
+            # tuple 选择器只筛选成员，沿用冻结规则传入整个元组。
+            # 显式 let tuple[...] 解包与 selector 必须保持不同职责。
+            payload_types = (base,)
+        elif kind == "VariantSelector":
+            path = selector["path"]["parts"]
+            key, owner = path[-1], path[0]
+            alias_type = self.resolve_alias(owner) if owner in self.aliases else None
+            if alias_type:
+                owner = alias_type.name
+            if (len(path) != 2 or owner != ("Maybe" if base.name == "maybe" else base.name)
+                    or key not in variants or alias_type is not None and alias_type != base):
+                self.fail(selector, "变体不属于被匹配类型", "XE-MATCH-0001")
+            types, filters = variants[key], selector.get("filters")
+            payload_types = None
+            if filters is None:
+                return [SelectorCase(key, (None,) * len(types), tuple(types))]
+        else:
+            self.fail(selector, "该选择器不能用于一层模式匹配", "XE-MATCH-0001")
+        if len(filters) != len(types):
+            self.fail(selector, f"选择器需要 {len(types)} 个直接载荷位置，实际 {len(filters)} 个",
+                      "XE-MATCH-0001")
+
+        def choices(filter_, type_):
+            if filter_["kind"] == "WildcardSelector":
+                return [None]
+            if filter_["kind"] == "OrSelector":
+                return [value for choice in filter_["choices"] for value in choices(choice, type_)]
+            if filter_["kind"] == "LiteralSelector":
+                literal = self.convert(self.infer(filter_["value"], type_), type_)
+                return [literal_key(literal.literal, type_, filter_["value"]["literal_kind"])]
+            self.fail(filter_, "载荷过滤只允许直接字面量或 _，不能递归解构",
+                      "XE-MATCH-0001", "把载荷交给 :> 参数后再显式匹配下一层")
+
+        options = [choices(filter_, type_) for filter_, type_ in zip(filters, types)]
+        return [SelectorCase(key, tuple(values), tuple(types), payload_types) for values in product(*options)]
+
     def branch(self, node, expected=None, lift=False):
         value = self.infer(node["input"])
         borrowed = "borrow" in node["modifiers"]
@@ -2434,43 +2562,35 @@ class Checker(SyncChecker, GlobalChecker):
         if base.name == "maybe":
             variants = {"Yes": [base.args[0]], "None" if base.args[1] == NONE else "No": [] if base.args[1] == NONE else [base.args[1]]}
         before = deepcopy(self.scopes)
-        results, states, covered = [], [], set()
-        wildcard = False
+        results, states, previous_cases = [], [], []
+        full_cases = ([SelectorCase(name, (None,) * len(types), tuple(types))
+                       for name, types in variants.items()] if variants else
+                      [SelectorCase("$tuple", (None,) * len(base.args), base.args)] if base.name == "tuple" else
+                      [SelectorCase("$value", (None,), (base,))])
         for arm in node["arms"]:
             self.scopes = deepcopy(before)
-            if wildcard:
-                self.fail(arm, "该分支不可达：前面的 _ 已覆盖全部情况", "XE-MATCH-0002")
+            if all(covered(case, previous_cases) for case in full_cases):
+                self.fail(arm, "该分支不可达：前面的分支已覆盖全部情况", "XE-MATCH-0002")
             if arm["kind"] == "ChannelArm":
                 if base.name != "maybe":
                     self.fail(arm, "1>/2> 仅用于 T? 或 T?[E]", "XE-MATCH-0001")
                 key = "Yes" if arm["channel"] == 1 else ("None" if base.args[1] == NONE else "No")
                 types = variants[key]
+                cases = [SelectorCase(key, (None,) * len(types), tuple(types))]
             else:
-                selector = arm["selector"]
-                if selector["kind"] == "WildcardSelector":
-                    wildcard, key, types = True, "_", [base]
-                elif selector["kind"] == "VariantSelector":
-                    path = selector["path"]["parts"]
-                    key = path[-1]
-                    owner = path[0]
-                    alias_type = self.resolve_alias(owner) if owner in self.aliases else None
-                    if alias_type:
-                        owner = alias_type.name
-                    if (len(path) != 2 or owner != ("Maybe" if base.name == "maybe" else base.name)
-                            or key not in variants or alias_type is not None and alias_type != base):
-                        self.fail(selector, "变体不属于被匹配类型", "XE-MATCH-0001")
-                    if selector.get("filters") is not None:
-                        self.fail(selector, "载荷过滤模式尚未实现", "XE-SEM-0001")
-                    types = variants[key]
-                elif selector["kind"] == "LiteralSelector":
-                    literal = self.convert(self.infer(selector["value"]), base)
-                    key, types = repr(literal.literal), [base]
-                else:
-                    self.fail(selector, "组合模式尚未实现", "XE-SEM-0001")
-            if key in covered:
-                self.fail(arm, "重复的分支不可达", "XE-MATCH-0002")
-            covered.add(key)
-            if not borrowed and base.name in self.drop_types and any(not self.copyable(t) for t in types):
+                cases = self.selector_cases(arm["selector"], base, variants)
+                types = list(cases[0].handler_types)
+            for index, case in enumerate(cases):
+                # | 的选择集合与书写次序无关。检测同一组合内冗余时
+                # 同时比较两边，不能让 "true | _" 和 "_ | true"
+                # 因排序不同而一个通过、另一个报错。
+                other_choices = cases[:index] + cases[index + 1:]
+                if covered(case, previous_cases) or covered(case, other_choices):
+                    self.fail(arm, "选择器重复或冗余：已由之前分支或同一组合的其他选择器完整覆盖",
+                              "XE-MATCH-0002")
+            previous_cases.extend(cases)
+            if (not borrowed and self.has_drop(base) and any(case.tag != "*" for case in cases)
+                    and any(not self.copyable(t) for t in types)):
                 self.fail(arm, "自定义 Drop 枚举不能移出资源载荷", "XE-OWN-0002")
             if has_unsafe(value.type):
                 types = [mark_unsafe(t) if self.carries_borrow(t) else t for t in types]
@@ -2482,7 +2602,7 @@ class Checker(SyncChecker, GlobalChecker):
                 states.append(deepcopy(self.bindings()))
         self.scopes = before
         self.merge({}, states)
-        if not wildcard and (set(variants) - covered if variants else not (base == BOOL and {"True", "False"} <= covered)):
+        if not all(covered(case, previous_cases) for case in full_cases):
             self.fail(node, "模式匹配没有覆盖所有情况", "XE-MATCH-0003", "补齐所有变体，或添加 _ 分支")
         return self.common(results, node)
 

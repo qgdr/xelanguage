@@ -21,8 +21,20 @@ typedef struct { FILE *handle; } XeFile;
 /* 字节/字符迭代器只保存视图和游标，不拥有源码缓冲区。 */
 typedef struct { XeStr text; size_t position; } XeTextIter;
 
+/* 每个线程保存当前 Xe 操作的位置，不共享可写的诊断状态。
+ * 文件名指向生成 C 内的字符串常量，不拥有内存。它不是栈回溯，
+ * 没有映射的独立 C / 自举子集入口仍可以使用普通 xe_panic。
+ */
+typedef struct { const char *file; size_t line; size_t column; } XeLocation;
+static _Thread_local XeLocation xe_current_location = {0};
+static void xe_set_location(const char *file, size_t line, size_t column) {
+    xe_current_location = (XeLocation){file, line, column};
+}
 static void xe_panic(const char *message) {
     fprintf(stderr, "Xe runtime error: %s\n", message);
+    if (xe_current_location.file)
+        fprintf(stderr, "  at %s:%zu:%zu\n", xe_current_location.file,
+                xe_current_location.line, xe_current_location.column);
     exit(1);
 }
 static void *xe_alloc(size_t bytes) {
@@ -237,4 +249,51 @@ XE_INTEGER(u64, uint64_t, 0)
 XE_INTEGER(isize, intptr_t, INTPTR_MIN)
 XE_INTEGER(usize, size_t, 0)
 #undef XE_INTEGER
+
+/* 位移显式检查次数和左移溢出。用 uint64_t 计算幅值，绝不对负的
+ * C 有符号数执行 <<，也不依赖 C 对负数 >> 的实现定义行为。
+ * 右移负数相当于除以 2^count 向下取整，从而保留符号位。 */
+#define XE_UNSIGNED_SHIFT(NAME, TYPE, MAXIMUM) \
+static TYPE xe_bitshl_##NAME(TYPE value, uint64_t count) { \
+    if (count >= sizeof(TYPE)*CHAR_BIT) xe_panic("shift count out of range"); \
+    if ((uint64_t)value > ((uint64_t)(MAXIMUM) >> count)) xe_panic("left shift overflow"); \
+    return (TYPE)((uint64_t)value << count); \
+} \
+static TYPE xe_bitshr_##NAME(TYPE value, uint64_t count) { \
+    if (count >= sizeof(TYPE)*CHAR_BIT) xe_panic("shift count out of range"); \
+    return (TYPE)((uint64_t)value >> count); \
+}
+#define XE_SIGNED_SHIFT(NAME, TYPE, MINIMUM, MAXIMUM) \
+static TYPE xe_bitshl_##NAME(TYPE value, uint64_t count) { \
+    if (count >= sizeof(TYPE)*CHAR_BIT) xe_panic("shift count out of range"); \
+    if (value >= 0) { \
+        if ((uint64_t)value > ((uint64_t)(MAXIMUM) >> count)) xe_panic("left shift overflow"); \
+        return (TYPE)((uint64_t)value << count); \
+    } \
+    uint64_t magnitude = (uint64_t)(-(value + 1)) + 1; \
+    uint64_t maximum = (uint64_t)(MAXIMUM) + 1; \
+    if (magnitude > (maximum >> count)) xe_panic("left shift overflow"); \
+    uint64_t result = magnitude << count; \
+    return result == maximum ? (MINIMUM) : (TYPE)-(TYPE)result; \
+} \
+static TYPE xe_bitshr_##NAME(TYPE value, uint64_t count) { \
+    if (count >= sizeof(TYPE)*CHAR_BIT) xe_panic("shift count out of range"); \
+    if (value >= 0) return (TYPE)((uint64_t)value >> count); \
+    uint64_t magnitude = (uint64_t)(-(value + 1)) + 1; \
+    uint64_t result = magnitude >> count; \
+    if (magnitude & ((UINT64_C(1) << count) - 1)) result += 1; \
+    return result == (uint64_t)(MAXIMUM) + 1 ? (MINIMUM) : (TYPE)-(TYPE)result; \
+}
+XE_UNSIGNED_SHIFT(u8, uint8_t, UINT8_MAX)
+XE_UNSIGNED_SHIFT(u16, uint16_t, UINT16_MAX)
+XE_UNSIGNED_SHIFT(u32, uint32_t, UINT32_MAX)
+XE_UNSIGNED_SHIFT(u64, uint64_t, UINT64_MAX)
+XE_UNSIGNED_SHIFT(usize, size_t, SIZE_MAX)
+XE_SIGNED_SHIFT(i8, int8_t, INT8_MIN, INT8_MAX)
+XE_SIGNED_SHIFT(i16, int16_t, INT16_MIN, INT16_MAX)
+XE_SIGNED_SHIFT(i32, int32_t, INT32_MIN, INT32_MAX)
+XE_SIGNED_SHIFT(i64, int64_t, INT64_MIN, INT64_MAX)
+XE_SIGNED_SHIFT(isize, intptr_t, INTPTR_MIN, INTPTR_MAX)
+#undef XE_UNSIGNED_SHIFT
+#undef XE_SIGNED_SHIFT
 #endif

@@ -92,11 +92,11 @@ class ExplicitCopyTests(unittest.TestCase):
         self.assert_error("struct Point { x: i32, } impl Copy for Point; impl Copy for Point;",
                           "XE-OWN-0001", "重复")
 
-    def test_generic_copy_is_honestly_unsupported_not_a_typename_wide_promise(self):
-        for implementation in ("impl[T] Copy for Holder[T];", "impl Copy for Holder[i32];"):
-            with self.subTest(implementation=implementation):
-                self.assert_error("struct[T] Holder { value: T, } " + implementation,
-                                  "XE-SEM-0001", "泛型类型的条件 Copy")
+    def test_generic_copy_requires_a_bound_or_a_copyable_concrete_target(self):
+        self.assert_error("struct[T] Holder { value: T, } impl[T] Copy for Holder[T];",
+                          "XE-OWN-0001", "所有字段")
+        self.assert_ok("struct[T] Holder { value: T, } impl Copy for Holder[i32];")
+        self.assert_ok("struct[T] Holder { value: T, } impl[T] Copy for Holder[T] where T implements Copy {}")
 
     def test_mutable_pointer_can_be_passed_twice_without_reborrowing(self):
         self.assert_ok("fn increase(pointer: i32@[mut]) { pointer# = pointer# + 1; } "

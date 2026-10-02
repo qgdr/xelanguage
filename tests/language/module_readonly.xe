@@ -1,0 +1,14 @@
+// 模块 let 是有稳定地址的只读对象，而不是临时复制值。
+let LIMIT: i32 = 40 + 2;
+let LIMIT_POINTER: i32@ = LIMIT@;
+
+fn limit_address() -> i32@ {
+    LIMIT@
+}
+
+fn main() {
+    let pointer = limit_address();
+    println("{} {} {}", LIMIT, pointer#, LIMIT_POINTER#); // 42 42 42
+    // LIMIT = 0;                 // 报错：模块只读绑定不能写
+    // let bad = LIMIT@[mut];     // 报错：不能升级为可写指针
+}

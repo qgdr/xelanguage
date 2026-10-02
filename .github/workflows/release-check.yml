@@ -1,0 +1,65 @@
+# 只验证 RC 候选：不创建 tag，不上传产物，不调用任何发布 API。
+# Ubuntu 24.04 的 GitHub-hosted runner 是当前支持的 Linux x86_64 环境。
+name: Release candidate checks
+
+"on":
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: gcc
+      UV_PYTHON: "3.13"
+      # Python 已由 setup-python 准备，禁止 uv 悄悄另选下载的解释器。
+      UV_PYTHON_DOWNLOADS: never
+      PYTHONUNBUFFERED: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # 维护时从官方 release 页面核对完整 commit SHA，不使用漂移的主版本标签。
+      # https://github.com/actions/checkout/releases/tag/v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # https://github.com/actions/setup-python/releases/tag/v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      # https://github.com/astral-sh/setup-uv/releases/tag/v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          # 小项目无需跨作业缓存；也不向 PR 运行共享写入缓存。
+          enable-cache: false
+
+      - name: Record supported toolchain
+        run: |
+          test "$(uname -m)" = "x86_64"
+          gcc --version
+          python --version
+          uv --version
+
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev --python python
+
+      # 与本地共用同一门禁。该目标包括 python-check、全量 compiler-test、
+      # 三代自举固定点、打包和包外冒烟；不绕开 ASan/UBSan/default LSan。
+      - name: Validate candidate without publishing
+        run: make release-check CC=gcc RELEASE_FLAGS=--require-clean

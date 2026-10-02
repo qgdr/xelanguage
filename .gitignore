@@ -6,6 +6,10 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 .venv
@@ -16,5 +20,25 @@ wheels/
 **.ll
 **.o
 **.out
+*.bc
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.orig
+*.rej
+*~
+.DS_Store
+# Local credentials/configuration; preserve example environment templates.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/.aws/
+/.ssh/
 ignore/
 target/

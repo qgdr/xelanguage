@@ -25,7 +25,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(status, 0, err)
             data = json.loads(output.read_text())
             self.assertEqual(data["schema_version"], 1)
-            self.assertEqual(data["syntax_version"], "xe-bootstrap-0.9")
+            self.assertEqual(data["syntax_version"], "xe-1.0")
             status, stdout, _ = self.run_cli([str(source), "-o", "-"])
             self.assertEqual(status, 0)
             self.assertEqual(json.loads(stdout), data)

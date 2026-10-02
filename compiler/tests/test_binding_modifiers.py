@@ -71,13 +71,13 @@ class BindingModifierTests(unittest.TestCase):
         self.assertEqual(check_source(copied, check_borrows=True)[0].code, "XE-OWN-0001")
 
     def test_default_mode_requires_mutability_annotations(self):
-        text = (ROOT / "tests/stage999/mutable_unchecked.xe").read_text()
+        text = (ROOT / "tests/language/mutable_permissions.xe").read_text()
         self.assertEqual(check_source(text), [])
         invalid = "fn f(x: i32) { x = 1; }"
         self.assertEqual(check_source(invalid)[0].code, "XE-MUT-0001")
 
     def test_new_and_old_safety_options_are_equivalent(self):
-        source = ROOT / "tests/stage999/mutable_unchecked.xe"
+        source = ROOT / "tests/language/mutable_permissions.xe"
         statuses = []
         for flags in ([], ["--check-safety"], ["--check-borrows"]):
             out, err = io.StringIO(), io.StringIO()
@@ -101,7 +101,7 @@ class BindingModifierTests(unittest.TestCase):
 
     @unittest.skipUnless(CC, "运行验收需要系统 C 编译器")
     def test_default_mode_executes_mutable_pointer(self):
-        text = (ROOT / "tests/stage999/mutable_unchecked.xe").read_text()
+        text = (ROOT / "tests/language/mutable_permissions.xe").read_text()
         annotated = '''fn write(p: i32@[mut]) { p# = 8; }
         fn main() { let[mut] x = 1; let p: i32@[mut] = x@[mut]; write(p); println("{}", x); }'''
         for source_text, expected in ((text, "9 hello, world\n"), (annotated, "8\n")):
@@ -174,7 +174,7 @@ class BindingModifierTests(unittest.TestCase):
 
     @unittest.skipUnless(CC, "运行验收需要系统 C 编译器")
     def test_public_sample_and_hidden_alias_execute_identically(self):
-        text = (ROOT / "tests/stage999/mutable_binding.xe").read_text()
+        text = (ROOT / "tests/language/mutable_binding.xe").read_text()
         for spelling in (text, text.replace("let[mut]", "var")):
             with tempfile.TemporaryDirectory() as directory:
                 source, program = Path(directory) / "test.xe", Path(directory) / "program"

@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     actions.add_argument("--build", action="store_true", help="生成 C 并编译可执行程序")
     actions.add_argument("--run", action="store_true", help="构建并运行程序")
     parser.add_argument("--cc", default="cc", help="系统 C 编译器路径（默认 cc）")
+    parser.add_argument("--link-input", type=Path, action="append", default=[],
+                        help="外部 C 源码、对象或库文件；构建/运行时可重复")
     parser.add_argument("--check-safety", "--check-borrows", dest="check_borrows", action="store_true",
                         help="兼容选项；始终检查类型、写权限和所有权，指针风险只警告")
     # 分界符之前只解析编译器选项，之后只交给目标程序。不能用 shell 字符串
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(arguments)
     if has_separator and not args.run:
         parser.error("-- 后的程序参数只能与 --run 一起使用")
+    if args.link_input and not (args.build or args.run):
+        parser.error("--link-input 只能用于 --build 或 --run")
     if args.check_borrows and not (args.check or args.emit_c or args.build or args.run):
         parser.error("--check-safety 必须用于检查或后端动作；AST 阶段不检查可变性或借用")
     # 暂停开放不检查模式；旧旗标保留以免已有构建命令失效。
@@ -85,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"C 已输出：{output}")
             else:
                 assert output is not None  # 构建/运行总有默认或显式程序路径。
-                build_executable(args.source, output, args.check_borrows, args.cc, warnings=warnings)
+                build_executable(args.source, output, args.check_borrows, args.cc, warnings=warnings,
+                                 link_inputs=args.link_input)
                 if args.run:
                     report_warnings()
                     return subprocess.call([str(output.resolve()), *program_arguments])

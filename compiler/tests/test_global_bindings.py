@@ -119,7 +119,7 @@ class GlobalBindingTests(unittest.TestCase):
                 self.assertTrue(error.hint)
 
     def test_dynamic_initializer_is_rejected_before_c_backend(self):
-        for initializer in ("value()", "1 + 2", "{ 3 }", "if true { 1 } else { 2 }"):
+        for initializer in ("value()", "{ 3 }", "if true { 1 } else { 2 }"):
             with self.subTest(initializer=initializer):
                 error = self.assert_error(f"let[mut] COUNT: i32 = {initializer}; "
                                           "fn value() -> i32 { 3 } fn main() {}")

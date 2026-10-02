@@ -1,9 +1,10 @@
 [project]
 name = "xelanguage"
-version = "0.1.0"
+version = "1.0.0rc1"
 description = "Xe language and bootstrap compiler with C backend"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = []
 
 [dependency-groups]

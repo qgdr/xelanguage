@@ -2,9 +2,13 @@
 
 这是当前编译器实现，不使用 LLVM；Python 实现只使用标准库，
 构建可执行程序时调用系统 GCC/Clang 兼容的 C 编译器。
-与仓库其余工具共用根目录 uv 项目和 .venv；源码按 [Bootstrap Syntax 0.9](../doc/17.md) 解析。
+与仓库其余工具共用根目录 uv 项目和 .venv；源码按 [Xe 1.0 冻结范围](../doc/17.md) 解析。
+当前版本为 `1.0.0-rc.1`；发布平台、能力边界、兼容承诺和验收见 [RELEASE](../RELEASE.md)。
 不熟悉编译器实现时先读 [维护指南](MAINTAINING.md)，再按诊断阶段定位模块。
 规范与实际功能的最新逐项核对见 [第 30 章](../doc/30.md)，冻结语法不代表全部后端功能已完成。
+最新资源替换与一层模式、静态 Trait/泛型 Copy/Drop、有限 C ABI、单词位运算的边界分别
+见 [34](../doc/34.md)、[35](../doc/35.md)、[36](../doc/36.md)、[37](../doc/37.md)。
+模块只读 `let` 也有静态地址；两种全局绑定仍仅支持静态 Copy 初值，不执行顶层函数。
 
 ## 统一工具入口（推荐）
 
@@ -15,9 +19,9 @@ Xe 自举子集暂时保留独立，不替换本文的 stage0。
 ```sh
 ./xe --help
 ./xe doctor
-./xe ast tests/stage999/enum.xe -o -
+./xe ast tests/language/enum.xe -o -
 ./xe check examples/feature_check/main.xe --message-format=json
-./xe emit-c tests/stage999/struct_methods.xe
+./xe emit-c tests/language/struct_methods.xe
 ./xe run examples/args/main.xe -- hello "two words" "你好 Xe" ""
 ./xe build --manifest-path examples/toolchain --release
 ./xe run --manifest-path examples/toolchain --bin smoke
@@ -45,15 +49,15 @@ test 要求明确提供带 main 的 Xe 文件，--compiler 才运行 Python 回�
 
 ```sh
 make ast
-make ast SOURCE=tests/stage999/enum.xe
-make ast SOURCE=tests/stage999/maybe_error.xe OUTPUT=target/ast/result.json
+make ast SOURCE=tests/language/enum.xe
+make ast SOURCE=tests/language/maybe_error.xe OUTPUT=target/ast/result.json
 make ast-test
 make check SOURCE=tests/fails/borrow_match_move.xe
 make check SOURCE=tests/warnings/return_local_pointer.xe CHECK_FLAGS="--diagnostic-format json"
-make check-safety SOURCE=tests/stage999/enum.xe
+make check-safety SOURCE=tests/language/enum.xe
 make compiler-test
 make run
-make run SOURCE=tests/stage999/struct_methods.xe BACKEND_FLAGS=--check-safety
+make run SOURCE=tests/language/struct_methods.xe BACKEND_FLAGS=--check-safety
 make run SOURCE=tests/backend/enum_pipeline.xe BACKEND_FLAGS=--check-safety
 make run SOURCE=tests/backend/enum_resources.xe BACKEND_FLAGS=--check-safety
 make run SOURCE=tests/backend/generic_instances.xe
@@ -61,16 +65,16 @@ make run SOURCE=tests/backend/tuples.xe
 make run SOURCE=tests/backend/type_aliases.xe
 make run SOURCE=tests/backend/readline.xe
 make run SOURCE=examples/args/main.xe ARGS='hello "two words" "你好 Xe" ""'
-make build SOURCE=tests/stage999/struct_move.xe
-make emit-c SOURCE=tests/stage999/struct_move.xe
+make build SOURCE=tests/language/struct_move.xe
+make emit-c SOURCE=tests/language/struct_move.xe
 make demo
 make feature-check
 make feature-run
 make stdlib-test
 make audit
 
-uv run --project . --frozen --offline python compiler/main.py tests/stage999/enum.xe -o target/ast/enum.json
-uv run --project . --frozen --offline python compiler/main.py tests/stage999/enum.xe -o -
+uv run --project . --frozen --offline python compiler/main.py tests/language/enum.xe -o target/ast/enum.json
+uv run --project . --frozen --offline python compiler/main.py tests/language/enum.xe -o -
 ```
 
 make ast 默认输出 target/ast/<源文件名>.ast.json。-o - 只输出 JSON，不混入状态文字。
@@ -81,7 +85,7 @@ make ast 默认输出 target/ast/<源文件名>.ast.json。-o - 只输出 JSON�
 旧编译器源码已移除并忽略，不影响本目录的入口 compiler/main.py。
 
 Makefile 已固定 --project . --frozen --offline，使用根目录 uv.lock，不更新依赖或访问网络。
-环境需满足根项目的 Python 3.13+ 要求；新前端代码仍可在 Python 3.12 下单独测试。
+环境需满足根项目的 Python 3.13+ 要求；候选版官方验收使用 Python 3.13。
 compiler/ 不再含独立项目配置；曾生成的 compiler/.venv 不会再被这些命令使用。
 
 ## VS Code 与 Python 检查
@@ -217,6 +221,9 @@ IO 合同、输入边界与 Xe 命令行例子见 [第 24 章](../doc/24.md)。
 自举项目暂缓扩展，继续保留现有源码与阶段链；范围见 [第 31 章](../doc/31.md)。
 原版工具链下一步可完善全量格式化、源码调试映射和语言服务器，但不先发明未经审核的
 测试发现、依赖锁或包配置规则；当前已实现的工具边界见第 32 章。
-泛型 Copy/Drop、通用静态 Trait、尚缺的资源替换清理和更准确的风险 warning 仍需完善。
+静态 Trait、条件泛型 Copy/Drop 和合法资源位置的替换清理已经实现；范围见第 34—35 章。
+当前仍需逐步完善风险 warning 的精度，它不构成地址安全证明。
+阶段一致性回归把未实现占位能力提前报告；运行时错误提供基础 Xe 文件/行/列定位，
+但没有完整栈回溯或调试器映射。发布包和 CI 统一使用 `make release-check`。
 HIR/MIR 可在降低维护复杂度时逐步引入，但不是开始自举的先决条件；
 不为此先重写解析算法或实现机器码优化器。详细步骤与待审核接口见第 30 章。

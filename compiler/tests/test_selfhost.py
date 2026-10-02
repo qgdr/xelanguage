@@ -68,6 +68,10 @@ class SelfHostTests(unittest.TestCase):
             ('pub let[mut] FLAG:bool=false;let[mut] BYTE:u8=b\'A\';let[mut] LETTER:char=\'A\';let[mut] NOTHING:Unit=unit;fn main(){FLAG=true;BYTE=b\'Z\';LETTER=\'Z\';NOTHING=unit;println("{} {} {}",FLAG,BYTE,LETTER);}', 'true 90 Z\n'),
             ('var COUNT:i32=0;fn bump(){COUNT=COUNT+1;}fn main(){bump();bump();println("{}",COUNT);}', '2\n'),
             ('const OLD:i32=7;fn main(){println("{}",OLD);}', '7\n'),
+            ('let LIMIT:i32=7;fn limit()->i32@{LIMIT@}fn main(){let p=limit();println("{} {}",p#,LIMIT);}', '7 7\n'),
+            ('fn main(){let b:u8=bitnot 0;let a:i32=4 bitor 2 bitand 3;println("{} {} {}",b,a,bitnot a);}', '255 6 -7\n'),
+            ('fn main(){let x:u8=5;let n:usize=2;let neg:i32=-3;println("{} {} {} {}",x bitxor 3,x bitshl n,neg bitshr 1,2 bitshl 1+1);}', '6 20 -2 8\n'),
+            ('fn main(){let x:i64=-1;let n:u8=63;let min:i64=x bitshl n;println("{} {}",min,min bitshr n);}', '-9223372036854775808 -1\n'),
             ('fn main(){let flag=' + ' or '.join(['false'] * 32 + ['true']) + ';println("{}",flag);}', 'true\n'),
         ]
         for number, (text, expected) in enumerate(cases):
@@ -133,8 +137,11 @@ class SelfHostTests(unittest.TestCase):
             ('let X:i32=1+2;fn main(){}', 'module let requires Copy literal'),
             ('let X:String=String::from("x");fn main(){}', 'module let requires Copy literal'),
             ('let X:i32=1;fn main(){X=2;}', 'writable'),
-            ('let X:i32=1;fn main(){let p=X@;}', 'module let has no addressable storage'),
-            ('let X:i32=1;fn main(){let p=X@[mut];}', 'module let has no addressable storage'),
+            ('let X:i32=1;fn main(){let p=X@;p#=2;}', 'writable'),
+            ('let X:i32=1;fn main(){let p=X@[mut];}', 'writable'),
+            ('fn main(){let byte:u8=128 bitshl 1;}', 'left shift result outside operand range'),
+            ('fn main(){let byte:u8=1 bitshl 8;}', 'shift count outside operand width'),
+            ('fn main(){let x=1 bitshl -1;}', 'shift count must not be negative'),
             ('fn main(){let x:u8=300;}', 'literal outside'),
             ('fn main(){println("{:?}",1);}', 'formatting supports'),
             ('fn main(){println("{} {}",1);}', 'not enough format arguments'),
@@ -169,6 +176,30 @@ class SelfHostTests(unittest.TestCase):
                     self.assertEqual(output.read_text(), "old output\n")
                     diagnostics.append(result.stderr)
                 self.assertTrue(all(diagnostic == diagnostics[0] for diagnostic in diagnostics))
+
+    def test_explicit_panic_source_location_agrees_across_generations(self):
+        # Do not normalize stderr to hide the seed-only diagnostic difference.
+        # The Xe emitter must preserve the same panic operation's file/line/column,
+        # including filenames that cannot safely be pasted into a C string.
+        source = self.root / 'panic 源"码\\.xe'
+        source.write_text('fn main() {\n    panic("stop");\n}\n', encoding='utf-8')
+        reference = self.root / 'panic-reference'
+        build_executable(source, reference)
+        diagnostics = []
+        for generation, compiler in enumerate(self.generations):
+            translated_c = self.root / f'panic-{generation}.c'
+            executable = self.root / f'panic-{generation}'
+            translated = self.translate(compiler, source, translated_c)
+            self.assertEqual(translated.returncode, 0, translated.stderr)
+            compile_c(translated_c, executable, 'cc')
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f'  at {source}:2:5\n', result.stderr)
+            self.assertNotIn('Sanitizer', result.stderr)
+            diagnostics.append(result.stderr)
+        expected = subprocess.run([str(reference)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(expected.returncode, 1, expected.stderr)
+        self.assertTrue(all(diagnostic == expected.stderr for diagnostic in diagnostics))
 
     def test_self_compiled_word_tool_reads_utf8_files(self):
         source = ROOT / "bootstrap/examples/words.xe"

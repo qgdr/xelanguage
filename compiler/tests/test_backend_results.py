@@ -31,7 +31,7 @@ class ResultExecutionTests(unittest.TestCase):
         return result
 
     def test_existing_maybe_example(self):
-        text = (ROOT / "tests/stage999/maybe_error.xe").read_text()
+        text = (ROOT / "tests/language/maybe_error.xe").read_text()
         self.assertEqual(self.run_source(text).stdout, "10\n")
 
     def test_optional_named_and_channel_branches(self):

@@ -32,7 +32,7 @@ class BranchExecutionTests(unittest.TestCase):
         for name, expected in (("pipe", "10\n"), ("enum", "identifier\n")):
             for checked in (False, True):
                 with self.subTest(name=name, checked=checked):
-                    text = (ROOT / "tests/stage999" / (name + ".xe")).read_text()
+                    text = (ROOT / "tests/language" / (name + ".xe")).read_text()
                     self.assertEqual(self.run_source(text, checked), expected)
 
     def test_owned_pipeline_and_borrowed_enum(self):

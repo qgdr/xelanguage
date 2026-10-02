@@ -3,6 +3,12 @@
 全局拥有进程生存期，不进入任何函数的作用域/Drop 队列。初始化器仅
 使用 C 的静态值和地址，不能借用普通表达式降低来偷偷执行初始化函数。
 """
+from typing import TYPE_CHECKING, cast
+
+from .static_values import scalar_static_value
+
+if TYPE_CHECKING:
+    from .backend_c import CBackend
 
 
 def literal_string(text, *, compound=True):
@@ -13,22 +19,8 @@ def literal_string(text, *, compound=True):
     return f'{prefix}{{(const unsigned char *)"{encoded}", {len(data)}}}'
 
 
-def numeric_static_value(node, constants):
-    """折叠静态一元正负号，不在窄整数临时变量上执行取负。"""
-    kind = node["kind"]
-    if kind == "Literal" and node["literal_kind"] in {"INTEGER", "FLOAT"}:
-        return node["value"]
-    if kind == "Group":
-        return numeric_static_value(node["expression"], constants)
-    if kind == "Unary" and node["operator"] in {"+", "-"}:
-        value = numeric_static_value(node["operand"], constants)
-        if value is not None:
-            return -value if node["operator"] == "-" else value
-    if kind == "Name":
-        name = "::".join(node["path"]["parts"])
-        if name in constants:
-            return numeric_static_value(constants[name].node, constants)
-    return None
+def numeric_static_value(node, constants, type_=None):
+    return scalar_static_value(node, constants, type_)
 
 
 def integer_static_literal(number):
@@ -40,10 +32,12 @@ def integer_static_literal(number):
 class GlobalBackend:
     def global_declarations(self):
         """Tentative declarations let an address initializer name a later global."""
+        self = cast("CBackend", self)
         return [f"static {self.ctype(slot.type)} {slot.name};"
                 for slot in self.global_slots.values()]
 
     def global_definitions(self):
+        self = cast("CBackend", self)
         definitions = []
         for name, binding in getattr(self.checker, "globals", {}).items():
             slot = self.global_slots[name]
@@ -53,6 +47,7 @@ class GlobalBackend:
 
     def global_initializer(self, node, type_):
         """Render a brace initializer for aggregates, a constant expression otherwise."""
+        self = cast("CBackend", self)
         kind = node["kind"]
         if kind == "Group":
             return self.global_initializer(node["expression"], type_)
@@ -67,11 +62,13 @@ class GlobalBackend:
             if category == "unit":
                 return "0"
             return str(value) if category == "FLOAT" else integer_static_literal(value)
-        if kind == "Unary" and node["operator"] in {"+", "-"}:
-            value = numeric_static_value(node, self.checker.constants)
+        if kind in {"Unary", "Binary"}:
+            value = numeric_static_value(node, self.checker.constants, type_)
             if value is not None:
+                if isinstance(value, bool):
+                    return "true" if value else "false"
                 return integer_static_literal(value) if isinstance(value, int) else str(value)
-            self.fail(node, "全局一元正负号需要静态数值")
+            self.fail(node, "全局运算需要静态标量")
         target = getattr(self.checker, "call_targets", {}).get(id(node))
         if target is not None and kind in {"Name", "BracketApply", "AssociatedAccess"}:
             return self.function_name(target)
@@ -102,6 +99,7 @@ class GlobalBackend:
 
     def global_place(self, node):
         """A static address may name a global, an embedded field or a fixed array element."""
+        self = cast("CBackend", self)
         kind = node["kind"]
         if kind == "Group":
             return self.global_place(node["expression"])

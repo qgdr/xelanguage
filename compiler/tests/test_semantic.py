@@ -35,7 +35,7 @@ FAILURES = {
     "trait_copy_drop_conflict": "XE-OWN-0001",
     "trait_drop_signature": "XE-OWN-0002",
     "trait_copy_method": "XE-OWN-0001",
-    "String": "XE-MOVE-0001",
+    "string_use_after_move": "XE-MOVE-0001",
     "borrow_match_custom_drop": "XE-OWN-0002",
     "borrow_match_move": "XE-MOVE-0002",
     "borrow_move_resource": "XE-MOVE-0002",
@@ -53,7 +53,7 @@ FAILURES = {
     "none_error_result": "XE-RESULT-0001",
     "pointer_owned_match": "XE-MOVE-0002",
     "result_unhandled": "XE-PARSE-0001",
-    "str_pointer": "XE-MUT-0001",
+    "readonly_str_pointer_write": "XE-MUT-0001",
     "semantic_unknown_name": "XE-NAME-0001",
     "semantic_argument_type": "XE-TYPE-0001",
     "semantic_argument_count": "XE-CALL-0001",
@@ -103,7 +103,9 @@ class SemanticTests(unittest.TestCase):
         return checker
 
     def test_all_modern_positive_examples(self):
-        for path in sorted((ROOT / "tests/stage999").glob("*.xe")):
+        paths = sorted((ROOT / "tests/language").glob("*.xe"))
+        self.assertTrue(paths, "现行语言样例目录不能为空；检查迁移后的路径")
+        for path in paths:
             with self.subTest(path=path.name):
                 errors = check_source(path.read_text(), str(path))
                 self.assertEqual(errors, [], "\n".join(e.render() for e in errors))
@@ -122,7 +124,7 @@ class SemanticTests(unittest.TestCase):
                 self.assertEqual(errors[0].code, code, errors[0].render())
 
     def test_pointer_alias_fixture_is_legal_without_warning(self):
-        path = ROOT / "tests/stage999/pointer_alias.xe"
+        path = ROOT / "tests/language/pointer_alias.xe"
         checker = self.pointer_check(path.read_text(), str(path))
         self.assertEqual(checker.warnings, [])
 

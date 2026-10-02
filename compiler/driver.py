@@ -14,12 +14,18 @@ from pathlib import Path
 
 from .artifacts import ArtifactStore, digest
 from .project import Project
+from .version import VERSION
 from .xe_ast.ast import SYNTAX_VERSION
 from .xe_ast.backend_c import lower_program_to_c
-from .xe_ast.build import BuildError, atomic_text, compile_generated, protect_source
+from .xe_ast.build import (
+    BuildError,
+    atomic_text,
+    compile_generated,
+    protect_source,
+    resolve_link_inputs,
+)
 from .xe_ast.modules import load_program
 
-VERSION = "0.1.0"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -56,13 +62,14 @@ class BuildResult:
 
 
 def build(project: Project, source: Path, output: Path, *, cc="cc", release=False,
-          sanitize=False, extra_flags=(), rebuild=False, timeout=30) -> BuildResult:
+          sanitize=False, extra_flags=(), rebuild=False, timeout=30, link_inputs=()) -> BuildResult:
     output = output.absolute()
     c_path = output.with_name(output.name + ".c")
     store = ArtifactStore(project.root)
     if output.resolve().is_relative_to(store.directory) or c_path.resolve().is_relative_to(store.directory):
         raise BuildError("输出不能覆盖工具链的内部收据目录")
     receipt = store.receipt_path("build", output)
+    link_inputs = resolve_link_inputs(link_inputs, [output, c_path, receipt])
     source_info, tree = load_program(source)
     inputs = {filename: hashlib.sha256(info.text.encode("utf-8")).hexdigest()
               for filename, info in tree["_sources"].items()}
@@ -83,6 +90,8 @@ def build(project: Project, source: Path, output: Path, *, cc="cc", release=Fals
     key_data = {"syntax": SYNTAX_VERSION, "tool_version": VERSION, "source": str(source),
                 "inputs": inputs, "generated_c": hashlib.sha256(generated.encode("utf-8")).hexdigest(),
                 "cc": identity, "flags": flags, "platform": platform.platform(),
+                "link_inputs": {str(path): digest(path) for path in link_inputs},
+                "link_order": [str(path) for path in link_inputs],
                 "compiler": compiler_hashes,
                 "environment": {name: os.environ.get(name) for name in
                     ("PATH", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
@@ -90,7 +99,9 @@ def build(project: Project, source: Path, output: Path, *, cc="cc", release=Fals
     key = hashlib.sha256(json.dumps(key_data, sort_keys=True).encode("utf-8")).hexdigest()
     previous = store.read("build", output)
     # 自定义 C 选项可读取未登记的 -include/响应文件；保守禁用缓存避免遗漏输入。
-    reused = bool(not rebuild and not extra_flags and previous and previous.get("cache_key") == key and
+    # External C inputs may include unregistered headers, and shared libraries
+    # may load other libraries. Keep this build boundary explicit and uncached.
+    reused = bool(not rebuild and not extra_flags and not link_inputs and previous and previous.get("cache_key") == key and
                   output.is_file() and not output.is_symlink() and os.access(output, os.X_OK) and
                   previous.get("files", {}).get(str(output.resolve())) == digest(output))
     # C 可读产物也恢复为当前生成结果，手动修改 C 不进入此次编译输入。
@@ -103,7 +114,7 @@ def build(project: Project, source: Path, output: Path, *, cc="cc", release=Fals
     if not reused:
         try:
             compile_generated(generated, c_path, output, cc=identity["invocation"], extra_flags=flags,
-                              timeout=timeout, published_hashes=expected_hashes)
+                              timeout=timeout, published_hashes=expected_hashes, link_inputs=link_inputs)
         except (BuildError, OSError):
             # 失败也保留并登记可检查的 C；不把旧可执行文件标记为新构建成功。
             try:
