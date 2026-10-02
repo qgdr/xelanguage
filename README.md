@@ -1,283 +1,294 @@
 # Xelanguage
 
-Xelanguage（`.xe`）是一门静态类型编译语言。它使用后置类型、块表达式、结构体、枚举、
-普通指针和显式所有权，同时把“人类容易阅读”和“工具能够可靠修改”作为同等重要的目标。
-静态 Trait 支持契约检查、默认方法与泛型约束；具体实例生成普通函数调用，不需要虚表。
+Xe 是一门静态类型编译语言，源码扩展名为 `.xe`。它希望用一套能组合、能推断的约定，
+清楚表达类型、指针、资源和控制流，让人更容易阅读和修改程序。
 
-项目目标是实现一门可用并最终能够自举的语言。编译器实现优先考虑正确性、友好诊断、
-可维护性和可重复构建，不要求从头实现解析算法、优化器、寄存器分配器或垃圾回收器。
+## 基本语法颗粒
 
-## 当前状态
-
-当前候选版本为 **1.0.0-rc.1**，语法契约标识为 `xe-1.0`，AST JSON schema 仍为 1。
-本轮准备的是面向 **Linux x86_64 + Python 3.13 + GCC 13** 的应用开发版本，
-不是全语言自举、嵌入式或内存安全版本。支持范围与兼容承诺见
-[发布说明](RELEASE.md)，版本变化见 [CHANGELOG](CHANGELOG.md)。
-项目采用 [Apache-2.0](LICENSE)，归属说明见 [NOTICE](NOTICE)。
-
-`doc/` 描述目标语言规范；Python stage0 位于 `compiler/`，实现 AST、语义检查和第一版
-C 后端，尚未覆盖完整规范。`bootstrap/compiler.xe` 已实现能编译自身的 Xe 编译器子集，
-尚未替代功能更完整的 stage0。旧版 `excompiler/` 和根目录 `main.py` 已移除并加入忽略规则；
-需要查阅旧实现时可从 Git 历史恢复。
-
-自举编译器暂作为独立项目保留；日常开发使用原版 Python stage0。
-仓库根已提供统一入口 `./xe`，共用根目录 `.venv`，支持检查、构建、运行、测试、
-格式整理、API 文档和安全清理。完整命令与当前边界见 [工具链说明](doc/32.md)。
-
-`tests/language` 保存现行语法正例，`tests/legacy` 归档早期阶段样例；`tests/fails` 保存必须失败的程序。
-`tests/warnings` 保存指针风险程序：应当 warning 但仍可编译，不能统一执行。
-
-项目目录与编译流程见 [ARCHITECTURE.md](ARCHITECTURE.md)，
-开发和贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 快速开始
-
-准备 Python 3.13 和 GCC 13，在仓库或解压源码包目录运行：
-
-```sh
-./xe --version
-./xe doctor --cc gcc
-./xe run examples/args/main.xe --cc gcc -- hello "two words" "你好 Xe" ""
-```
-
-编译器本身没有第三方 Python 运行依赖。也可用 `python3 -m compiler`；
-只有需要开发检查时才安装 uv 并执行 `uv sync --locked --dev`。
-完整试用、候选版边界和源码包验证见 [RELEASE.md](RELEASE.md)。
-
-## 核心特征与优势
-
-Xe 的特色不是把符号换一遍，而是让类型、访问权限、资源和控制流尽可能遵守一组
-能组合的约定。以下优势已经能在当前编译器和可执行示例中观察到：
-
-- **值与类型有可推导的对应。** `a: T`、`a@: T@`、`p: T@`、`p#: T` 分别表示
-  值、取地址、指针和解引用。`T@[mut]` 明确提供写权限，普通指针可以复制和形成别名；
-  取得地址不取得资源所有权。变量、字段、参数都用 `name: Type`，不靠名字大小写猜含义。
-- **资源去向可见，正常退出自动清理。** `=` 复制，`<<` 移动不可复制值，`>>` 按类型
-  传递；用户类型显式声明 Copy。函数实参、返回值和捕获也按同一套复制/移动规则处理。
-  文件、容器和堆对象在作用域退出时自动 drop，包含提前 return、break、continue 和错误传播。
-  不隐式 clone，`println` 也不偷偷替用户保留资源。
-- **错误和普通分支使用同一个模型。** `T?` 与 `T?[E]` 通过枚举表达不同可能性，
-  E 不限定为错误；`?` 消解当前一层。`|>`、`1>`、`2>`、`:>` 都把输入送给处理函数或
-  显式参数绑定，不让裸函数名同时表示“调用函数”和“返回函数”。迭代用
-  `Step::Item` / `Step::Stop`，元素的 None 不会被误当成结束。
-- **少一些需要猜测的语法。** `()` 用于调用与分组，`tuple[...]` 明示元组，`{...}`
-  不靠有无逗号变成另一类值；`.field = ...;` 明示结构体字段初始化。
-  泛型声明 `fn[T] name` 引入未知量，应用 `name[i32]` 代入具体类型。
-  闭包必须写 `fn` 并列出捕获项，调用仍写 `f(...)`。
-- **数据表示与抽象可以逐步选择。** Array 内联保存元素，Vec 拥有可增长堆缓冲区，
-  str/Slice 是非拥有视图；Box、Shared、Weak 分开表达唯一拥有、共同拥有和观察存活。
-  泛型按具体类型生成代码，闭包环境保存实际捕获字段，没有强制追踪式 GC 或隐式深复制。
-  这让数据结构和释放时机更容易解释，但当前实现不保证最优布局或零成本。
-- **实现与工具便于核对。** AST JSON、带源码位置和编号的诊断、可读 C 输出、
-  正反例测试及逐阶段审核，把“解析成功”“检查成功”“真正运行”分开。
-  文件模块无隐藏顶层执行，pub 接口和本地依赖可直接从源码查看。
-- **底层操作也明确表达意图。** 整数使用 `bitand` / `bitor` / `bitxor` / `bitnot` 和
-  `bitshl` / `bitshr`，不让所有权符号兼任移位；移位次数和左移溢出会检查。
-  有限 `extern "C"` 支持标量/指针接口，可显式链接已有 C 源码、对象与库。
-
-这些是可解释、可验证的设计优势，不是“所有人都比学 Rust 更快”的结论。
-Xe 主动放弃 Rust 式独占借用证明，降低这部分概念负担，同时把地址有效性和数据竞争的
-责任交给程序员：风险 warning 不阻止编译，也不证明没有其他风险。
-方法自动取地址、地址捕获别名和容器 for 的元素指针是已经明确约定的便利规则，
-仍需要学习；`<<` / `>>` 不对称，方括号也有多种上下文含义，不能称为没有学习成本。
-
-实际写编译器时，**拥有者集中管理缓冲区，小记录显式 Copy，节点通过 ID 连接**是一套
-好理解的 Xe 写法：Token 用 str 查看原文，Vec 保存 AST，整数 ID 不随 Vec 扩容失效；
-`Program@` / `Program@[mut]` 直接说明函数能否修改状态，块尾表达式返回解析结果，
-String/Vec/File 正常退出自动清理。编译器源码和实践中的优缺点见
-[第 31 章](doc/31.md)。这些是可复现的经验，不是最优性能或完整地址安全的证明。
-
-## 功能闭环与自举距离
-
-当前已能完成“Xe 源码 → 类型/所有权检查 → C → 可执行程序”的应用开发链：
-Calculator 实现扫描与优先级解析，Source Scan 展示多文件、容器和文件输出，
-Feature Check 展示交互式命令行，线程示例展示共享数据与作用域解锁。
-这些程序验证了功能组合，但 Calculator 是算术解释器，不是 Xe 编译器。
-
-**第一个 Xe 子集自举编译器已经完成并验证；完整 Xe 语言尚未自举。**
-[`bootstrap/compiler.xe`](bootstrap/compiler.xe) 实现分词、扁平 AST、类型/写权限/
-资源检查和 C 发射。`make bootstrap` 先用 Python stage0 编译 seed，然后由 Xe
-可执行文件连续三次编译同一份源码；三代生成的 C 按原始字节完全相同，不做规范化。
-`make bootstrap-test` 另验收正反例及实际程序，`make bootstrap-sanitize` 验收
-ASan/UBSan 自编译。源码、运行库、工具版本和产物哈希写入 `target/bootstrap/report.json`。
-
-这个新编译器能编译自身和文件扫描工具，但尚无 enum/分支、用户泛型、方法 impl、
-模块、tuple、闭包等前端支持；仍用命名整数标签表示 AST 种类，不能冒充完整规范实现。
-支持范围、保守资源规则及运行命令见 [自举编译器说明](bootstrap/README.md)。
-现有 Python stage0 功能更多，仍是日常编译入口，且也没有覆盖全部目标语言：
-动态 Trait、关联类型、编译期值参数、动态初始化、Debug 格式化及完整标准库仍有缺口。
-静态 Trait、条件泛型 Copy/Drop、一层组合/元组/负载过滤、有限 extern C ABI、静态标量
-运算和合法资源位置的原位替换已经接通检查与执行；范围见
-[资源与模式](doc/34.md)、[静态 Trait](doc/35.md)、[C 接口](doc/36.md)、[位运算](doc/37.md)。
-当前 Xe 库也没有运行子进程的接口，不能独立调用系统
-C 编译器；第一版可以明确采用外部构建驱动，后续补进程或平台接口。
-
-模块级 `let` / `let[mut]` 都有静态存储，前者能用 `@` 取只读地址，后者还能取得可写地址；
-支持跨函数/模块访问、稳定地址和静态
-Copy 聚合初值；[全局计数器例子](examples/globals/README.md) 可用
-`./xe run examples/globals/main.xe` 运行。全局资源及动态初始化尚未实现，不自动提供
-线程同步。面向 1.0 的编译器核心缺口与建议优先级见 [第 33 章](doc/33.md)。
-
-使用 C 运行库、系统 C 编译器和外部构建驱动不妨碍上述子集自举；固定点也不证明
-编译器没有错误，必须继续与参考实现对照行为并完善完整回归。
-
-目标是借鉴 OCaml 的类型化数据结构与表达式组合，减少 Rust 式地址证明的学习负担，
-同时保留底层数据与资源控制。当前还没有证据证明达到 OCaml 的编译器开发体验或
-C/C++ 的系统编程覆盖：聚合 ABI、布局/对齐控制、volatile、指针机器操作及裸机平台
-接口仍需补齐或审核设计；当前不宣称已经能用于嵌入式。
-全语言审查与待商议边界见 [第 30 章](doc/30.md)，最新自举结果与写作经验见 [第 31 章](doc/31.md)。
-
-## 语法速览
+先认识四件事：`名称: 类型` 标注类型，`()` 调用或分组，`{}` 包围代码块，`;` 结束语句。
 
 ```xe
 fn add(left: i32, right: i32) -> i32 {
-    left + right
+    left + right                         // 块尾不写 ;，这个值就是结果。
 }
 
 fn main() {
-    let answer: i32 = add(20, 22);
-
-    let text: String << String::from("hello");
-    let view: str = text.as_str();
-
-    println("{}: {}", answer, view);
+    let answer: i32 = {
+        let first = 20;                  // 类型可以推导。
+        add(first, 22)
+    };
+    let[mut] count = 0;                   // [mut] 明确允许修改绑定。
+    count = count + 1;
+    println("{} {}", answer, count);      // 输出：42 1
 }
 ```
 
-- `name: Type` 中的 `:` 标注值的类型；`fn[T: Trait]` 中标注类型参数的能力约束。
-- 当前始终检查类型、所有权和写权限；可变绑定写 `let[mut] count: i32 = 0;`。
-  参数统一写 `count: i32`，绑定只读。
-  修改调用者对象用 `count: i32@[mut]`，函数内部重新赋值则建立局部 `let[mut]` 绑定。
-- `=` 表示复制，仅适用于 `Copy` 类型。
-- `<<` 只转移不可复制的值；资源类型的源在传递后失效。
-  `>>` 保留通用传递：普通值复制、资源移动，不是 `<<` 的严格反向操作。
-- `T@` 是只读普通指针，`T@[mut]` 是可写普通指针；两者都 Copy，允许别名和重复传参。
-  可写指针可以隐式降为只读指针，反向不行；只读指针不能修改所指内容。
-  `#` 解引用但不授予资源所有权。风险跟着 `[unsafe]` 指针注记传播；编译器能检测的
-  悬垂等风险给 warning 并自动标注，仍可编译，不宣称内存安全；不再有 RawPtr 类型。
-- `str` 是 UTF-8 的地址与长度视图；`str@` 指向该视图描述符，`.data()` 返回 `u8@`。
-- `Array[T, N]` 内联存储元素，`Vec[T]` 拥有可增长的堆缓冲区。
-  两者的 `a[i]` 都是元素 T，只有 `a[i]@` 才是 T@；资源不能直接从下标移出。
-  `Box[T]` 拥有堆上的一个 T，通过 `ptr()` / `ptr_mut()` 明确取得普通指针。
-- 元组值写 `tuple[10, 20]`，类型写 `tuple[i32, i32]`；单元素写 `tuple[10]`。
-  `let tuple[x, y] = point;` 创建新变量，`tuple[x, y] = point;` 写入已有变量。
-  `()` 用于调用与分组，包括类型分组 `(fn(i32) -> i32)?`。
-- `type handler = fn(i32) -> i32;` 为类型创建透明别名，别名沿用原类型的 Copy 和资源规则。
-- 用户结构体/枚举必须显式 `impl Copy for Type;`，否则不能使用 `=`。
-  有 Drop 或含不可复制字段时禁止实现 Copy；基础类型和普通指针可直接复制。
-  泛型可显式声明条件 Copy，Drop 也按具体实例检查并生成，见 [Trait 与泛型资源](doc/35.md)。
-- 泛型声明写 `struct[T] Holder`、`fn[T] wrap`；使用写 `Holder[i32]`、`wrap[i32](10)`。
-  前者声明未知量，后者代入具体值；未知 T 的字段初始化可写 `value >> .value;`。
-- `T?` 是 `T?[None]` 的简写；`T?[E]` 是 `Yes[T] | No[E]`，E 可以是任意类型。
-  只有 API 显式写 `E: Error` 约束时才要求 E 实现相应特性；目前尚无预定义 `Error` 特性。
-  未修饰的 `?` 必须处理 `1>` 与 `2>`；`?[return]` 传播 No 分支，`?[panic]` 明确选择终止。
-- `as T` 仅做无损转换；可失败整数转换写 `T::try_from(value)`。
-- 位运算写 `a bitand b`、`a bitor b`、`a bitxor b`、`bitnot a`；移位写
-  `a bitshl count` / `a bitshr count`，越界次数或左移溢出报错或 panic，见 [第 37 章](doc/37.md)。
-- 函数普通参数不会隐式取地址；移动类型按值传入会被移动，需要保留时显式传入 `value@`，
-  `println` 和 `format` 也不例外。
-- `Type::function()` 访问关联函数，`object.method()` 访问方法；枚举变体用 `[]` 附带负载。
-- 语句以 `;` 结束；块末尾不带 `;` 的表达式是块的值。
+`i32` 是 32 位有符号整数，`Unit` 表示没有内容的值。
+`fn` 定义函数，`->` 标注返回类型；没有返回类型时返回 `Unit`。
+`let` 声明不可写绑定，`let[mut]` 声明可写绑定。参数也用 `名称: 类型`，参数绑定不可写。
+正常结束的块，没有尾值就是 `Unit`；有尾值就产生该值，所以 `if` 也可以用来计算结果。
 
-## 工具链
+## 指针：取地址与解引用成对出现
 
-首次准备环境运行 `uv sync --frozen`，之后在仓库根直接运行：
+`value: T`，那么 `value@: T@`；`pointer: T@`，那么 `pointer#: T`。
+`@` 取地址，`#` 解引用，都是后缀操作。`[mut]` 修饰指针的写权限，不改变它所指的类型。
 
-```sh
-./xe doctor
-./xe check examples/feature_check/main.xe
-./xe run examples/feature_check/main.xe -- check
-./xe run examples/args/main.xe -- "two words" "你好 Xe" ""
-./xe build --manifest-path examples/toolchain --release
-./xe test examples/toolchain/src/bin/smoke.xe
-./xe fmt --manifest-path examples/toolchain --check
-./xe doc --manifest-path examples/toolchain
+```xe
+fn increase(pointer: i32@[mut]) {
+    pointer# = pointer# + 1;
+}
+
+fn main() {
+    let[mut] value = 40;
+    let writable: i32@[mut] = value@[mut];
+    let readable: i32@ = writable;        // 可以去掉写权限，不能反过来增加。
+    increase(writable);
+    increase(writable);                  // 普通指针可以复制、反复传入。
+    println("{}", readable#);            // 输出：42
+}
 ```
 
-`run` 的 `--` 后原样传给程序，交互输入和调用者工作目录保持不变。`xe` 是仓库内的
-可执行入口，不要求全局安装；也可用 `make xe XE_ARGS='check 文件.xe'` 或
-`uv run --project . --frozen --offline python -m compiler ...`。
-进入有 `xe.toml` 的项目后，`xe build/run` 默认选择 `src/main.xe`，`--bin name`
-选择 `src/bin/name.xe`。没有清单的显式文件在其所在目录的 `target/` 下生成产物。
+指针变量能否重新赋值，与所指数据能否修改是两回事。Xe 的指针不是拥有者，也不会延长
+对象的生命期；地址有效性仍需要程序员负责。
 
-构建缓存核对输入、生成 C、编译器和选项，只省略系统 C 编译，仍重新检查 Xe 并报告 warning。
-`--rebuild` 强制重建；`--sanitize` 启用 ASan/UBSan，保留默认泄漏检测。
-`fmt` 是验证 AST 不变的保守缩进整理器；`test` 目前运行显式指定的普通 main 程序，
-不擅自执行错误/指针风险样例；`doc` 生成公开 API 的 Markdown/JSON，不执行文档代码。
-`clean --dry-run` 可预览；只清理登记且未手动修改的本项目产物，不递归删 target，
-也不处理自举产物。示例工程见 [examples/toolchain](examples/toolchain/README.md)。
+## 结构体、方法与资源去向
 
-旧 Makefile 命令和 `compiler/main.py` 继续兼容，原默认输出路径不变。
-`make ast` 生成 `target/ast/` 下的 JSON；`make check` 加载可达模块，检查类型、
-所有权和写权限，并报告指针风险。`make compiler-test` 或 `./xe test --compiler`
-运行全部回归。实现边界见 [第 18 章](doc/18.md)，详细用法见
-[compiler/README.md](compiler/README.md) 与 [第 32 章](doc/32.md)。
+`.` 访问成员，`::` 访问路径或关联函数；结构体构造用 `.字段 = 值;`，不混用类型冒号。
+赋值有三个明确分工：
 
-第一版 C 后端已能运行结构体、方法、管道、枚举、Maybe、数组/切片、文件读取和错误传播：
-make run 默认运行 struct_move.xe。
-例如 make run SOURCE=tests/language/struct_methods.xe BACKEND_FLAGS=--check-safety。
-枚举与资源管道示例：make run SOURCE=tests/backend/enum_pipeline.xe BACKEND_FLAGS=--check-safety。
-泛型具体实例示例：`make run SOURCE=tests/backend/generic_instances.xe`。
-标准 IO 已提供 `print`、`println` 和 `readline`（也可写 `std::io::` 完整路径）：
-`make run SOURCE=tests/backend/readline.xe` 区分读到一行、空行、EOF 与 IO 错误。
-当前库由 [stdlib/io](stdlib/io/README.md) 中的 C 实现支撑；use、分组导入及本地 path 依赖已接入。
-自举基础库已支持 Vec[T]、bytes/chars、String 构造、文件写入与 flush。
-`Box[T]::new(value)` 返回 `Box[T]?[AllocError]`；`into_value()` 消耗 Box 并取出 T。
-运行 `make run SOURCE=tests/language/box.xe`，完整契约和指针风险边界见 [第 28 章](doc/28.md)。
-Shared/Weak、Mutex/MutexGuard 和 Thread 已能运行；`share()` 增加共同拥有者，
-Guard 自动解锁，Thread 析构自动等待。`make thread-demo` 运行两个线程的同步计数器，
-接口和 POSIX 实现边界见 [第 29 章](doc/29.md)。不宣称普通指针程序完全线程安全。
-`make source-scan` 运行真实多文件 [源码扫描工具](examples/source_scan/README.md)，
-读入文件、保存单词位置并写出报告；接口和边界见 [第 27 章](doc/27.md)。
-用 Xe 编写的 [Feature Check](examples/feature_check/README.md) 工具提供 `help/check/echo/quit`：
-`make feature-run` 交互运行，`make feature-check` 自动执行 16 组功能检查，
-`make stdlib-test` 验证 IO 边界、所有权和工具行为。
-`std::env::args()` 提供实际命令行参数；最小的 [参数打印工具](examples/args/README.md)
-只读取参数并逐项打印，示例代码与运行方法见 [第 25 章](doc/25.md)。
-Feature Check 也能直接执行 `./target/debug/xe-feature-check check` 或 `echo "你好 Xe"`。
-make emit-c 输出可读 C，make build 生成可执行文件；实际运行边界见 [第 19 章](doc/19.md)。
+| 写法 | 含义 |
+| --- | --- |
+| `target = source` | 复制 `Copy` 值，来源仍可使用 |
+| `target << source` | 移动非 `Copy` 值，来源不再拥有它 |
+| `source >> target` | 按具体类型复制或移动，适合统一传递 |
 
-实际项目：[Xe Calculator](examples/calculator/README.md)，用约 330 行 Xe 实现扫描器、
-优先级解析、算术检查、定位诊断和文件输入。运行 `make demo`；修改 input.calc 即可试验。
-`make audit` 逐例执行 AST/语义/C/编译/运行，写入 target/audit/language.json。
-audit 报告只证明样例通过相应阶段；自举有独立构建链，也不证明完整规范全部实现。
+```xe
+struct Point { x: i32, y: i32, }
+impl Copy for Point {}                    // 用户类型明确声明可以复制。
 
-包配置写在 `xe.toml`；本地 path 依赖已实现，注册表和 `xe.lock` 尚未实现。
-当前统一工具把程序、C、AST、文档和构建收据放在本项目 `target/`；
-模块对象/接口缓存、增量语义分析、交叉编译、LSP 和自动单元/文档测试尚未实现。
-新增语言或测试发现规则仍需先审核，不将工具的默认设置冒充语言规范。
-公开接口统一在声明前写 `pub`；默认私有，公开类型不自动公开其字段或方法。
-已确认的模块可见性与例子见 [第 09 章](doc/09.md)。
+impl Point {
+    fn sum(self: Self@) -> i32 { self.x + self.y }
+}
 
-完整规范从 [`doc/00.md`](doc/00.md) 开始阅读。
+fn main() {
+    let first = Point { .x = 20; .y = 22; };
+    let second = first;                  // 复制 Point，first 仍然存在。
 
-当前可固定的前端契约已标记为 [Xe 1.0 冻结范围](doc/17.md)，其余语义按
-RESERVED / PROVISIONAL / DEFERRED 分阶段实现。
+    let original: String << String::from("Xe");
+    let text: String << original;        // 转移所有权，不能再读取 original。
+    println("{} {}", second.sum(), text@); // 输出：42 Xe
+}                                       // text 在正常退出作用域时自动清理。
+```
 
-`1> handle` 将成功负载传给 handle，`2> _ -> 0` 忽略失败并返回备用值。
-枚举分支写 `Token::Integer :> number: i64@ -> number#`，指针匹配使用 `?[@]`。
-每个 `?` 只处理当前一层枚举；内层再次显式匹配，不自动展开递归模式。
-管道之后只接可调用目标或参数绑定，真正的匿名函数/闭包必须以 fn 开头，显式捕获用
-`fn[value](x: i32) -> i32 { value + x }`。捕获环境与方法式 f() 已能运行：读/写调用保留自身，
-移出捕获资源才消耗环境。机制见 [第 15 章](doc/15.md)。
-`next(self: Self@[mut]) -> Step[T]` 对象可用于 for；`Step::Item[value]` 产生元素，`Step::Stop` 结束迭代。`std::iter::from_fn` 保存返回 `Step[T]` 的可重复回调。
-运行 `make iterator-demo`，边界与清理规则见 [第 26 章](doc/26.md)；yield 尚未实现。
-优先级见第 02 章；本轮确认的设计与迁移理由见 [第 21 章](doc/21.md)。
-指针权限转换和泛型实例化的实现边界见 [第 22 章](doc/22.md)。
-tuple 元组、解包和透明类型别名的 0.9 迁移见 [第 23 章](doc/23.md)。
-标准 IO 与用 Xe 编写的命令行功能工具见 [第 24 章](doc/24.md)。
+字符串字面量是 `str` 只读文本视图；`String::from` 创建拥有内存的字符串。
+普通整数、指针等基础值可以复制；`String`、`Vec` 等资源不能隐式复制，想复制要明确
+调用 `clone()` 等接口。用户类型实现 `Copy` 要求成员也能复制，且不能有自定义 `Drop`。
+方法按声明的 `self` 类型接收对象；这里 `second.sum()` 自动取得只读地址。
+自由函数和打印没有特殊规则：`text@` 保留字符串，按值传入 `text` 就会移动它。
 
-## 候选版验收
+## 泛型：声明未知量，使用时代入
+
+`struct[T]`、`fn[T]` 描述泛型声明；`Holder[i32]`、`wrap[i32]` 选择具体实例。
+方括号分别附在“声明种类”和“被使用的名称”上，作用对象不同。
+
+```xe
+struct[T] Holder { value: T, }
+impl[T] Copy for Holder[T] where T implements Copy {}
+
+fn[T] wrap(value: T) -> Holder[T] {
+    Holder[T] { value >> .value; }        // T 能复制就复制，否则移动。
+}
+
+fn main() {
+    let number = wrap[i32](42);          // 这个实例满足 Copy 条件。
+    let text << wrap[String](String::from("Xe"));
+    println("{} {}", number.value, text.value@); // 输出：42 Xe
+}
+```
+
+Trait 描述类型应当具备的能力；`where T implements Copy` 就是一个明确的条件。
+泛型按具体类型检查并生成代码，不通过赋值偷偷复制资源。
+
+## 容器、迭代与元组：不猜值的形状
+
+`Array[T, N]` 是固定长度数组，`Vec[T]` 拥有可增长的堆存储。
+下标得到元素值，取元素指针要写 `items[index]@`；容器的 `for` 则明确绑定元素指针。
+元组用 `tuple[...]`，不让 `{}` 同时表示块和元组。
+
+```xe
+fn bounds() -> tuple[i32, i32] { tuple[10, 30] }
+
+fn main() {
+    let values: Array[i32, 3] = [10, 20, 30];
+    println("{}", values[1]);             // 输出：20
+
+    let[mut] numbers << Vec[i32]::new();
+    numbers.push(40);
+    numbers.push(42);
+    for pointer: i32@ in numbers {
+        println("{}", pointer#);         // 依次输出：40、42
+    }
+
+    let tuple[low, high] = bounds();      // 明确解包，不与数组赋值混淆。
+    println("{} {}", low, high);          // 输出：10 30
+}
+```
+
+整数范围 `for number in 1..4` 绑定整数值，不包含右端点。
+自定义迭代器返回 `Step[T]`：`Item[T]` 产生元素，`Stop` 明确结束，不把元素的 `None` 当结束。
+
+## 管道与结果：产生可能性，再处理分支
+
+`value |> function` 把值交给函数。类型的 `T?` 表示“有 T，或者没有”；表达式的 `?`
+则消解这一层可能性。它们是构造与消解的一对操作，不是同一个取值运算。
+
+```xe
+fn double(value: i32) -> i32 { value * 2 }
+fn positive(value: i32) -> i32? {
+    if value > 0 { value } else { None }
+}
+
+fn main() {
+    let doubled = 21 |> double;
+    let fallback = positive(-1)?
+        1> double                       // 有值时，把值传给 double。
+        2> _ -> 0;                      // 没有值时，明确返回备用值。
+    println("{} {}", doubled, fallback); // 输出：42 0
+}
+```
+
+`1>`、`2>` 后接函数，或者 `参数 -> 正文`；后者是立即执行的分支，不是闭包。
+想保留成功值可写 `1> value -> value`。
+`T?[E]` 为另一分支附带 E，E 不必是错误；`?[return]` 明确传播失败分支，
+`?[panic]` 明确选择失败时终止。
+
+## 枚举匹配：选择与参数绑定分开
+
+枚举用 `[]` 附带负载，`:>` 将选中分支的负载送给处理器。
+`?[@]` 明确采用指针匹配：每个负载 T 都作为 T@ 传入，不拿走原对象的资源。
+
+```xe
+enum Token { End, Integer[i64], Identifier[String], }
+
+fn numeric_value(token: Token@) -> i64 {
+    token ?[@] {
+        Token::Integer :> number: i64@ -> number#,
+        Token::Identifier :> text: String@ -> 0,
+        Token::End :> _ -> 0,
+    }
+}
+
+fn main() {
+    let token << Token::Integer[42];
+    let name << Token::Identifier[String::from("Xe")];
+    println("{} {}", numeric_value(token@), numeric_value(name@)); // 输出：42 0
+}
+```
+
+选择器只选择分支，不声明变量；名称和类型写在 `:>` 后。一次只匹配一层，
+处理内层再写一个 `?`，不隐式展开嵌套结构。
+
+## 闭包：捕获什么，明确写出来
+
+匿名函数也以 `fn` 开始，捕获项放在其后的 `[]`。捕获值按通常规则复制或移动；
+捕获地址则保存一个指向原变量的别名。
+
+```xe
+fn main() {
+    let base = 40;
+    let add << fn[base](value: i32) -> i32 { base + value };
+    println("{}", add(2));               // 输出：42
+
+    let[mut] current = 0;
+    let advance << fn[current@[mut]]() {
+        current = current + 1;          // current 仍是整数别名，不变成指针变量。
+    };
+    advance();
+    advance();
+    println("{}", current);              // 输出：2；advance 本身不需要可写绑定。
+}
+```
+
+没有隐式捕获。闭包保存捕获环境，因此带捕获的闭包使用 `<<`；调用仍是普通的 `f(...)`。
+仅修改捕获地址的目标不要求闭包绑定可写；修改自身拥有的环境则需要可写闭包绑定。
+
+## 试运行与实际项目
+
+准备 Python 3.13 和 GCC 13，将上面任一完整示例保存为 `hello.xe`，在仓库根运行：
+
+```sh
+./xe doctor --cc gcc
+./xe run hello.xe --cc gcc
+./xe run examples/args/main.xe --cc gcc -- hello "two words" "你好 Xe" ""
+```
+
+编译器没有第三方 Python 运行依赖，也可用 `python3 -m compiler`。
+`run` 的 `--` 后原样传给程序；构建产物放在项目的 `target/`。
+
+可以继续阅读这些完整项目：
+
+- [参数打印](examples/args/README.md)：最小命令行程序。
+- [Feature Check](examples/feature_check/README.md)：带提示符、颜色和错误恢复的交互工具。
+- [Calculator](examples/calculator/README.md)：扫描、优先级解析、定位诊断与文件输入。
+- [Source Scan](examples/source_scan/README.md)：多文件模块、容器和文件输出。
+- [线程示例](examples/threads/README.md)：共享数据、加锁和作用域解锁。
+
+## 完整规范与实现边界
+
+以上是语言的基本颗粒和主要组合方式，不是完整语法手册。
+文件即模块，`use` 导入、声明前的 `pub` 公开；透明类型别名写 `type Name = Type;`。
+位运算使用 `bitand`、`bitor`、`bitxor`、`bitnot`、`bitshl`、`bitshr`，不复用移动符号。
+整数越界会报错或 panic；`as` 只允许对整个源类型值域都无损的转换，
+可失败整数转换用 `T::try_from(value)`。
+标准库另有 IO、文件、Box、Shared、Weak、同步与线程，底层接口支持有限的 C FFI。
+
+完整规范从 [doc/00.md](doc/00.md) 开始；专题说明：
+
+- [类型、运算与优先级](doc/02.md)、[模块和公开性](doc/09.md)、[闭包](doc/15.md)。
+- [元组和类型别名](doc/23.md)、[迭代协议](doc/26.md)、[智能指针](doc/28.md)、[线程](doc/29.md)。
+- [资源与模式](doc/34.md)、[静态 Trait](doc/35.md)、[C 接口](doc/36.md)、[位运算](doc/37.md)。
+
+当前版本为 **1.0.0-rc.1**，语法标识 `xe-1.0`，AST schema 1；验收平台为
+**Linux x86_64 / Python 3.13 / GCC 13**。Python stage0 位于 `compiler/`，
+将 Xe 检查后生成自包含 C11，再交给系统编译器生成可执行文件。
+动态 Trait、关联类型、递归模式、yield、async、完整格式化、LSP 与裸机支持等不在本版承诺中。
+
+Xe 不承诺完全内存安全，也不宣称已经比 Rust 更易学或具备 C/C++ 的全部底层能力。
+可识别的指针失效风险会给 warning，仍可编译；没有 warning 也不证明安全。
+明确的所有权与自动清理，不等于独占借用检查或自动线程安全。
+
+**子集自举已经验证，完整语言尚未自举。** [bootstrap/compiler.xe](bootstrap/compiler.xe)
+能编译自身，三代生成 C 按字节一致，但尚未覆盖 enum、泛型、方法、模块、元组、闭包等完整前端。
+日常使用功能更完整的 Python stage0；范围和验证流程见 [bootstrap/README.md](bootstrap/README.md)，
+Xe 编译器写作经验见 [第 31 章](doc/31.md)。
+
+## 工具链、开发与发布
+
+统一入口还提供 `check`、`build`、`test`、`fmt`、`doc`、`clean`：
+
+```sh
+./xe check examples/feature_check/main.xe
+./xe build --manifest-path examples/toolchain --release
+./xe fmt --manifest-path examples/toolchain --check
+./xe clean --manifest-path examples/toolchain --dry-run
+```
+
+`xe.toml` 描述包与本地 path 依赖；格式整理会验证 AST 不变，清理只处理登记产物。
+命令、缓存、构建输出和工具边界见 [工具链说明](doc/32.md) 与
+[compiler/README.md](compiler/README.md)。目录分层见 [ARCHITECTURE.md](ARCHITECTURE.md)，
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+开发与候选版验收只使用根目录 uv 环境：
 
 ```sh
 uv sync --locked --dev
+make python-check
+make compiler-test CC=gcc
 make release-check CC=gcc
 ```
 
-这个入口检查版本/锁文件、Python 静态检查、全部编译器回归（包含 sanitizer 和三代
-自举固定点），再生成源代码包、SHA-256 与清单，并在临时目录从解压包实际编译运行。
-候选包位于 `target/releases/`；只打包源码，不打包 `.venv`、密钥或已有构建产物。
-提交后的正式候选包使用 `make release-package RELEASE_FLAGS=--require-clean`，
-逐文件与 HEAD 核对，记录提交和干净快照；再运行 `make release-smoke CC=gcc`。
-验收不创建 Git 标签，不推送，不调用外部发布接口。CI 配置执行同一个入口；
-本地通过不能代替 GitHub 上该提交的 CI 结果。流程见 [发布说明](RELEASE.md)。
+现行正例在 `tests/language/`，历史样例在 `tests/legacy/`，错误与风险例子分别在
+`tests/fails/`、`tests/warnings/`。源码包、校验和及包外冒烟流程见
+[RELEASE.md](RELEASE.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+本地验收不代表远端 CI 通过，样例通过也不能证明所有程序完全无误。
+项目采用 [Apache-2.0](LICENSE)，归属说明见 [NOTICE](NOTICE)。

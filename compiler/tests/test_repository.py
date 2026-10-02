@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from compiler.release import source_snapshot
-from compiler.xe_ast.build import build_executable
+from compiler.xe_ast.build import BuildError, build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Diagnostic, Source
@@ -142,6 +142,53 @@ class RepositoryDocumentationTests(unittest.TestCase):
                     broken.append(f"{name}:{line}: 本地链接不存在：{destination}")
         self.assertGreater(checked, 0, "必须实际检查本地文档链接，不能产生零链接假通过")
         self.assertEqual(broken, [], "\n" + "\n".join(broken))
+
+    def readme_examples(self):
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        blocks = [(line, code) for info, line, code in fenced_blocks(text) if info == "xe"]
+        self.assertEqual(len(blocks), 8, "README 必须实际检查八个完整 Xe 程序；增删示例须更新执行合同")
+        for line, code in blocks:
+            self.assertTrue(code.strip(), f"README.md:{line}: Xe 示例不能为空")
+        return blocks
+
+    def test_readme_xe_examples_parse_and_semantically_check_as_complete_programs(self):
+        for line, code in self.readme_examples():
+            with self.subTest(line=line):
+                source = Source("\n" * (line - 1) + code, str(ROOT / "README.md"))
+                try:
+                    tree = parse_source(source.text, source.filename)
+                except Diagnostic as error:
+                    self.fail(error.render())
+                self.assertEqual(tree["kind"], "Module", f"README.md:{line}: 示例须解析为模块")
+                self.assertTrue(tree["items"], f"README.md:{line}: Xe 示例不能是空程序")
+                self.assertTrue(any(item.get("kind") == "Function" and item.get("name") == "main"
+                                    for item in tree["items"]),
+                                f"README.md:{line}: 每个 Xe 示例必须包含 main")
+                errors = Checker(source, tree).check()
+                self.assertEqual(errors, [], "\n".join(error.render() for error in errors))
+
+    @unittest.skipUnless(CC, "README 完整示例执行验收需要系统 C 编译器")
+    def test_readme_complete_programs_really_build_and_run(self):
+        blocks = self.readme_examples()
+        expected = ("42 1\n", "42\n", "42 Xe\n", "42 Xe\n", "20\n40\n42\n10 30\n",
+                    "42 0\n", "42 0\n", "42\n2\n")
+        self.assertEqual(len(blocks), len(expected), "README 示例改变时须明确更新真实执行合同")
+        with tempfile.TemporaryDirectory(prefix="xe-readme-examples-") as directory:
+            for index, ((line, code), output) in enumerate(zip(blocks, expected, strict=True)):
+                with self.subTest(line=line):
+                    source = Path(directory) / f"readme-{index}.xe"
+                    program = Path(directory) / f"readme-{index}"
+                    source.write_text("\n" * (line - 1) + code, encoding="utf-8")
+                    try:
+                        build_executable(source, program, cc=CC)
+                        completed = subprocess.run([str(program)], capture_output=True, text=True,
+                                                   stdin=subprocess.DEVNULL, timeout=10)
+                    except Diagnostic as error:
+                        self.fail(f"README.md:{line}: 示例构建失败\n{error.render()}")
+                    except (BuildError, OSError, subprocess.TimeoutExpired) as error:
+                        self.fail(f"README.md:{line}: 示例构建或执行失败\n{error}")
+                    self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                                     (0, output, ""), f"README.md:{line}: 真实程序输出不符合介绍合同")
 
     def agents_examples(self):
         text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
