@@ -42,3 +42,12 @@ htmlcov/
 /.ssh/
 ignore/
 target/
+
+# Local design history, audits, proof work and AI collaboration instructions.
+# Public manuals live under docs/. These paths are also excluded from releases.
+/internal/
+/AGENTS.md
+/ARCHITECTURE.md
+/CONTRIBUTING.md
+/doc/
+/formal/

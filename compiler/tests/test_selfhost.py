@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
+
 try:
     import resource
 except ImportError:
@@ -19,7 +21,7 @@ from compiler.xe_ast.build import build_executable
 
 
 @unittest.skipUnless(shutil.which("cc"), "需要系统 C 编译器")
-class SelfHostTests(unittest.TestCase):
+class SelfHostTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()

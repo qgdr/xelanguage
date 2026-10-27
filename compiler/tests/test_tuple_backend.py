@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 
@@ -12,7 +13,7 @@ CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")
-class TupleBackendTests(unittest.TestCase):
+class TupleBackendTests(LegacyTestCase):
     def run_source(self, text):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / "test.xe", Path(directory) / "program"

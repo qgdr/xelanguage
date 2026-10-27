@@ -5,20 +5,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 @unittest.skipUnless(shutil.which('cc'), '需要 C 编译器')
-class SourceScanTests(unittest.TestCase):
+class SourceScanTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
+        source = private_example("source_scan/src/main.xe")
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
         cls.program = cls.root/'source-scan'
-        build_executable(ROOT/'examples/source_scan/src/main.xe', cls.program,
+        build_executable(source, cls.program,
             extra_flags=('-fsanitize=address,undefined','-fno-sanitize-recover=all','-no-pie'))
 
     def run_tool(self, *arguments):

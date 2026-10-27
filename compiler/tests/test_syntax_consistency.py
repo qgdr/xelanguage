@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import Checker, check_source
@@ -16,7 +17,7 @@ from compiler.xe_ast.source import Source
 CC = shutil.which("cc") or ""
 
 
-class SyntaxConsistencyTests(unittest.TestCase):
+class SyntaxConsistencyTests(LegacyTestCase):
     def assert_ok(self, source):
         errors = check_source(source)
         self.assertEqual(errors, [], "\n".join(e.render() for e in errors))

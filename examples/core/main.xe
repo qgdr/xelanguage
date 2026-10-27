@@ -1,0 +1,7 @@
+// 当前默认 core 子集：类型明确，不依赖默认整数或省略返回类型。
+fn identity(value: i32) -> i32 { value }
+
+fn main() -> Unit {
+    let answer: i32 = identity(42);
+    println("{}", answer);
+}

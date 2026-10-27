@@ -1,3 +1,0 @@
-//! 工具链示例的公开库入口。
-
-pub use crate::math::square;

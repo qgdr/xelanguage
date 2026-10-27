@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from compiler.xe_ast.build import BuildError, atomic_text, build_executable
+from compiler.xe_ast.language_policy import current_profile, language_profile
 from compiler.xe_ast.source import Diagnostic
 
 SOURCE = ROOT / "bootstrap/compiler.xe"
@@ -76,6 +77,7 @@ def bootstrap(output: Path, cc: str = "cc", sanitize: bool = False) -> dict:
                                    check=True, timeout=10).stdout.splitlines()
     report = {
         "schema_version": 1, "subset": "xe-selfhost-0.1", "source": str(SOURCE),
+        "language_profile": current_profile(),
         "source_sha256": digest(SOURCE), "cc": cc, "stages": generations,
         "cc_version": version_lines[0] if version_lines else "unknown",
         "runtime_sha256": {str(path.relative_to(ROOT)): digest(path) for path in
@@ -96,9 +98,12 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "target/bootstrap")
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--language-profile", choices=("core", "legacy"), default=None,
+                        help="旧自举子集须显式 legacy；不代表新核心已支持自举")
     args = parser.parse_args()
     try:
-        report = bootstrap(args.output, args.cc, args.sanitize)
+        with language_profile(args.language_profile or current_profile()):
+            report = bootstrap(args.output, args.cc, args.sanitize)
     except (BuildError, Diagnostic, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
         detail = error.render() if isinstance(error, Diagnostic) else str(error)
         print(f"自举失败：{detail}", file=sys.stderr)

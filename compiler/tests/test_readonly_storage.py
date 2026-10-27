@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import check_source, parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import Checker
@@ -13,7 +14,7 @@ from compiler.xe_ast.source import Source
 CC = shutil.which("cc") or ""
 
 
-class ReadonlyStorageTests(unittest.TestCase):
+class ReadonlyStorageTests(LegacyTestCase):
     def test_readonly_addresses_are_static_and_cannot_be_writable(self):
         text = '''let NUMBER: i32 = 42;
             let LABEL: str = "label";

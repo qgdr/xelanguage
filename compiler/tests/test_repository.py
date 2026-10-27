@@ -13,12 +13,15 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from compiler.release import source_snapshot
+from compiler.tests.documentation_support import private_document
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import BuildError, build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Diagnostic, Source
 
 ROOT = Path(__file__).resolve().parents[2]
+BASELINE_CONTRACT = ROOT / "internal/docs/archive/AGENTS.toy-compiler.md"
 CC = shutil.which("cc") or ""
 GIT = shutil.which("git") or ""
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -89,7 +92,7 @@ def local_links(text: str) -> list[tuple[int, str]]:
     return links
 
 
-class MarkdownLinkParserTests(unittest.TestCase):
+class MarkdownLinkParserTests(LegacyTestCase):
     def test_fenced_and_inline_language_code_are_not_links(self):
         text = '''fn[T](i32) and `fn[captured](value)` are examples.
 `[not a link](missing.md)`
@@ -127,7 +130,7 @@ fn[T] example(value: T) {}
             fenced_blocks("```xe\nfn main(){}\n")
 
 
-class RepositoryDocumentationTests(unittest.TestCase):
+class RepositoryDocumentationTests(LegacyTestCase):
     def test_all_packaged_markdown_relative_links_exist(self):
         files = source_snapshot(ROOT)
         pages = [name for name in files if name.endswith(".md")]
@@ -140,16 +143,169 @@ class RepositoryDocumentationTests(unittest.TestCase):
                 target = (ROOT / name).parent / destination
                 if not target.exists():
                     broken.append(f"{name}:{line}: 本地链接不存在：{destination}")
+                else:
+                    # A link existing only in a developer's checkout still
+                    # breaks in the source archive; check the packaged set too.
+                    try:
+                        relative = target.resolve().relative_to(ROOT.resolve()).as_posix()
+                    except ValueError:
+                        broken.append(f"{name}:{line}: 链接目标在源码仓库外：{destination}")
+                        continue
+                    prefix = "" if relative == "." else relative + "/"
+                    packaged = relative in files or target.is_dir() and any(
+                        path.startswith(prefix) for path in files)
+                    if not packaged:
+                        broken.append(f"{name}:{line}: 链接目标没有进入源码快照：{destination}")
         self.assertGreater(checked, 0, "必须实际检查本地文档链接，不能产生零链接假通过")
         self.assertEqual(broken, [], "\n" + "\n".join(broken))
 
     def readme_examples(self):
-        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        text = private_document("archive/README.before-core-preview.md").read_text(encoding="utf-8")
         blocks = [(line, code) for info, line, code in fenced_blocks(text) if info == "xe"]
         self.assertEqual(len(blocks), 8, "README 必须实际检查八个完整 Xe 程序；增删示例须更新执行合同")
         for line, code in blocks:
             self.assertTrue(code.strip(), f"README.md:{line}: Xe 示例不能为空")
         return blocks
+
+    def tapl_examples(self):
+        page = private_document("docs/tapl_learning.md")
+        blocks = [(line, code) for info, line, code in fenced_blocks(page.read_text(encoding="utf-8"))
+                  if info == "xe"]
+        self.assertEqual(len(blocks), 4, "学习笔记须实际保留四个完整教学程序，不能零样例通过")
+        return page, blocks
+
+    def control_flow_examples(self):
+        page = private_document("docs/control_flow.md")
+        blocks = [(line, code) for info, line, code in fenced_blocks(page.read_text(encoding="utf-8"))
+                  if info == "xe"]
+        self.assertEqual(len(blocks), 3, "控制流说明必须实际验证三个完整示例")
+        return page, blocks
+
+    def implementation_documentation_examples(self):
+        # These executable fences record the existing implementation, including
+        # the later syntax awaiting the designer's review. Passing this gate
+        # does not promote that reference material to confirmed language rules.
+        # Count each page explicitly so moving a page cannot silently remove
+        # all of its programs from the documentation's execution contract.
+        pages = (
+            ("docs/language/00-reading-basics.md", 1),
+            ("docs/language/01-basic-types.md", 1),
+            ("docs/language/02-bindings-and-blocks.md", 3),
+            ("docs/language/04-pointers.md", 1),
+            ("docs/language/text-resources.md", 1),
+            ("docs/language/element-access.md", 0),
+            ("docs/language/03-copy-and-move.md", 1),
+            # This chapter has migrated to a separately executed xe-core
+            # sample in test_core_struct_backend (exactly one, never zero).
+            ("docs/language/05-structs-and-methods.md", 0),
+            ("docs/language/set-and-union.md", 0),
+            ("docs/review/later-syntax.md", 9),
+        )
+        examples = []
+        for name, expected in pages:
+            page = private_document(name)
+            blocks = [(line, code) for info, line, code in fenced_blocks(page.read_text(encoding="utf-8"))
+                      if info == "xe-current"]
+            self.assertEqual(len(blocks), expected, f"{name}: 完整示例数量改变时须更新执行合同")
+            for line, code in blocks:
+                self.assertTrue(code.strip(), f"{name}:{line}: 当前实现示例不能为空")
+                examples.append((page, line, code))
+        self.assertEqual(len(examples), 17, "保留的legacy文档须实际验证十七个完整程序，core结构体另有执行验收")
+        return examples
+
+    def test_current_implementation_documentation_examples_parse_and_check(self):
+        for page, line, code in self.implementation_documentation_examples():
+            with self.subTest(page=page, line=line):
+                source = Source("\n" * (line - 1) + code, str(page))
+                tree = parse_source(source.text, source.filename)
+                self.assertTrue(any(item.get("kind") == "Function" and item.get("name") == "main"
+                                    for item in tree["items"]), f"{page}:{line}: 必须是含 main 的完整示例")
+                errors = Checker(source, tree).check()
+                self.assertEqual(errors, [], "\n".join(error.render() for error in errors))
+
+    @unittest.skipUnless(CC, "当前实现文档完整示例执行验收需要系统 C 编译器")
+    def test_current_implementation_documentation_examples_build_and_execute(self):
+        examples = self.implementation_documentation_examples()
+        outputs = ("42\n", "", "42 1\n", "42\n", "42 3\n", "42\n", "hello hello\n",
+                   "Xe\n42 42\n", "42\n", "42\n", "10\n20\n1\n2\n",
+                   "42\n", "42\n", "42\n", "2\n", "true 14\n", "10 30\n")
+        for (page, line, code), expected in zip(examples, outputs, strict=True):
+            with self.subTest(page=page, line=line), tempfile.TemporaryDirectory(prefix="xe-doc-example-") as directory:
+                source = Path(directory) / "main.xe"
+                binary = Path(directory) / "program"
+                source.write_text(code, encoding="utf-8")
+                build_executable(source, binary, cc=CC)
+                result = subprocess.run([str(binary)], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, ""))
+
+    def test_language_reading_order_introduces_basic_notation_before_its_users(self):
+        # Check the explicit teaching route, not the separate progress links
+        # at the top of the page. Those links intentionally jump to the latest
+        # decision and must not redefine the beginner's dependency order.
+        page = ROOT / "docs/language.md"
+        text = page.read_text(encoding="utf-8")
+        self.assertIn("## 从零学习：按顺序阅读", text)
+        reading_route = text.split("## 从零学习：按顺序阅读", 1)[1].split("\n## ", 1)[0]
+        links = [destination for _, destination in local_links(reading_route)]
+        expected = (
+            "language/01-first-program.md", "language/02-basic-types.md",
+            "language/03-functions-and-control-flow.md", "language/04-boxes-and-values.md",
+            "language/05-pointers.md", "language/06-copy-and-move.md", "language/07-strings-and-resources.md",
+            "language/08-structs-and-methods.md", "language/09-integer-operations.md",
+            "language/10-arrays-and-views.md", "language/11-temporary-arrays.md", "language/12-resource-arrays.md",
+            "language/13-type-declarations.md", "language/14-set-and-union.md", "language/15-enums.md",
+            "language/16-branch-pipelines.md", "language/17-generic-functions.md",
+            "language/18-initialization-and-cleanup.md", "language/19-support-boundaries.md",
+        )
+        for destination in expected:
+            self.assertIn(destination, links, f"docs/language.md 缺少正式阅读入口：{destination}")
+        positions = [links.index(destination) for destination in expected]
+        self.assertEqual(positions, sorted(positions), "正式阅读顺序须先介绍基础记号，再使用它们")
+
+    def test_control_flow_examples_parse_and_check(self):
+        page, blocks = self.control_flow_examples()
+        for line, code in blocks:
+            with self.subTest(line=line):
+                source = Source("\n" * (line - 1) + code, str(page))
+                self.assertEqual(Checker(source, parse_source(source.text, source.filename)).check(), [])
+
+    @unittest.skipUnless(CC, "运行控制流示例需要 C 编译器")
+    def test_control_flow_examples_build_and_execute(self):
+        _, blocks = self.control_flow_examples()
+        outputs = ("", "7 42\n", "0 0\n0 1\n0 2\n")
+        for (line, code), expected in zip(blocks, outputs, strict=True):
+            with self.subTest(line=line), tempfile.TemporaryDirectory(prefix="xe-control-example-") as directory:
+                source = Path(directory) / "main.xe"
+                binary = Path(directory) / "program"
+                source.write_text(code, encoding="utf-8")
+                build_executable(source, binary, cc=CC)
+                result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, ""))
+
+    def test_tapl_learning_examples_parse_and_check_without_running_panic(self):
+        page, blocks = self.tapl_examples()
+        for line, code in blocks:
+            with self.subTest(line=line):
+                source = Source("\n" * (line - 1) + code, str(page))
+                tree = parse_source(source.text, source.filename)
+                self.assertTrue(any(item.get("kind") == "Function" and item.get("name") == "main"
+                                    for item in tree["items"]), "教学执行程序必须有 main")
+                self.assertEqual(Checker(source, tree).check(), [])
+
+    @unittest.skipUnless(CC, "运行教学示例需要 C 编译器")
+    def test_tapl_learning_examples_build_and_execute_only_safe_main(self):
+        _, blocks = self.tapl_examples()
+        for (line, code), expected in zip(blocks, ("42\n", "", "7 42\n", "0 42\n"), strict=True):
+            with self.subTest(line=line), tempfile.TemporaryDirectory(prefix="xe-tapl-example-") as directory:
+                source = Path(directory) / "main.xe"
+                binary = Path(directory) / "program"
+                source.write_text(code, encoding="utf-8")
+                build_executable(source, binary, cc=CC)
+                result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+                self.assertEqual(result.stderr, "")
 
     def test_readme_xe_examples_parse_and_semantically_check_as_complete_programs(self):
         for line, code in self.readme_examples():
@@ -190,23 +346,25 @@ class RepositoryDocumentationTests(unittest.TestCase):
                     self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
                                      (0, output, ""), f"README.md:{line}: 真实程序输出不符合介绍合同")
 
-    def agents_examples(self):
-        text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    def baseline_contract_examples(self):
+        # The active AGENTS now describes the design process, not frozen syntax.
+        # Keep the executable historical contract tested at its new location.
+        text = private_document("docs/archive/AGENTS.toy-compiler.md").read_text(encoding="utf-8")
         blocks = [(line, code) for info, line, code in fenced_blocks(text) if info == "xe"]
         self.assertGreaterEqual(len(blocks), 5, "独立重建契约应保留完整实例与泛型片段")
         return blocks
 
-    def test_agents_xe_examples_parse_and_semantically_check_without_requiring_main(self):
+    def test_archived_contract_examples_parse_and_semantically_check_without_requiring_main(self):
         generic_without_main = False
-        for line, code in self.agents_examples():
+        for line, code in self.baseline_contract_examples():
             with self.subTest(line=line):
-                source = Source("\n" * (line - 1) + code, str(ROOT / "AGENTS.md"))
+                source = Source("\n" * (line - 1) + code, str(BASELINE_CONTRACT))
                 try:
                     tree = parse_source(source.text, source.filename)
                 except Diagnostic as error:
                     self.fail(error.render())
                 self.assertEqual(tree["kind"], "Module")
-                self.assertTrue(tree["items"], f"AGENTS.md:{line}: Xe 示例不能是空程序")
+                self.assertTrue(tree["items"], f"{BASELINE_CONTRACT}:{line}: Xe 示例不能是空程序")
                 errors = Checker(source, tree).check()
                 self.assertEqual(errors, [], "\n".join(error.render() for error in errors))
                 has_main = any(item.get("kind") == "Function" and item.get("name") == "main"
@@ -217,11 +375,11 @@ class RepositoryDocumentationTests(unittest.TestCase):
         # unused generic declaration does not prove every possible instantiation.
         self.assertTrue(generic_without_main, "须实际检查不含 main 的泛型片段")
 
-    @unittest.skipUnless(CC, "AGENTS 完整示例执行验收需要系统 C 编译器")
-    def test_agents_complete_programs_really_build_and_run(self):
+    @unittest.skipUnless(CC, "归档契约完整示例执行验收需要系统 C 编译器")
+    def test_archived_contract_complete_programs_really_build_and_run(self):
         complete = []
-        for line, code in self.agents_examples():
-            tree = parse_source(code, str(ROOT / "AGENTS.md"))
+        for line, code in self.baseline_contract_examples():
+            tree = parse_source(code, str(BASELINE_CONTRACT))
             if any(item.get("kind") == "Function" and item.get("name") == "main" for item in tree["items"]):
                 complete.append((line, code))
         expected = ("42\n", "3 Xe\n", "0\n", "42\n")
@@ -236,7 +394,23 @@ class RepositoryDocumentationTests(unittest.TestCase):
                     completed = subprocess.run([str(program)], capture_output=True, text=True,
                                                stdin=subprocess.DEVNULL, timeout=10)
                     self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
-                                     (0, output, ""), f"AGENTS.md:{line}: 真实程序输出不符合重建合同")
+                                     (0, output, ""), f"{BASELINE_CONTRACT}:{line}: 真实程序输出不符合归档合同")
+
+    def test_public_manual_is_packaged_and_private_material_is_excluded(self):
+        files = source_snapshot(ROOT)
+        required = (
+            "README.md", "RELEASE.md", "CHANGELOG.md", "docs/README.md", "docs/language.md",
+            "docs/getting-started.md", "docs/cli.md", "docs/support.md", "docs/releases.md",
+            "docs/documentation.md", "docs/language/10-arrays-and-views.md", "docs/language/17-generic-functions.md",
+            "examples/README.md", "examples/core/README.md", "examples/dependency-planner/README.md",
+        )
+        for name in required:
+            with self.subTest(document=name):
+                self.assertIn(name, files)
+                self.assertTrue(files[name].strip(), f"{name} must not be an empty placeholder")
+        self.assertFalse(any(name.startswith(("internal/", "doc/", "formal/")) for name in files))
+        for name in ("AGENTS.md", "ARCHITECTURE.md", "CONTRIBUTING.md", "compiler/README.md"):
+            self.assertNotIn(name, files)
 
     def test_current_language_fixture_globs_are_not_empty(self):
         for name in ("language", "backend", "fails", "syntax_fails", "warnings"):
@@ -247,7 +421,7 @@ class RepositoryDocumentationTests(unittest.TestCase):
 
 @unittest.skipUnless(GIT and (ROOT / ".git").exists(),
                      "Git 忽略策略验收限 Git 工作树；归档源码包及编译器运行不需要 Git")
-class RepositoryIgnorePolicyTests(unittest.TestCase):
+class RepositoryIgnorePolicyTests(LegacyTestCase):
     def test_generated_files_and_credentials_ignored_but_real_sources_visible(self):
         ignored = (
             "target/debug/program", ".venv/bin/python", "compiler/__pycache__/module.pyc",
@@ -256,10 +430,12 @@ class RepositoryIgnorePolicyTests(unittest.TestCase):
             "examples/libnative.a", "examples/libnative.so", "examples/libnative.dylib",
             ".env", ".env.local", "credentials/private.pem", "credentials/private.key",
             ".aws/credentials", ".ssh/id_ed25519",
+            "internal/docs/design.md", "AGENTS.md", "ARCHITECTURE.md", "CONTRIBUTING.md",
+            "doc/example.md", "formal/lean/model.lean",
         )
         visible = (
             "tests/language/example.xe", "examples/ffi/functions.c", "compiler/runtime/runtime.h",
-            "doc/example.md", "examples/toolchain/xe.toml", "compiler/main.py", ".env.example",
+            "docs/language/example.md", "examples/toolchain/xe.toml", "compiler/main.py", ".env.example",
         )
         environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
         environment.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",

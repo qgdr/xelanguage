@@ -1,0 +1,13 @@
+// Array索引找到元素盒子；View索引产生指针量，坐标不重新编号。
+fn main() -> Unit {
+    let[mut] values: Array[i32, 6] = [10, 20, 30, 40, 50, 60];
+    let part: View[i32@[mut]] = values⟨1..=4⟩[@[mut]];
+    let alias: View[i32@[mut]] = part; // Copy 描述符和权限，不复制元素。
+    let before: i32 = alias⟦3⟧#;
+
+    alias⟦3⟧# = 99; // 修改来源元素，不给alias重新赋值，所以不必let[mut]。
+    let lower: usize = 2;
+    let upper: usize = 4;
+    let dynamic: View[i32@[mut]] = part⟨lower..upper⟩;
+    println("{} {} {}", before, alias⟦3⟧#, dynamic⟦3⟧#); // 40 99 99
+}

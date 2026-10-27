@@ -1,7 +1,7 @@
 [project]
 name = "xelanguage"
-version = "1.0.0rc1"
-description = "Xe language and bootstrap compiler with C backend"
+version = "0.1.0a1"
+description = "Xe Core Preview 1: explicit values, pointers and resource transfer"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ dev = [
 package = false
 
 [tool.pyright]
-include = ["compiler", "bootstrap/verify.py"]
+include = ["compiler", "bootstrap/verify.py", "internal/formal/lean/check.py"]
 exclude = [".venv", "**/target", "ignore"]
 pythonVersion = "3.13"
 venvPath = "."

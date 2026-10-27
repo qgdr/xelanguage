@@ -5,12 +5,13 @@
 """
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
 
-class GenericSemanticTests(unittest.TestCase):
+class GenericSemanticTests(LegacyTestCase):
     def checker(self, text, limit=256):
         checker = Checker(Source(text), parse_source(text))
         checker.instance_limit = limit

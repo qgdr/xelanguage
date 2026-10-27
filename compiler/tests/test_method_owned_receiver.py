@@ -6,13 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
 
 CC = shutil.which("cc") or ""
 
 
-class OwnedMethodReceiverTests(unittest.TestCase):
+class OwnedMethodReceiverTests(LegacyTestCase):
     def assert_pointer_call_rejected(self, source):
         errors = check_source(source, "receiver.xe")
         self.assertTrue(errors, source)

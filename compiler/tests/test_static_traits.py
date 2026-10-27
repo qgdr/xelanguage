@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
@@ -17,7 +18,7 @@ CC = shutil.which("cc") or ""
 MEASURE = "trait Measure { fn measure(self: Self@) -> i32; } struct Point { value: i32, }"
 
 
-class StaticTraitSemanticTests(unittest.TestCase):
+class StaticTraitSemanticTests(LegacyTestCase):
     def checked(self, text):
         checker = Checker(Source(text, "traits.xe"), parse_source(text, "traits.xe"))
         errors = checker.check()
@@ -125,7 +126,7 @@ class StaticTraitSemanticTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")
-class StaticTraitBackendTests(unittest.TestCase):
+class StaticTraitBackendTests(LegacyTestCase):
     def run_source(self, text, *, sanitize=False):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:

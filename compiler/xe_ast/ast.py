@@ -2,12 +2,14 @@
 from typing import Any
 
 from ..version import SYNTAX_VERSION
+from .admission import validate_core_source
 from .source import Source
 
 SCHEMA_VERSION = 1
 
 
 def document(source: Source, module: dict[str, Any]) -> dict[str, Any]:
+    validate_core_source(source, module)
     return {"schema_version": SCHEMA_VERSION, "syntax_version": SYNTAX_VERSION,
             "source": {"file": source.filename, "encoding": "utf-8",
                        "offset_unit": "unicode-code-point", "length": len(source.text)},

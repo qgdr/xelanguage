@@ -2,12 +2,13 @@
 import unittest
 from copy import deepcopy
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Diagnostic, Source
 
 
-class ClosureSemanticTests(unittest.TestCase):
+class ClosureSemanticTests(LegacyTestCase):
     def check(self, text, code=None):
         tree = parse_source(text, "closure.xe")
         original = deepcopy(tree)

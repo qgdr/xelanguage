@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
@@ -27,7 +28,7 @@ PROBE = '''fn main() {
 }'''
 
 
-class StandardIoTerminalSemanticTests(unittest.TestCase):
+class StandardIoTerminalSemanticTests(LegacyTestCase):
     def test_terminal_functions_have_normal_zero_argument_bool_signatures(self):
         self.assertEqual(len(IO_NATIVE_FUNCTIONS), 5)
         for name in IO_NATIVE_FUNCTIONS:
@@ -56,7 +57,7 @@ class StandardIoTerminalSemanticTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CC, "终端策略运行验收需要系统 C 编译器")
-class StandardIoTerminalExecutionTests(unittest.TestCase):
+class StandardIoTerminalExecutionTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="xe-io-terminal-")

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import check_source
@@ -13,7 +14,7 @@ from compiler.xe_ast.source import Diagnostic
 
 
 @unittest.skipUnless(shutil.which("cc"), "需要 C 编译器")
-class PatternExecutionTests(unittest.TestCase):
+class PatternExecutionTests(LegacyTestCase):
     def run_xe(self, text, expected, sanitize=False):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:
@@ -198,7 +199,7 @@ class PatternExecutionTests(unittest.TestCase):
             }''', "drop 1\nvalue 1\npair 2\ndrop 2\nread 3\ndrop 3\n", sanitize=True)
 
 
-class PatternDiagnosticTests(unittest.TestCase):
+class PatternDiagnosticTests(LegacyTestCase):
     def assert_error(self, text, code):
         errors = check_source(text)
         self.assertTrue(errors, text)

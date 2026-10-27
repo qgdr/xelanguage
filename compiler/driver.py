@@ -24,6 +24,7 @@ from .xe_ast.build import (
     protect_source,
     resolve_link_inputs,
 )
+from .xe_ast.language_policy import current_profile
 from .xe_ast.modules import load_program
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,7 @@ def build(project: Project, source: Path, output: Path, *, cc="cc", release=Fals
                        sorted((ROOT / "compiler").glob("*.py")) +
                        sorted((ROOT / "compiler/xe_ast").glob("*.py"))}
     key_data = {"syntax": SYNTAX_VERSION, "tool_version": VERSION, "source": str(source),
+                "language_profile": current_profile(),
                 "inputs": inputs, "generated_c": hashlib.sha256(generated.encode("utf-8")).hexdigest(),
                 "cc": identity, "flags": flags, "platform": platform.platform(),
                 "link_inputs": {str(path): digest(path) for path in link_inputs},

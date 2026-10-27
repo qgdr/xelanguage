@@ -11,6 +11,7 @@ from pathlib import Path
 
 from compiler.driver import build
 from compiler.project import project_at
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.toolchain import main
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import BuildError, build_executable
@@ -24,7 +25,7 @@ CC = shutil.which("cc") or ""
 AR = shutil.which("ar") or ""
 
 
-class FfiSemanticTests(unittest.TestCase):
+class FfiSemanticTests(LegacyTestCase):
     def check(self, text):
         return Checker(Source(text, "ffi.xe"), parse_source(text, "ffi.xe")).check()
 
@@ -75,7 +76,7 @@ class FfiSemanticTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CC, "外部 C 接口验收需要系统 C 编译器")
-class FfiExecutionTests(unittest.TestCase):
+class FfiExecutionTests(LegacyTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="xe-ffi-")
         self.addCleanup(directory.cleanup)
@@ -96,7 +97,7 @@ class FfiExecutionTests(unittest.TestCase):
     def cli(self, function, *arguments):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = function([str(argument) for argument in arguments])
+            status = function(["--language-profile=legacy", *[str(argument) for argument in arguments]])
         return status, out.getvalue(), err.getvalue()
 
     def test_scalar_calls_void_function_values_and_callback_roundtrip(self):

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import Checker, check_source
@@ -17,7 +18,7 @@ from compiler.xe_ast.source import Source
 CC = shutil.which("cc") or ""
 
 
-class ArrayBorrowTests(unittest.TestCase):
+class ArrayBorrowTests(LegacyTestCase):
     def assert_ok(self, text):
         errors = check_source(text)
         self.assertEqual(errors, [], "\n".join(error.render() for error in errors))

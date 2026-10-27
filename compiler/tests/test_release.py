@@ -28,14 +28,15 @@ from compiler.release import (
     source_snapshot,
     verify_archive,
 )
-from compiler.version import PACKAGE_VERSION, SYNTAX_VERSION, VERSION
+from compiler.tests.legacy_support import LegacyTestCase
+from compiler.version import PACKAGE_VERSION, RELEASE_NAME, SYNTAX_VERSION, VERSION
 from compiler.xe_ast.ast import SCHEMA_VERSION
 
 CC = shutil.which("cc") or ""
 GIT = shutil.which("git") or ""
 
 
-class ReleaseFixtures(unittest.TestCase):
+class ReleaseFixtures(LegacyTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="xe-release-test-")
         self.addCleanup(directory.cleanup)
@@ -102,6 +103,7 @@ class SourceCandidateTests(ReleaseFixtures):
         self.assertEqual(manifest["git"], metadata)
         self.assertEqual(manifest["source_snapshot"], "working-tree")
         self.assertEqual(manifest["release_status"], "local-candidate")
+        self.assertEqual(manifest["release_name"], RELEASE_NAME)
         self.assertFalse(manifest["publication_authorized"])
         self.assertEqual(manifest["license_status"], "Apache-2.0")
         self.assertIn("compiler/xe_ast/new_untracked_feature.py", selected)
@@ -133,15 +135,40 @@ class SourceCandidateTests(ReleaseFixtures):
             ".git/config", ".venv/bin/python", "target/program", "ignore/private.py",
             "compiler/__pycache__/release.cpython-313.pyc", "compiler/.env", "compiler/secrets.py",
             "compiler/private.key", "examples/private.pem", "examples/id_rsa", ".aws/credentials",
+            "docs/private.key", "docs/secrets.py", "docs/target/generated.md", "docs/.private/note.md",
+            "Xelanguage_Problem_Driven_Design_Workflow.md", "Xelanguage_Type_System_Foundation_Spec.md",
+            "Xe_Chat_to_Codex/Xelanguage_View_Metadata_Optimization_Spec.md",
             "notes.md", "compiler/generated.o", ".github/private/token.json",
             "compiler/build/generated.py", "bootstrap/dist/generated.xe", "examples/wheels/generated.c",
+            "internal/docs/language.md", "internal/notes.py", "internal/formal/lean/check.py",
+            "AGENTS.md", "ARCHITECTURE.md", "CONTRIBUTING.md", "doc/37.md",
+            "compiler/README.md", "compiler/tests/README.md", "stdlib/README.md",
+            "stdlib/iter/README.md", "bootstrap/README.md",
+            "examples/args/README.md", "tests/README.md",
+            "examples/args/main.xe", "examples/ffi/functions.c", "examples/toolchain/xe.toml",
+            "examples/calculator/input.calc", "examples/dependency_planner/main.xe",
+            "examples/dependency_planner/README.md", "examples/dependency_planner/verify.py",
+            "examples/dependency-planner/verify.py", "examples/dependency-planner/reference.rs",
+            "examples/dependency-planner/reference.cpp", "examples/dependency-planner/extra.xe",
+            "examples/core/private.py", "examples/core/nested/private.xe",
+            "docs/roadmap.md", "docs/current_state_audit.md", "docs/discussions/README.md",
+            "docs/discussions/DISC-001-views.md", "docs/spec/type_rules.md",
+            "docs/spec/grammar.ebnf", "docs/archive/design-inputs/problem-driven-workflow.md",
+            "docs/decisions/DEC-001-problem-driven-redesign.md",
+            "docs/language/unreviewed-proposal.md", "docs/language/access.md",
+            "formal/lean/lean-toolchain", "formal/lean/lakefile.toml", "formal/lean/README.md",
+            "formal/lean/check.py", "formal/lean/XeModel.lean", "formal/lean/XeModel/Expressions.lean",
         )
         for name in excluded:
             self.file(name, "PRIVATE MUST NOT BE PACKAGED\n")
         public = (
-            ".github/workflows/release-check.yml", "examples/ffi/functions.c",
-            "examples/toolchain/xe.toml", "examples/calculator/input.calc", "doc/37.md",
-            "CHANGELOG.md", "RELEASE.md", "ARCHITECTURE.md", "CONTRIBUTING.md", ".gitignore", ".python-version",
+            ".github/workflows/release-check.yml", "examples/dependency-planner/main.xe",
+            "examples/dependency-planner/README.md", "examples/core/README.md", "examples/core/extra.xe",
+            "examples/README.md",
+            "CHANGELOG.md", "RELEASE.md", ".gitignore", ".python-version",
+            "docs/README.md", "docs/language.md", "docs/getting-started.md", "docs/cli.md",
+            "docs/support.md", "docs/releases.md", "docs/documentation.md",
+            "docs/language/01-first-program.md", "docs/language/19-support-boundaries.md",
         )
         for name in public:
             self.file(name, "public fixture\n")
@@ -352,7 +379,8 @@ class ArchiveSafetyTests(ReleaseFixtures):
         root = f"xelanguage-{VERSION}"
         members = []
         for name in (f"{root}/../escape", f"/{root}/compiler/x.py", f"{root}/compiler//x.py",
-                     f"{root}/compiler\\x.py", f"{root}/compiler/.env", f"{root}/compiler/__main__.py"):
+                     f"{root}/compiler\\x.py", f"{root}/compiler/.env", f"{root}/compiler/__main__.py",
+                     f"{root}/internal/design.py", f"{root}/AGENTS.md", f"{root}/compiler/README.md"):
             members.append(tarfile.TarInfo(name))
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE):
             member = tarfile.TarInfo(f"{root}/compiler/link.py")
@@ -405,24 +433,27 @@ class ArchiveSafetyTests(ReleaseFixtures):
             package.assert_called_once_with(self.output, require_clean=True)
 
 
-class CleanConsumerTests(unittest.TestCase):
+class CleanConsumerTests(LegacyTestCase):
     def test_clean_environment_removes_python_virtualenv_and_user_site_inputs(self):
         with patch.dict(os.environ, {
             "PYTHONPATH": "/private/module-path", "PYTHONHOME": "/private/python-home",
             "PYTHONUSERBASE": "/private/user-site", "VIRTUAL_ENV": "/private/venv",
             "CONDA_PREFIX": "/private/conda", "UV_PROJECT_ENVIRONMENT": "/private/environment",
+            "ASAN_OPTIONS": "detect_leaks=0", "LSAN_OPTIONS": "exitcode=0",
+            "UBSAN_OPTIONS": "silence_unsigned_overflow=1",
             "PATH": "/private/venv/bin" + os.pathsep + os.defpath,
         }):
             cleaned = clean_environment(Path("/base/python/bin/python3"))
         self.assertEqual([key for key in cleaned if key.startswith("PYTHON")], ["PYTHONNOUSERSITE"])
         self.assertEqual(cleaned["PYTHONNOUSERSITE"], "1")
-        for key in ("VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT_ENVIRONMENT"):
+        for key in ("VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT_ENVIRONMENT",
+                    "ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS"):
             self.assertNotIn(key, cleaned)
         self.assertNotIn("/private/venv/bin", cleaned["PATH"].split(os.pathsep))
         self.assertEqual(cleaned["PATH"].split(os.pathsep)[0], "/base/python/bin")
 
     @unittest.skipUnless(CC and sys.version_info >= (3, 13), "真实解包验收需要 Python 3.13+ 和 C 编译器")
-    def test_real_working_tree_candidate_works_without_repository_virtualenv(self):
+    def test_core_candidate_works_outside_package_without_repository_virtualenv(self):
         with tempfile.TemporaryDirectory(prefix="xe-release-real-") as directory:
             result = package_sources(Path(directory), root=ROOT)
             with patch.dict(os.environ, {"PYTHONPATH": "/xe-invalid-import-path",
@@ -436,13 +467,32 @@ class CleanConsumerTests(unittest.TestCase):
             self.assertEqual(smoke["clean_python"],
                              str(Path(getattr(sys, "_base_executable", sys.executable)).resolve()))
             self.assertIn("doctor", smoke["checks"])
-            self.assertIn("legacy-script-help", smoke["checks"])
-            self.assertIn("build-multiple-modules", smoke["checks"])
-            self.assertIn("run-argument-boundaries", smoke["checks"])
-            self.assertIn("run-c-ffi", smoke["checks"])
-            self.assertIn("run-stdlib-multiple-modules", smoke["checks"])
-            self.assertIn("reject-semantic-error", smoke["checks"])
-            self.assertIn("reject-syntax-error", smoke["checks"])
+            self.assertIn("script-entry-help", smoke["checks"])
+            self.assertEqual(smoke["language_profile"], "core")
+            for example in ("main", "structs", "resource-arrays", "generics", "access"):
+                for stage in ("check", "ast", "emit-c", "build", "execute"):
+                    self.assertIn(f"{stage}-core-{example}", smoke["checks"])
+            for name in ("run-core-resource-arrays-sanitized", "reject-semantic-error",
+                         "reject-syntax-error", "reject-unconfirmed-float",
+                         "reject-unconfirmed-conversion", "reject-resource-element-move"):
+                self.assertIn(name, smoke["checks"])
+            self.assertNotIn("build-multiple-modules", smoke["checks"])
+            manifest, selected, _ = verify_archive(Path(result["archive"]))
+            self.assertEqual(manifest["release_name"], "Xe Core Preview 1")
+            self.assertFalse(any(name.startswith(("internal/", "formal/", "doc/"))
+                                 for name in selected))
+
+    def test_legacy_release_smoke_is_rejected_before_loading_private_fixtures(self):
+        with patch("compiler.release.verify_archive") as verify:
+            with self.assertRaisesRegex(ReleaseError, "仅支持 core.*本地开发资料"):
+                smoke_archive(Path("unused.tar.gz"), language_profile="legacy")
+            verify.assert_not_called()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = main(["smoke", "unused.tar.gz", "--language-profile=legacy"])
+        self.assertEqual((status, out.getvalue()), (2, ""))
+        self.assertIn("仅支持 core", err.getvalue())
+
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from compiler.tests.documentation_support import private_document, private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -25,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CC = shutil.which("cc") or ""
 
 
-class EnvSemanticTests(unittest.TestCase):
+class EnvSemanticTests(LegacyTestCase):
     def check(self, text):
         tree = parse_source(text, "args.xe")
         original = copy.deepcopy(tree)
@@ -69,8 +71,8 @@ class EnvSemanticTests(unittest.TestCase):
         self.check((ROOT / "tests/backend/args.xe").read_text(encoding="utf-8"))
 
     def test_minimal_document_example_matches_the_actual_xe_file(self):
-        source = (ROOT / "examples/args/main.xe").read_text(encoding="utf-8")
-        documentation = (ROOT / "doc/25.md").read_text(encoding="utf-8")
+        source = private_example("args/main.xe").read_text(encoding="utf-8")
+        documentation = private_document("doc/25.md").read_text(encoding="utf-8")
         example = re.search(r"```xe\n(.*?)\n```", documentation, re.DOTALL)
         self.assertIsNotNone(example)
         assert example is not None
@@ -96,13 +98,13 @@ class EnvSemanticTests(unittest.TestCase):
         self.check('fn args()->i32{42} fn main(){let args=args();println("{}",args);}')
 
 
-class RunArgumentParsingTests(unittest.TestCase):
+class RunArgumentParsingTests(LegacyTestCase):
     def test_separator_keeps_argument_boundaries_and_does_not_call_shell(self):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / "main.xe", Path(directory) / "program"
             with patch("compiler.xe_ast.build.build_executable") as build, \
                     patch("compiler.xe_ast.cli.subprocess.call", return_value=7) as run:
-                status = main([str(source), "--run", "-o", str(output), "--",
+                status = main(["--language-profile=legacy", str(source), "--run", "-o", str(output), "--",
                                "", "two words", "--help", "--", "$(not-a-shell)"])
             self.assertEqual(status, 7)
             build.assert_called_once()
@@ -113,13 +115,13 @@ class RunArgumentParsingTests(unittest.TestCase):
         for action in ("--check", "--build", "--emit-c"):
             with self.subTest(action=action), contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit) as caught:
-                    main(["missing.xe", action, "--", "--help"])
+                    main(["--language-profile=legacy", "missing.xe", action, "--", "--help"])
                 self.assertEqual(caught.exception.code, 2)
                 self.assertIn("只能与 --run", err.getvalue())
 
 
 @unittest.skipUnless(CC, "参数库运行测试需要系统 C 编译器")
-class EnvExecutionTests(unittest.TestCase):
+class EnvExecutionTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="xe-env-args-")
@@ -214,7 +216,7 @@ class EnvExecutionTests(unittest.TestCase):
 
     def test_compiler_run_forwards_arguments_after_separator(self):
         output = self.root / "cli_args"
-        result = subprocess.run([sys.executable, str(ROOT / "compiler/main.py"),
+        result = subprocess.run([sys.executable, str(ROOT / "compiler/main.py"), "--language-profile=legacy",
             str(ROOT / "tests/backend/args.xe"), "--run", "-o", str(output), "--",
             "--help", "", "two words", "--"], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -225,7 +227,7 @@ class EnvExecutionTests(unittest.TestCase):
 
     def test_minimal_print_tool_is_only_one_argument_per_line(self):
         program = self.root / "minimal"
-        build_executable(ROOT / "examples/args/main.xe", program, cc=CC)
+        build_executable(private_example("args/main.xe"), program, cc=CC)
         for arguments in ([], ["hello", "two words", "你好 Xe", "", "--help"]):
             with self.subTest(arguments=arguments):
                 process = subprocess.Popen([str(program), *arguments], stdin=subprocess.PIPE,
@@ -248,7 +250,7 @@ class EnvExecutionTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "原始字节参数验收依赖 POSIX")
     def test_minimal_tool_reports_unreadable_arguments(self):
         program = self.root / "minimal_error"
-        build_executable(ROOT / "examples/args/main.xe", program, cc=CC)
+        build_executable(private_example("args/main.xe"), program, cc=CC)
         result = subprocess.run([os.fsencode(program), b"\xff"], capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, b"")
@@ -265,7 +267,7 @@ class EnvExecutionTests(unittest.TestCase):
 
 @unittest.skipUnless(CC and sys.platform.startswith("linux"),
                      "native 参数边界与 ASan no-pie 验收需要 Linux C 编译器")
-class NativeEnvRuntimeTests(unittest.TestCase):
+class NativeEnvRuntimeTests(LegacyTestCase):
     def test_empty_args_allocation_failure_and_cached_storage_cleanup(self):
         # 操作系统入口通常不会产生 argc=0，真实 argv 也不能可靠制造 ENOMEM。
         # 因此单独调用 native 层，并仅替换 env 的 malloc；不模拟 Xe 分流代码。

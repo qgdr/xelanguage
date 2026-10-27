@@ -9,6 +9,9 @@ STANDARD = {"String", "File", "io::Error", "ConversionError", "AllocError", "Arr
             "Shared", "Weak", "Mutex", "MutexGuard", "Thread", "Expired", "SyncError", "ThreadError",
             "Slice", "SliceMut", "Map", "Set", "Box", "Range", "Iterator", "Formatter", "FromFn", "Step",
             "Bytes", "Chars"}
+# Not a source identifier, and not a '$T' generic variable. Internal capabilities
+# must never steal an ordinary user struct/alias name in the legacy profile.
+VIEW_NAME = "<coordinate-view>"
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,11 @@ class Type:
     unsafe: bool = field(default=False, compare=False)
 
     def __str__(self) -> str:
+        if self.name == VIEW_NAME:
+            # The view capability's source spellings are now reviewed. Its tag
+            # remains separate from a legacy user's nominal type named View.
+            # P includes its own complete pointer level and write permission.
+            return "View[" + str(self.args[0]) + "]"
         if self.name == "ptr":
             base = str(self.args[0])
             if self.args[0].name in {"fn", "closure"}:
@@ -43,15 +51,15 @@ class Type:
         return self.name + ("[" + ", ".join(map(str, self.args)) + "]" if self.args else "")
 
 
-UNIT = Type("Unit")
-NEVER = Type("Never")
+UNIT = Type("Unit")  # 正常完成时的单值 unit，不是所有类型的共同超类型。
+NEVER = Type("Never")  # 没有正常值；不能将此许可递归套到容器/函数签名。
 BOOL = Type("bool")
 STR = Type("str")
 I32 = Type("i32")
 USIZE = Type("usize")
 INT_LITERAL = Type("$integer")
-UNKNOWN = Type("$unknown")
-NONE = Type("None")
+UNKNOWN = Type("$unknown")  # 只在推导过程中暂存；不是 Top/Any 或可存储类型。
+NONE = Type("None")  # Maybe 的无负载标记，不是公开的独立 NoneType。
 STRING = Type("String")
 FILE = Type("File")
 IO_ERROR = Type("io::Error")
@@ -90,7 +98,7 @@ def mark_unsafe(type_: Type) -> Type:
     # str / Slice 的地址藏在描述符里；用户结构的地址藏在字段里。
     # 它们的风险在分析 JSON 中显示，不能伪造成一个新名义类型。
     return replace(type_, unsafe=True,
-                   args=tuple(mark_unsafe(a) if a.name in {"ptr", "str", "Slice", "SliceMut", "maybe", "tuple", "Array"}
+                   args=tuple(mark_unsafe(a) if a.name in {"ptr", "str", "Slice", "SliceMut", VIEW_NAME, "maybe", "tuple", "Array"}
                               else a for a in type_.args))
 
 

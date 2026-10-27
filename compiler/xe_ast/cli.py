@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .ast import document
 from .build import BuildError
+from .language_policy import current_profile, language_profile
 from .parser import parse_source
 from .source import Diagnostic, Source
 
@@ -23,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("source", type=Path, help="UTF-8 .xe 入口文件；检查/构建递归加载模块")
     parser.add_argument("-o", "--output", help="AST/C/程序输出路径；- 仅用于文本标准输出")
     parser.add_argument("--diagnostic-format", choices=("text", "json"), default="text")
+    parser.add_argument("--language-profile", choices=("core", "legacy"), default=None,
+                        help="默认 core：仅接受已确认且接入的规则；legacy 仅回归旧玩具语言")
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--check", action="store_true", help="语义检查，不写 AST 文件")
     actions.add_argument("--emit-c", action="store_true", help="语义检查并输出可读 C")
@@ -53,9 +56,15 @@ def main(argv: list[str] | None = None) -> int:
     args.check_borrows = True
     if args.check and args.output is not None:
         parser.error("--check 不写 AST，请移除 -o；诊断 JSON 使用 --diagnostic-format json")
-    backend = args.emit_c or args.build or args.run
     if (args.build or args.run) and args.output == "-":
         parser.error("可执行文件输出不能是 -")
+    with language_profile(args.language_profile or current_profile()):
+        return execute(args, program_arguments)
+
+
+def execute(args, program_arguments):
+    """Run one action inside the caller's explicitly selected language policy."""
+    backend = args.emit_c or args.build or args.run
     output = Path(args.output) if args.output and args.output != "-" else None
     if args.output is None:
         output = (Path("target/c") / (args.source.name + ".c") if args.emit_c else

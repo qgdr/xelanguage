@@ -25,6 +25,7 @@ from .project import find_manifest, project_at, select_source
 from .xe_ast.ast import SYNTAX_VERSION
 from .xe_ast.build import BuildError, atomic_text, protect_source
 from .xe_ast.cli import main as legacy_main
+from .xe_ast.language_policy import current_profile, language_profile
 from .xe_ast.lexer import Lexer
 from .xe_ast.modules import load_program
 from .xe_ast.semantic import Checker
@@ -41,10 +42,14 @@ def positive_seconds(value):
 def make_parser():
     parser = argparse.ArgumentParser(prog="xe", description="Xe stage0 工具链（Python + C 后端）")
     parser.add_argument("--version", action="version", version=f"xe {VERSION} ({SYNTAX_VERSION}, stage0)")
+    parser.add_argument("--language-profile", choices=("core", "legacy"), default=None,
+                        help="默认 core；legacy 显式运行旧玩具语言，不代表新规则已确认")
     commands = parser.add_subparsers(dest="command", required=True)
 
     def common(name, help, *, source=True, many=False, binary=True):
         command = commands.add_parser(name, help=help)
+        command.add_argument("--language-profile", choices=("core", "legacy"), default=argparse.SUPPRESS,
+                             help="语言准入策略（也可放在子命令前）")
         if source:
             command.add_argument("source", type=Path, nargs="*" if many else "?", help=".xe 文件或项目目录")
         command.add_argument("--manifest-path", type=Path, help="xe.toml 或项目目录")
@@ -343,6 +348,38 @@ def test_action(args):
     return 2 if any(item.get("tool_error") for item in results) else 0 if all(item["passed"] for item in results) else 1
 
 
+def dispatch(args, program_arguments):
+    """Dispatch only after selecting a policy; nested APIs inherit that choice."""
+    if args.command in {"ast", "check", "emit-c", "build", "run"}:
+        return compiler_action(args, program_arguments)
+    if args.command == "fmt":
+        return format_action(args)
+    if args.command == "lint":
+        return lint_action(args)
+    if args.command == "doc":
+        return doc_action(args)
+    if args.command == "test":
+        return test_action(args)
+    if args.command == "clean":
+        if args.source is not None and not args.source.exists():
+            raise BuildError("clean 的显式项目路径必须存在；不会猜测其父目录")
+        project = project_at(args.source, args.manifest_path)
+        if args.source is not None and args.manifest_path is not None and project_at(args.source).root != project.root:
+            raise BuildError("clean 的项目路径与 --manifest-path 不属于同一个包")
+        result = ArtifactStore(project.root).clean(args.dry_run)
+        progress({**result, "message": f"{'计划清理' if args.dry_run else '已清理'} {len(result['removed'])} 个产物；"
+                  f"保留 {len(result['preserved'])} 个未知/已修改/外部文件"}, args)
+        return 0
+    project = project_at(manifest=args.manifest_path)
+    identity = cc_identity(args.cc)
+    progress({"schema_version": 1, "python": sys.executable, "python_version": sys.version.split()[0],
+              "syntax": SYNTAX_VERSION, "project": str(project.root),
+              "manifest": str(project.manifest) if project.manifest else None,
+              "cc": identity, "uv": shutil.which("uv"),
+              "message": f"工具链可用：Python {sys.version.split()[0]}；{identity['version'].splitlines()[0]}"}, args)
+    return 0
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     program_arguments = []
@@ -355,34 +392,8 @@ def main(argv=None):
     if separated and args.command != "run":
         parser.error("-- 后的参数只用于 xe run")
     try:
-        if args.command in {"ast", "check", "emit-c", "build", "run"}:
-            return compiler_action(args, program_arguments)
-        if args.command == "fmt":
-            return format_action(args)
-        if args.command == "lint":
-            return lint_action(args)
-        if args.command == "doc":
-            return doc_action(args)
-        if args.command == "test":
-            return test_action(args)
-        if args.command == "clean":
-            if args.source is not None and not args.source.exists():
-                raise BuildError("clean 的显式项目路径必须存在；不会猜测其父目录")
-            project = project_at(args.source, args.manifest_path)
-            if args.source is not None and args.manifest_path is not None and project_at(args.source).root != project.root:
-                raise BuildError("clean 的项目路径与 --manifest-path 不属于同一个包")
-            result = ArtifactStore(project.root).clean(args.dry_run)
-            progress({**result, "message": f"{'计划清理' if args.dry_run else '已清理'} {len(result['removed'])} 个产物；"
-                      f"保留 {len(result['preserved'])} 个未知/已修改/外部文件"}, args)
-            return 0
-        project = project_at(manifest=args.manifest_path)
-        identity = cc_identity(args.cc)
-        progress({"schema_version": 1, "python": sys.executable, "python_version": sys.version.split()[0],
-                  "syntax": SYNTAX_VERSION, "project": str(project.root),
-                  "manifest": str(project.manifest) if project.manifest else None,
-                  "cc": identity, "uv": shutil.which("uv"),
-                  "message": f"工具链可用：Python {sys.version.split()[0]}；{identity['version'].splitlines()[0]}"}, args)
-        return 0
+        with language_profile(args.language_profile or current_profile()):
+            return dispatch(args, program_arguments)
     except Diagnostic as error:
         report_diagnostics([error], args.message_format)
         return 1

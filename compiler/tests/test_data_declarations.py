@@ -1,7 +1,7 @@
 """数据声明的专门回归：既检查 AST 形状，也检查对应语义/能力边界。"""
-import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import check_source, parse_source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +12,7 @@ def fixture(relative):
     return path.read_text(encoding="utf-8"), str(path)
 
 
-class DataDeclarationTests(unittest.TestCase):
+class DataDeclarationTests(LegacyTestCase):
     def test_struct_creation_fields_preserve_copy_and_move(self):
         text, path = fixture("language/struct_create.xe")
         tree = parse_source(text, path)

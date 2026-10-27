@@ -11,6 +11,9 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
+
 if os.name == "posix":
     import pty
     import termios
@@ -21,7 +24,7 @@ from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "examples/feature_check/main.xe"
+SOURCE = ROOT / "internal/examples/feature_check/main.xe"
 CC = shutil.which("cc") or ""
 FEATURES = (
     "numeric", "comparison-chain", "short-circuit", "evaluation-order",
@@ -106,8 +109,9 @@ class TerminalSession:
         os.close(self.master)
 
 
-class FeatureCheckSemanticTests(unittest.TestCase):
+class FeatureCheckSemanticTests(LegacyTestCase):
     def test_project_is_valid_and_uses_live_pointers(self):
+        private_example("feature_check/main.xe")
         text = SOURCE.read_text(encoding="utf-8")
         checker = Checker(Source(text, str(SOURCE)), parse_source(text, str(SOURCE)))
         errors = checker.check()
@@ -116,9 +120,10 @@ class FeatureCheckSemanticTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CC, "运行项目需要系统 C 编译器")
-class FeatureCheckExecutionTests(unittest.TestCase):
+class FeatureCheckExecutionTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
+        private_example("feature_check/main.xe")
         cls.directory = tempfile.TemporaryDirectory(prefix="xe-feature-check-")
         cls.addClassCleanup(cls.directory.cleanup)
         cls.program = Path(cls.directory.name) / "feature_check"

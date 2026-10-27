@@ -1,0 +1,19 @@
+// 非Copy元素由整个Array拥有；本例只转交整个数组，不移出单个元素。
+type Pair = Array[String, 2];
+
+fn[T] relay(value: T) -> T { value }
+
+fn consume(values: Pair) -> Unit {
+    println("pair");
+    // 正常退出时，清理values仍拥有的两个String。
+}
+
+fn main() -> Unit {
+    let[mut] values: Pair;
+    values << relay[Pair]([String::from("left"), String::from("right")]);
+    consume(values);
+    // 第一次消费后values没有有效量；可变绑定允许重新初始化。
+    [String::from("new left"), String::from("new right")] >> values;
+    consume(values);
+    println("done");
+}

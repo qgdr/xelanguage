@@ -7,15 +7,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "examples/calculator/main.xe"
+SOURCE = ROOT / "internal/examples/calculator/main.xe"
 CC = shutil.which("cc") or ""
 
 
-class CalculatorProjectTests(unittest.TestCase):
+class CalculatorProjectTests(LegacyTestCase):
+    @classmethod
+    def setUpClass(cls):
+        private_example("calculator/main.xe")
+        private_example("calculator/input.calc")
+
     def test_project_is_valid_under_the_normal_checks(self):
         errors = check_source(SOURCE.read_text(), str(SOURCE))
         self.assertEqual(errors, [], "\n".join(error.render() for error in errors))
@@ -40,7 +47,7 @@ class CalculatorProjectTests(unittest.TestCase):
             "1 2 -> error at byte 2: unexpected token after expression",
             "1000000000000 * 2 -> error at byte 14: arithmetic result exceeds calculator limit",
             " -> error at byte 0: expected number, name or parenthesis",
-            "Expressions loaded from examples/calculator/input.calc:",
+            "Expressions loaded from internal/examples/calculator/input.calc:",
             "answer * (7 - 2) = 210", "year - 2000 = 26", "(9 + 3) / 4 = 3",
             "8 / 0 -> error at byte 2: division by zero",
         ]

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
@@ -18,7 +19,7 @@ from compiler.xe_ast.source import Diagnostic, Source
 CC = shutil.which("cc") or ""
 
 
-class ReleaseCapabilityTests(unittest.TestCase):
+class ReleaseCapabilityTests(LegacyTestCase):
     def run_source(self, text):
         if not CC:
             self.skipTest("需要系统 C 编译器")

@@ -1,12 +1,13 @@
 """Step[T] 迭代协议的类型、所有权和旧写法诊断。"""
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
 
-class StepSemanticTests(unittest.TestCase):
+class StepSemanticTests(LegacyTestCase):
     def check_source(self, text, expected_code=None, message_part=None):
         checker = Checker(Source(text, "step.xe"), parse_source(text, "step.xe"))
         errors = checker.check()

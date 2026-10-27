@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.source import Source
 
@@ -16,7 +17,7 @@ CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "运行位置验收需要 C 编译器")
-class RuntimeLocationTests(unittest.TestCase):
+class RuntimeLocationTests(LegacyTestCase):
     def assert_location(self, text, expression, message, *, files=None, filename="main.xe"):
         with tempfile.TemporaryDirectory(prefix="xe-runtime-location-") as temporary:
             root = Path(temporary)

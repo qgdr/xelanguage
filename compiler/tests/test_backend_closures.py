@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
@@ -29,7 +30,7 @@ fn tracked(counter:i32@[mut],weight:i32)->Tracked{
 
 
 @unittest.skipUnless(CC, "捕获闭包运行验收需要系统 C 编译器")
-class CapturedClosureExecutionTests(unittest.TestCase):
+class CapturedClosureExecutionTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="xe-closure-backend-")

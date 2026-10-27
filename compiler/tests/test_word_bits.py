@@ -6,13 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, check_source, parse_source
 from compiler.xe_ast.build import build_executable
 
 CC = shutil.which("cc") or ""
 
 
-class WordBitTests(unittest.TestCase):
+class WordBitTests(LegacyTestCase):
     def test_ast_precedence_is_arithmetic_then_bits_then_comparison(self):
         node = parse_source("fn main() { 1 bitor 2 bitand 3 + 4 == 7; }")["items"][0]["body"]["statements"][0]["expression"]
         self.assertEqual(node["kind"], "ComparisonChain")

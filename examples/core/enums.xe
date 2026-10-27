@@ -1,0 +1,25 @@
+// 每个变体只有零个或一个整体负载；enum本身不自动Copy。
+enum Message {
+    Text[String],
+    Number[i32],
+    End,
+}
+
+fn describe(message: Message) -> i32 {
+    message ? {
+        Message::Text :> text: String -> {
+            println("text: {}", text@);
+            1
+        },
+        Message::Number :> number: i32 -> number,
+        Message::End :> () -> 0,
+    }
+}
+
+fn main() -> Unit {
+    let message: Message << Message::Text[String::from("hello")];
+    let result: i32 = describe(message);
+    println("{}", result);
+    println("{} {}", describe(Message::Number[42]), describe(Message::End));
+    // message已转交；text在处理体退出时自动清理，不必自定义enum Drop。
+}

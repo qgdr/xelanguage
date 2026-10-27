@@ -5,6 +5,7 @@ CLI/候选包使用 SemVer 的预发布拼写，Python 元数据使用 PEP 440 �
 语法标识描述已经批准的契约；AST JSON 的结构另由 schema_version 管理。
 """
 
-VERSION = "1.0.0-rc.1"
-PACKAGE_VERSION = "1.0.0rc1"
-SYNTAX_VERSION = "xe-1.0"
+RELEASE_NAME = "Xe Core Preview 1"
+VERSION = "0.1.0-alpha.1"
+PACKAGE_VERSION = "0.1.0a1"
+SYNTAX_VERSION = "xe-core-0.1"

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")
-class FunctionValueExecutionTests(unittest.TestCase):
+class FunctionValueExecutionTests(LegacyTestCase):
     def run_source(self, text, *, sanitize=False):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:
@@ -195,7 +196,7 @@ class FunctionValueExecutionTests(unittest.TestCase):
         self.assertEqual(self.run_source(text, sanitize=True), "done\n")
 
 
-class FunctionValueDiagnosticTests(unittest.TestCase):
+class FunctionValueDiagnosticTests(LegacyTestCase):
     def assert_escape_warning_and_lowering(self, text):
         checker = Checker(Source(text), parse_source(text))
         self.assertEqual(checker.check(), [])

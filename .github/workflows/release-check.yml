@@ -1,6 +1,6 @@
-# 只验证 RC 候选：不创建 tag，不上传产物，不调用任何发布 API。
+# 只验证 Core Preview 候选：不创建 tag，不上传产物，不调用任何发布 API。
 # Ubuntu 24.04 的 GitHub-hosted runner 是当前支持的 Linux x86_64 环境。
-name: Release candidate checks
+name: Core Preview candidate checks
 
 "on":
   push:
@@ -59,7 +59,7 @@ jobs:
       - name: Install locked development dependencies
         run: uv sync --locked --dev --python python
 
-      # 与本地共用同一门禁。该目标包括 python-check、全量 compiler-test、
-      # 三代自举固定点、打包和包外冒烟；不绕开 ASan/UBSan/default LSan。
+      # 与本地共用Core门禁：静态Python检查、Core测试、发布协议、
+      # 白名单打包和包外Core运行；不绕开ASan/UBSan/default LSan。
       - name: Validate candidate without publishing
         run: make release-check CC=gcc RELEASE_FLAGS=--require-clean

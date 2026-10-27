@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @unittest.skipUnless(shutil.which('cc'), '需要 C 编译器')
-class BoxExecutionTests(unittest.TestCase):
+class BoxExecutionTests(LegacyTestCase):
     def run_xe(self, text, expected, fail_allocation=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -123,7 +124,7 @@ class BoxExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source, program = Path(directory)/'main.xe',Path(directory)/'program'
             source.write_text('''fn unused()->i32@{let n=1;n@} fn main(){println("ran");}''')
-            result = subprocess.run([sys.executable,str(ROOT/'compiler/main.py'),
+            result = subprocess.run([sys.executable,str(ROOT/'compiler/main.py'),'--language-profile=legacy',
                 str(source),'--run','-o',str(program)],cwd=ROOT,
                 capture_output=True,text=True,timeout=30)
             self.assertEqual(result.returncode,0,result.stderr)
@@ -131,7 +132,7 @@ class BoxExecutionTests(unittest.TestCase):
             self.assertIn('warning XE-PTR-',result.stderr)
 
 
-class BoxSemanticTests(unittest.TestCase):
+class BoxSemanticTests(LegacyTestCase):
     def check(self, text):
         checker=Checker(Source(text),parse_source(text))
         self.assertEqual(checker.check(),[])

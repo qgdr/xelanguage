@@ -5,9 +5,9 @@ import json
 import shutil
 import subprocess
 import tempfile
-import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import BuildError, build_executable, emit_c
 from compiler.xe_ast.cli import main
 from compiler.xe_ast.modules import load_program
@@ -15,7 +15,7 @@ from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Diagnostic
 
 
-class ModuleTests(unittest.TestCase):
+class ModuleTests(LegacyTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -180,10 +180,10 @@ class ModuleTests(unittest.TestCase):
             'src/model.xe':'pub fn value(){}'})
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            status = main([str(self.entry),'--check'])
+            status = main(['--language-profile=legacy',str(self.entry),'--check'])
         self.assertEqual(status,0,errors.getvalue())
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            status = main([str(self.entry),'-o',str(self.root/'ast.json')])
+            status = main(['--language-profile=legacy',str(self.entry),'-o',str(self.root/'ast.json')])
         self.assertEqual(status,0,errors.getvalue())
         tree = json.loads((self.root/'ast.json').read_text())
         self.assertNotIn('!module!',json.dumps(tree))
@@ -270,6 +270,6 @@ class ModuleTests(unittest.TestCase):
             'src/model.xe': 'pub struct Item{} pub fn make()->Item {Item{}}'})
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(main([str(self.entry),'--check','--diagnostic-format','json']),0)
+            self.assertEqual(main(['--language-profile=legacy',str(self.entry),'--check','--diagnostic-format','json']),0)
         self.assertNotIn('!module!',output.getvalue())
         self.assertIn('crate::model::Item',output.getvalue())

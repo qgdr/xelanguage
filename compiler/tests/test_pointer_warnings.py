@@ -12,6 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.cli import main
@@ -23,7 +24,7 @@ from compiler.xe_ast.typesys import Type, ptr
 CC = shutil.which("cc") or ""
 
 
-class PointerWarningsTests(unittest.TestCase):
+class PointerWarningsTests(LegacyTestCase):
     def check(self, text):
         checker = Checker(Source(text), parse_source(text))
         errors = checker.check()
@@ -156,7 +157,7 @@ class PointerWarningsTests(unittest.TestCase):
             source.write_text("fn bad() -> i32@ { let x = 1; x@ } fn main() { let p = bad(); }", encoding="utf-8")
             out, err = StringIO(), StringIO()
             with redirect_stdout(out), redirect_stderr(err):
-                status = main([str(source), "--check", "--diagnostic-format", "json"])
+                status = main(["--language-profile=legacy", str(source), "--check", "--diagnostic-format", "json"])
             self.assertEqual(status, 0)
             report = json.loads(err.getvalue())
             self.assertEqual(report["diagnostics"][0]["severity"], "warning")

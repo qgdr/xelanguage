@@ -9,13 +9,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.build import build_executable
 
 CC = shutil.which("cc") or ""
 
 
-class PointerRevisionSyntaxTests(unittest.TestCase):
+class PointerRevisionSyntaxTests(LegacyTestCase):
     def test_declaration_generics_follow_keyword(self):
         tree = parse_source("""
         struct[T] Holder { value: T, }

@@ -9,6 +9,7 @@ import ast as python_ast
 import math
 from typing import Any, NoReturn
 
+from .language_policy import current_profile
 from .lexer import Lexer, Token
 from .source import Diagnostic, Source
 
@@ -142,6 +143,61 @@ class Parser:
         return result
 
     def type(self) -> Node:
+        """Parse a type without assigning storage or conversion semantics.
+
+        Union operators are contextual: ordinary declarations can still use
+        names such as `set` and `union`.  The historical profile deliberately
+        retains its old grammar instead of acquiring new syntax implicitly.
+        """
+        start = self.current.start
+        node = self.postfix_type()
+        while self.current.kind == "|" or (
+                self.current.kind == "IDENT" and self.current.text == "union"):
+            if current_profile() == "legacy":
+                self.error("类型并集语法只在 core 配置中提供",
+                           "使用 --language-profile=core；legacy 保留旧类型语法")
+            operator = self.take().text
+            node = self.node("UnionType", start, operator=operator,
+                             left=node, right=self.postfix_type())
+        return node
+
+    def finite_type(self) -> Node:
+        start = self.take().start  # Contextual `set`, followed by `{`.
+        if current_profile() == "legacy":
+            self.error("有限集合类型语法只在 core 配置中提供",
+                       "使用 --language-profile=core；legacy 保留旧类型语法")
+        self.expect("{")
+
+        def member() -> Node:
+            begin = self.current.start
+            if self.accept("-"):
+                # Keep the sign separate, just like an expression Unary node.
+                # Mathematical range checks belong to static elaboration,
+                # which must consider both nodes (not overflow the positive
+                # literal first when parsing the minimum signed integer).
+                if self.current.kind != "INTEGER":
+                    self.error("set 中负号后需要整数字面量")
+                value = self.node("Unary", begin, operator="-", operand=self.literal())
+            else:
+                if self.current.kind not in LITERALS:
+                    self.error("set 成员需要常量字面量", "这里不接受变量、调用或其他表达式")
+                value = self.literal()
+            annotation = self.type() if self.accept(":") else None
+            return self.node("SetMember", begin, value=value, type=annotation)
+
+        members = self.separated("}", member)
+        self.expect("}")
+        return self.node("SetType", start, members=members)
+
+    def postfix_type(self) -> Node:
+        """Suffixes bind more tightly than either spelling of type union.
+
+        A function result recursively consumes a complete type, so
+        `fn() -> A | B` returns `A | B`.  Parentheses are required to union
+        the function itself with another type: `(fn() -> A) | B`.
+        Parsing that historical function-type shape does not approve function
+        values in the current core admission policy.
+        """
         start = self.current.start
         if self.accept("fn"):
             self.expect("(")
@@ -165,6 +221,10 @@ class Parser:
             self.error("旧的花括号元组类型已取消", "改为 tuple[T, U]；{} 只用于代码块")
         elif self.accept("None"):
             node = self.node("NoneTypeMarker", start)
+        elif (current_profile() != "legacy"
+              and self.current.kind == "IDENT" and self.current.text == "set"
+              and self.peek().kind == "{"):
+            node = self.finite_type()
         else:
             path = self.path()
             arguments = []
@@ -175,7 +235,26 @@ class Parser:
                     self.error("类型参数附件不能为空")
                 self.expect("]")
             node = self.node("NamedType", start, path=path, arguments=arguments)
-        while self.current.kind in {"@", "?"}:
+        while self.current.kind in {"@", "?", "["}:
+            if self.current.kind == "[":
+                # This is a reviewed attachment to the *view capability*,
+                # not another type argument list and not a general facility
+                # for attaching arbitrary modifiers to arbitrary types. Type
+                # grouping is transparent, so (View[T])[mut] has this same
+                # shape; @ above or below it still changes a different layer.
+                if (current_profile() != "core" or node["kind"] != "NamedType"
+                        or node["path"]["parts"] != ["View"]):
+                    break
+                self.take()
+                if self.current.kind != "IDENT" or self.current.text != "mut":
+                    self.error("View 的类型附件目前只允许一个 [mut]")
+                modifier = self.take()
+                modifier_node = self.node("Modifier", modifier.start, name=modifier.text)
+                self.expect("]")
+                node = self.node("ViewTypeModifier", start, target=node, modifiers=[modifier_node])
+                if self.current.kind == "[":
+                    self.error("View 的 [mut] 类型附件不能重复或继续附加其他附件")
+                continue
             operation = self.take().kind
             if operation == "@":
                 node = self.node("PointerType", start, target=node, modifiers=self.modifiers())
@@ -208,6 +287,43 @@ class Parser:
             self.error("声明附件 [mut] 后需要 ]，不能重复或添加其他修饰", "例如 let[mut] count: i32 = 0;")
         self.take()
         return True
+
+    def starts_loop_label(self) -> bool:
+        # A while condition can already start with an array, e.g. [ready][0].
+        # Only the explicit contextual `label =` prefix claims an attachment.
+        return (self.current.kind == "[" and self.peek().kind == "IDENT"
+                and self.peek().text == "label" and self.peek(2).kind == "=")
+
+    def loop_label(self) -> str | None:
+        if not self.starts_loop_label():
+            return None
+        self.expect("[")
+        self.take()  # Contextual label, not a global keyword.
+        self.expect("=")
+        if self.current.kind != "IDENT":
+            self.error("循环标签需要一个普通名称", "例如 while[label = outer] ready { ... }")
+        label = self.take().text
+        if self.current.kind != "]":
+            self.error("循环标签附件只允许一个名称，名称后需要 ]",
+                       "例如 [label = outer]；不接受逗号、多个标签或表达式")
+        self.take()
+        if self.starts_loop_label():
+            self.error("循环标签附件不能重复", "每个循环只写一个 [label = name]")
+        return label
+
+    def loop_target(self) -> str | None:
+        if not self.accept("["):
+            return None
+        if self.current.kind != "IDENT":
+            self.error("循环跳转目标需要一个普通名称", "例如 break[outer]; 或 continue[outer];")
+        target = self.take().text
+        if self.current.kind != "]":
+            self.error("循环跳转附件只允许一个目标名称，名称后需要 ]",
+                       "例如 break[outer];；不接受逗号、多个目标或表达式")
+        self.take()
+        if self.current.kind == "[":
+            self.error("循环跳转目标附件不能重复", "每次 break 或 continue 只指定一个目标")
+        return target
 
     def parameter(self, optional_type: bool = False, ignore: bool = False) -> Node:
         start = self.current.start
@@ -325,6 +441,9 @@ class Parser:
                            f"改为 {kind}[T] {name} {{ ... }}；使用时仍写 {name}[T]")
             members = []
             if kind == "struct" and self.accept(";"):
+                if current_profile() == "core":
+                    self.error("本核心未确认分号形式的结构体声明",
+                               "完整声明写 struct Name { ... }；空字段也写 {}，前向依赖由编译器解析")
                 return self.node("Struct", start, public=public, name=name,
                                  generics=generics, fields=members)
             self.expect("{")
@@ -354,7 +473,11 @@ class Parser:
                         if not payload:
                             self.error("无负载变体不要写空 []")
                         self.expect("]")
-                    self.expect(",")
+                    # The reviewed minimal enum permits an optional final
+                    # comma. Keep legacy's declaration grammar unchanged.
+                    if not (kind == "enum" and current_profile() != "legacy"
+                            and self.current.kind == "}"):
+                        self.expect(",")
                     members.append(self.node("VariantDeclaration", begin,
                                              name=variant_name, payload=payload))
             self.expect("}")
@@ -455,10 +578,14 @@ class Parser:
             if self.current.kind in {"return", "break", "continue"}:
                 kind = self.take().kind
                 value = None
+                target = self.loop_target() if kind in {"break", "continue"} else None
                 if kind == "return" and self.current.kind != ";":
                     value = self.expression()
                 self.expect(";")
-                statements.append(self.node(kind.capitalize(), begin, value=value))
+                statement = self.node(kind.capitalize(), begin, value=value)
+                if target is not None:
+                    statement["target"] = target
+                statements.append(statement)
                 continue
             value = self.expression()
             if self.current.kind == ",":
@@ -496,6 +623,10 @@ class Parser:
             return True
         if kind in {"FieldAccess", "BracketApply"}:
             return Parser.is_place(node["object"])
+        if kind == "Index":
+            # The checker distinguishes Array boxes from View pointer values.
+            # Do not guess that distinction from an identifier's spelling.
+            return True
         if kind == "Dereference":
             return True
         if kind == "Group":
@@ -612,15 +743,22 @@ class Parser:
             return self.node("If", start, condition=condition, then=then, otherwise=otherwise)
         if self.current.kind in {"while", "for"}:
             kind = self.take().kind
+            label = self.loop_label()
             if kind == "while":
                 condition = self.expression(allow_struct=False)
-                return self.node("While", start, condition=condition, body=self.block())
+                node = self.node("While", start, condition=condition, body=self.block())
+                if label is not None:
+                    node["label"] = label
+                return node
             variable = self.expect("IDENT").text
             annotation = self.type() if self.accept(":") else None
             self.expect("in")
             source = self.expression(allow_struct=False)
-            return self.node("For", start, name=variable, type=annotation,
+            node = self.node("For", start, name=variable, type=annotation,
                              source=source, body=self.block())
+            if label is not None:
+                node["label"] = label
+            return node
         if self.accept("unsafe"):
             return self.node("Unsafe", start, body=self.block())
         if token.kind == "_":
@@ -650,14 +788,51 @@ class Parser:
                 if kind == "?":
                     self.error("连续匹配需要括号明确边界")
                 break
-            if 110 >= minimum and kind in {"(", "[", ".", "::", "@", "#"}:
+            if 110 >= minimum and kind in {"(", "[", "⟦", "⟨", ".", "::", "@", "#"}:
                 if self.accept("("):
                     arguments = self.separated(")", self.expression)
                     self.expect(")")
                     left = self.node("Call", begin, callee=left, arguments=arguments)
                 elif self.current.kind == "[":
-                    arguments = self.bracket_arguments()
-                    left = self.node("BracketApply", begin, object=left, arguments=arguments)
+                    if left["kind"] == "Restriction":
+                        left = self.range_address_attachment(left)
+                    elif current_profile() != "legacy" and left["kind"] in {"Call", "Index", "ViewConstruct"}:
+                        self.error("该表达式不接受范围地址附件或旧 [mut] 定位附件",
+                                   "Array 单点取址写 a⟦i⟧@ / a⟦i⟧@[mut]；范围写 a⟨l..u⟩[@]")
+                    else:
+                        arguments = self.bracket_arguments()
+                        left = self.node("BracketApply", begin, object=left, arguments=arguments)
+                elif self.accept("⟦"):
+                    index = self.expression()
+                    scalar = index
+                    while scalar["kind"] == "Group":
+                        scalar = scalar["expression"]
+                    if scalar["kind"] in {"Range", "Array"}:
+                        self.error("⟦⟧ 只接受一个坐标，不接受范围或索引列表",
+                                   "范围使用 a⟨l..u⟩[@]，单点使用 a⟦i⟧")
+                    self.expect("⟧")
+                    left = self.node("Index", begin, target=left, index=index)
+                elif self.accept("⟨"):
+                    if (self.current.kind == "[" and self.peek().text == "mut"):
+                        self.error("范围地址附件必须写在范围之后",
+                                   "写 a⟨i..j⟩[@[mut]]，不在范围内部写 [mut]")
+                    index = self.expression()
+                    range_ = index
+                    while range_["kind"] == "Group":
+                        range_ = range_["expression"]
+                    if range_["kind"] != "Range":
+                        if range_["kind"] == "Array":
+                            self.error("切片不支持离散索引列表",
+                                       "⟨⟩ 只用于 a⟨i..j⟩ 或 a⟨..⟩，不接受 [1,2,1]")
+                        self.error("⟨⟩ 只用于范围限制；单点使用 a⟦i⟧",
+                                   "Array 索引找到元素盒子；View 索引产生其 P 指针量")
+                    if (range_["lower"] is None) != (range_["upper"] is None):
+                        self.error("访问中只省略一个范围端点的规则尚未确认",
+                                   "范围写 a⟨i..j⟩、a⟨i..=j⟩ 或 a⟨..⟩")
+                    if range_["operator"] == "..=" and range_["lower"] is None:
+                        self.error("闭区间范围必须明确两个端点", "整体范围写 a⟨..⟩，不用 a⟨..=⟩")
+                    self.expect("⟩")
+                    left = self.node("Restriction", begin, target=left, range=index)
                 elif self.accept("::"):
                     # 前面的 [] 修饰类型名称，后面的名称属于该具体类型。
                     # 例如 Holder[i32]::new 或 Token[i32]::Value。
@@ -777,10 +952,51 @@ class Parser:
         self.expect("]")
         return arguments
 
+    def range_address_attachment(self, restriction: Node) -> Node:
+        """Array range address construction, separate from View restriction."""
+        self.expect("[")
+        if self.current.kind != "@":
+            self.error("Array 范围地址构造只接受 [@] 或 [@[mut]]；旧范围 [mut] 已取消")
+        self.take()
+        modifiers = self.modifiers()
+        if [modifier["name"] for modifier in modifiers] not in ([], ["mut"]):
+            self.error("范围地址请求只允许 @ 或 @[mut]，不接受其他修饰")
+        self.expect("]")
+        return self.node("ViewConstruct", self.start(restriction), target=restriction, modifiers=modifiers)
+
+    def index_attachment(self, target: Node) -> Node:
+        """Record an index write request without extending the Call schema.
+
+        Syntax alone cannot tell an array locator from an ordinary function.
+        The checker must require an indexing Call before granting permission;
+        this is not a general modifier on function return values.
+        """
+        self.expect("[")
+        if self.current.kind != "IDENT" or self.current.text != "mut":
+            self.error("单点定位附件仅允许 [mut]，不接受空附件、表达式或其他修饰")
+        modifier = self.take()
+        node = self.node("Modifier", modifier.start, name="mut")
+        if self.current.kind != "]":
+            self.error("单点定位附件只允许一个 mut，后面需要 ]")
+        self.expect("]")
+        return self.node("AccessModifier", self.start(target), target=target, modifiers=[node])
+
     def handler(self) -> Node:
         """在明确的 handler 位置做有界语法前瞻，不通过函数的类型猜调用含义。"""
         start = self.current.start
+        if (current_profile() != "legacy" and self.current.kind == "("
+                and self.peek().kind == ")" and self.peek(2).kind == "->"):
+            # DEC-022: this is an explicit empty input head, not an empty
+            # expression, Unit value or function/closure boundary. Ordinary
+            # `()` still reaches primary() and is rejected as before.
+            self.take()
+            self.take()
+            self.take()
+            return self.node("HandlerBinding", start, parameters=[], body=self.expression())
         if self.current.kind == "[":
+            if current_profile() != "legacy":
+                self.error("管道处理器只接收零个或一个整体输入，不使用参数列表附件",
+                           "单输入写 value[:Type] -> body；零输入写 () -> body")
             self.take()
             parameters = self.separated(
                 "]", lambda: self.parameter(optional_type=True, ignore=True))
@@ -834,7 +1050,12 @@ class Parser:
 
     def simple_selector(self, nested: bool = False) -> Node:
         start = self.current.start
+        if current_profile() != "legacy" and self.accept("else"):
+            return self.node("ElseSelector", start)
         if self.accept("_"):
+            if current_profile() != "legacy":
+                self.error("_ 只忽略处理器输入，不能充当分支选择器",
+                           "兜底选择器写 else :> handler；忽略一个输入写 _ -> body")
             return self.node("WildcardSelector", start)
         if self.current.kind in {"-", "+"} and self.peek().kind in {"INTEGER", "FLOAT"}:
             sign = self.take().kind
@@ -865,6 +1086,9 @@ class Parser:
         path = self.path()
         filters = None
         if self.accept("["):
+            if current_profile() != "legacy":
+                self.error("变体选择器后不附带 [] 负载筛选",
+                           "写 Token::Integer :> number: i64 -> body；需要继续选择时在处理体内再分流")
             filters = self.separated("]", lambda: self.selector(nested=True))
             if not filters:
                 self.error("无负载选择器不要写空 []")
@@ -886,12 +1110,27 @@ class Parser:
             while self.current.kind != "}":
                 begin = self.current.start
                 selector = self.selector()
-                if self.current.kind != ":>":
+                whole = False
+                if current_profile() != "legacy" and self.accept("=>"):
+                    whole = True
+                elif self.accept(":>"):
+                    if (current_profile() != "legacy" and self.current.kind == "["
+                            and self.peek().kind == "IDENT" and self.peek().text == "whole"):
+                        self.take()
+                        self.take()
+                        self.expect("]")
+                        whole = True
+                else:
                     self.error("模式后需要分支管道 :>", "负载名称写在 :> 后，例如 text: String@ -> text.len()")
-                self.take()
+                if whole and selector["kind"] != "ElseSelector":
+                    self.error("整值分支管道目前只确认用于 else",
+                               "使用 else => handler 或暂时兼容的 else :>[whole] handler")
                 handler = self.handler()
                 self.expect(",")
-                arms.append(self.node("BranchArm", begin, selector=selector, handler=handler))
+                # New delivery syntax has a new node, instead of altering
+                # BranchArm's schema or silently changing old consumers.
+                arms.append(self.node("WholeBranchArm" if whole else "BranchArm", begin,
+                                      selector=selector, handler=handler))
             if not arms:
                 self.error("匹配至少需要一个分支")
             self.expect("}")
@@ -922,7 +1161,10 @@ def parse_source(text: str, filename: str = "<memory>") -> Node:
     """公开入口：返回 AST；失败抛出 Diagnostic，不返回伪造的部分成功结果。"""
     source = Source(text, filename)
     try:
-        return Parser(source).module()
+        tree = Parser(source).module()
+        from .admission import validate_core_source
+        validate_core_source(source, tree)
+        return tree
     except RecursionError:
         raise Diagnostic(source, 0, min(1, len(text)), "源码嵌套过深，请拆分表达式或类型",
                          "XE-PARSE-0002") from None

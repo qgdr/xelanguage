@@ -237,7 +237,8 @@ static TYPE xe_add_##NAME(TYPE a, TYPE b) { TYPE r; if (__builtin_add_overflow(a
 static TYPE xe_sub_##NAME(TYPE a, TYPE b) { TYPE r; if (__builtin_sub_overflow(a,b,&r)) xe_panic("integer overflow"); return r; } \
 static TYPE xe_mul_##NAME(TYPE a, TYPE b) { TYPE r; if (__builtin_mul_overflow(a,b,&r)) xe_panic("integer overflow"); return r; } \
 static TYPE xe_div_##NAME(TYPE a, TYPE b) { if (!b) xe_panic("division by zero"); if ((MINIMUM) < 0 && a == (MINIMUM) && b == (TYPE)-1) xe_panic("integer overflow"); return a/b; } \
-static TYPE xe_rem_##NAME(TYPE a, TYPE b) { if (!b) xe_panic("division by zero"); if ((MINIMUM) < 0 && a == (MINIMUM) && b == (TYPE)-1) return 0; return a%b; }
+static TYPE xe_rem_##NAME(TYPE a, TYPE b) { if (!b) xe_panic("division by zero"); if ((MINIMUM) < 0 && a == (MINIMUM) && b == (TYPE)-1) return 0; return a%b; } \
+static TYPE xe_core_rem_##NAME(TYPE a, TYPE b) { if (!b) xe_panic("division by zero"); if ((MINIMUM) < 0 && a == (MINIMUM) && b == (TYPE)-1) xe_panic("integer overflow"); return a%b; }
 XE_INTEGER(i8, int8_t, INT8_MIN)
 XE_INTEGER(i16, int16_t, INT16_MIN)
 XE_INTEGER(i32, int32_t, INT32_MIN)

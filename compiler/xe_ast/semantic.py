@@ -1,26 +1,35 @@
 """单文件语义检查：名称、类型、初始化、所有权和普通指针风险提示。
 
 这是 AST 上的参考检查器，不生成代码。每个函数至多报告一个主错误，继续检查其他函数。
-地址来源分析只产生 warning，不把普通指针当作独占借用，也不证明内存安全。
-类型、写权限和资源所有权错误仍然阻止编译。标准库接口有明确白名单。
+未知地址风险保留 warning；默认 core 拒绝静态已知的本地来源逃逸。
+这不把普通指针当作独占借用，也不证明内存安全。类型、写权限和资源
+所有权错误仍然阻止编译。标准库接口有明确白名单。
 """
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from itertools import product
 from typing import Any, NoReturn
 
+from .access import AccessPlan, literal_index, ungroup, view_type
+from .admission import validate_core_source
+from .core_branches import CoreBranchArm, plan_core_branch
 from .formatting import format_argument_issue, format_field_issue, parse_format_template
+from .language_policy import current_profile, language_profile
 from .parser import parse_source
 from .patterns import SelectorCase, covered, literal_key
 from .semantic_globals import GlobalChecker
 from .semantic_sync import SYNC_MARKERS, SYNC_TYPES, SyncChecker
 from .semantic_traits import TraitChecker, TraitImplementation
+from .semantic_types import TypeResolver
 from .source import Diagnostic, Source
 from .static_values import StaticValueError, integer_limits, scalar_static_value
 from .stdlib_env import env_function
-from .stdlib_io import IO_TYPE_ALIASES, io_function, normalize_io_name
+from .stdlib_io import io_function, normalize_io_name
 from .stdlib_iter import FROM_FN, callback_type, next_result
+from .type_domains import Domain
+from .type_relations import legacy_compatible
 from .typesys import (
     BOOL,
     CONVERSION_ERROR,
@@ -38,6 +47,7 @@ from .typesys import (
     UNIT,
     UNKNOWN,
     USIZE,
+    VIEW_NAME,
     Type,
     callable_type,
     has_unsafe,
@@ -52,7 +62,8 @@ Node = dict[str, Any]
 
 # 预置枚举沿用用户枚举的检查、匹配和布局规则，不进入用户源码 AST。
 # 从合法 Xe 声明生成节点，避免手写另一套与解析器漂移的 AST 形状。
-STEP_DECLARATION = parse_source("enum[T] Step { Item[T], Stop, }", "<builtin Step>")["items"][0]
+with language_profile("legacy"):
+    STEP_DECLARATION = parse_source("enum[T] Step { Item[T], Stop, }", "<builtin Step>")["items"][0]
 
 
 @dataclass
@@ -89,6 +100,21 @@ class Binding:
     # 借用捕获的环境字段是 T@，正文中的名字却是指向外部 T 的别名。
     capture_borrowed: bool = False
     capture_writable: bool = False
+    # Historical construction is distinct from the current readable state.
+    # Core immutable boxes permit their first initialization, not a second
+    # initialization merely because a move made the box empty again.
+    ever_initialized: bool = True
+
+
+@dataclass
+class LoopContext:
+    """Lexical control target, not a variable scope or a pointer lifetime.
+
+    Only transfers aimed at this loop can make a non-returning condition
+    continue at its header/exit. A nested loop's transfers must not do so.
+    """
+    label: str | None
+    condition_transfers: set[str] | None = None
 
 
 @dataclass
@@ -144,7 +170,7 @@ def names_used(node: Any) -> dict[str, int]:
     return result
 
 
-class Checker(TraitChecker, SyncChecker, GlobalChecker):
+class Checker(TypeResolver, TraitChecker, SyncChecker, GlobalChecker):
     def __init__(self, source: Source, tree: Node, check_borrows: bool = True):
         # 旧参数仅为调用兼容保留；写权限和所有权始终检查，不再切换借用模式。
         self.source, self.tree, self.check_borrows = source, tree, True
@@ -152,8 +178,24 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         # 透明别名单独保存，不能让后端把它们当成新的数据布局。
         self.aliases: dict[str, Node] = {}
         self.alias_types: dict[str, Type] = {}
+        self.alias_domains: dict[str, Domain] = {}
         self._alias_stack: list[str] = []
         self.destructure_types: dict[int, Type] = {}
+        # [] constructs enum payloads or indexes storage; its result type cannot
+        # distinguish those operations when the container element is an enum.
+        self.index_accesses: set[int] = set()
+        # Index/restriction operations are explicitly classified by the checker.
+        # The backend must not guess from a spelling or a pointer result type.
+        self.access_plans: dict[int, AccessPlan] = {}
+        # Anonymous Array owners are internal storage, never source bindings.
+        # Each belongs to an explicit full-expression cleanup frame.
+        self.temporary_sources: dict[int, Binding] = {}
+        self.temporary_frames: list[list[int]] = []
+        self.temporary_enabled = False
+        # Checked enum delivery, shared with admission and consumed by the C
+        # backend. A whole fallback owns one complete enum; a payload fallback
+        # selects only the active tag's zero/one payload, never all alternatives.
+        self.core_branch_plans: dict[int, tuple[CoreBranchArm[Type], ...]] = {}
         self.functions: dict[str, Signature] = {}
         self.methods: dict[tuple[str, str], Signature] = {}
         self.constants: dict[str, Value] = {}
@@ -176,6 +218,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         self.copy_generics: set[str] = set()
         self.self_type: Type | None = None
         self.loop_depths: list[int] = []
+        # A Never condition can exit the function, or transfer to this loop.
+        # Those have different outer continuation paths. Nested functions and
+        # loops use their own entry, so their break/continue cannot leak here.
+        self.loop_targets: list[LoopContext] = []
         self.position = 0
         self.diagnostics: list[Diagnostic] = []
         self.warnings: list[Diagnostic] = []
@@ -185,6 +231,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         self.invalid_roots: dict[int, str] = {}
         # 调用参数中的临时借用也须互斥，不能因为没赋给名字就逃过检查。
         self.temporary_loans: list[tuple[int, bool]] = []
+        # Earlier evaluated call arguments remain live while later arguments
+        # run. Keep their Values, not only roots, so risk can follow the value.
+        self.pending_arguments: list[Value] = []
         # 输入所携带的外部区域，区别于“参数变量本身”的栈存储。
         self.parameter_roots: set[int] = set()
         self.return_origins: set[tuple[int, bool]] = set()
@@ -193,6 +242,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         # 只复制一次 AST；调用侧表让后端找到这份已经重新检查的具体函数。
         self.call_targets: dict[int, str] = {}
         self.generic_instances: dict[tuple, str] = {}
+        self._checking_core_template = False
         self.implementation_constraints: dict[int, list[Node]] = {}
         self.instance_limit = 256
         self.type_substitutions: dict[str, Type] = {}
@@ -232,7 +282,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             return {"kind": "TupleType", "span": span,
                     "elements": [self.type_node(t, span) for t in type_.args]}
         if type_.name.isdigit():
-            return {"kind": "Literal", "span": span, "value": int(type_.name), "literal_kind": "integer"}
+            return {"kind": "Literal", "span": span, "value": int(type_.name), "literal_kind": "INTEGER"}
         name = type_.name[1:] if type_.name.startswith("$") else type_.name
         return {"kind": "NamedType", "span": span,
                 "path": {"kind": "Path", "span": span, "parts": name.split("::")},
@@ -250,8 +300,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     return self.type_substitutions["$" + name]
                 if name == "Self" and self.self_type is not None:
                     return self.self_type
-            return self.type_of({"kind": "NamedType", "span": span,
-                                 "path": node["path"], "arguments": []})
+            return self.type_of(self.derived_node({"kind": "NamedType", "span": span,
+                                 "path": deepcopy(node["path"]), "arguments": []}, node))
         if kind == "Group":
             return self.expression_type(node["expression"])
         if kind == "MaybeTypeAttachment":
@@ -263,13 +313,24 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 self.fail(node, "类型参数中的指针附件只支持 mut / unsafe")
             return ptr(self.expression_type(node["operand"]), "mut" in modifiers, "unsafe" in modifiers)
         if kind == "BracketApply" and node["object"]["kind"] == "Name":
-            return self.type_of({"kind": "NamedType", "span": span, "path": node["object"]["path"],
-                "arguments": [self.type_node(self.expression_type(a), a["span"])
-                              if a["kind"] != "Literal" else a for a in node["arguments"]]})
+            name = "::".join(node["object"]["path"]["parts"])
+            if name == "Self" or name in self.generic_names or "$" + name in self.type_substitutions:
+                self.require_no_type_arguments(name, node["arguments"])
+            arguments = []
+            for index, argument in enumerate(node["arguments"]):
+                # 只有 Array 的长度位置接收值。其他位置必须递归解析成类型，
+                # 显式函数泛型的嵌套附件也不能把数字包装成“类型”蒙混过去。
+                if name == "Array" and index == 1:
+                    arguments.append(deepcopy(argument))
+                else:
+                    resolved = self.expression_type(argument)
+                    arguments.append(self.derived_node(self.type_node(resolved, argument["span"]), argument))
+            return self.type_of(self.derived_node({"kind": "NamedType", "span": span,
+                "path": deepcopy(node["object"]["path"]), "arguments": arguments}, node))
         if kind == "Tuple":
             return Type("tuple", tuple(self.expression_type(n) for n in node["elements"]))
-        if kind == "Literal" and isinstance(node["value"], int) and node["value"] >= 0:
-            return Type(str(node["value"]))
+        if kind == "Literal":
+            self.fail(node, "这里需要类型实参，不能使用值字面量", hint="例如 i32、String 或 Array[i32, 3]")
         self.fail(node, "这里需要具体类型参数（例如 i32、String、i32@ 或 Holder[i32]）",
                   "XE-GENERIC-0001")
 
@@ -285,6 +346,13 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if parts == ["Self"]:
                 target = self_type
             if target is not None:
+                if node["arguments"]:
+                    # 替换不能抹去错误的 T[...] / Self[...]。Trait 默认方法
+                    # 可能在泛型正文使用前被复制，因此先保留错误附件，等真正
+                    # 解析此类型时拒绝；不趁替换提前检查整个泛型正文。
+                    return self.derived_node({"kind": "InternalResolvedType", "span": node["span"],
+                        "resolved_type": target, "_invalid_type_application": {
+                            "name": parts[0], "arguments": deepcopy(node["arguments"])}}, node)
                 return self.derived_node(self.type_node(target, node["span"]), node)
         result = {key: self.specialize_node(value, substitutions, self_type)
                   for key, value in node.items()}
@@ -320,6 +388,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         return generated
 
     def type_expression(self, type_, span):
+        if type_.name.isdigit():
+            # 已检查的 Array 长度重新出现在 T::关联项的类型限定路径时，
+            # 仍须重建成字面量；Name("3") 会把合法长度误当成类型名称。
+            return self.type_node(type_, span)
         if type_.name == "ptr":
             return {"kind": "Borrow", "span": span, "operand": self.type_expression(type_.args[0], span),
                     "modifiers": self.type_node(type_, span)["modifiers"]}
@@ -364,6 +436,12 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if missing:
             self.fail(node, "无法推导泛型 " + ", ".join(missing) + "；请显式填写函数类型参数", "XE-GENERIC-0001")
         self.check_trait_constraints(signature, substitutions, node)
+        if current_profile() == "core" and getattr(self, "_checking_core_template", False):
+            # Opaque calls such as identity[U](value) check their signature,
+            # but $U has no machine layout and must never enter the concrete
+            # instance queue. Every original template is checked independently.
+            from .generic_core import abstract_instantiation
+            return abstract_instantiation(signature, substitutions)
         # unsafe 是调用处的地址风险，不是实例身份。缓存不能把首次调用的
         # 风险留在签名内，污染下一次安全地址的调用；显式模板注记仍保留。
         def canonical(type_):
@@ -476,6 +554,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             self._closure_invalidated.add(self._closure_bindings[uid])
         self._closure_external_invalidated.update(self._closure_external_roots.get(uid, ()))
         self.invalid_roots[uid] = reason
+        for argument in self.pending_arguments:
+            if self.carries_borrow(argument.type) and any(root == uid for root, _ in argument.origins):
+                self.warn_pointer(argument,
+                    f"先前求值的实参指向的存储{reason}，进入调用前地址可能失效", "XE-PTR-0002")
         for binding in self.bindings().values():
             if (binding.uid != uid and binding.uid not in exclude_uids and binding.initialized and not binding.moved
                     and binding.last_use >= self.offset(node)
@@ -488,107 +570,11 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
     def generic_set(self, node):
         return {p["name"] for p in node.get("generics", [])}
 
-    def resolve_alias(self, name):
-        if name in self.alias_types:
-            return self.alias_types[name]
-        declaration = self.aliases[name]
-        if name in self._alias_stack:
-            cycle = " -> ".join(self._alias_stack[self._alias_stack.index(name):] + [name])
-            self.fail(declaration, f"类型别名循环引用：{cycle}", "XE-TYPE-0007",
-                      "透明别名必须最终指向已定义的具体类型")
-        if len(self._alias_stack) >= 128:
-            self.fail(declaration, "类型别名引用链过深，请缩短别名链", "XE-TYPE-0007")
-        self._alias_stack.append(name)
-        # 别名只在模块作用域解析，不能捕获调用位置的 Self 或泛型参数。
-        saved = self.generic_names, self.self_type, self.type_substitutions
-        self.generic_names, self.self_type, self.type_substitutions = set(), None, {}
-        try:
-            result = self.type_of(declaration["type"], set())
-            self.alias_types[name] = result
-            return result
-        finally:
-            self.generic_names, self.self_type, self.type_substitutions = saved
-            self._alias_stack.pop()
-
     def associated_owner(self, name, node):
         """给后端及关联调用解析源码中的类型限定名称，别名返回具体类型。"""
         return self.type_of({"kind": "NamedType", "span": node["span"],
             "path": {"kind": "Path", "span": node["span"], "parts": name.split("::")},
             "arguments": []})
-
-    def type_of(self, node: Node | None, generics=None, self_type=None) -> Type:
-        if node is not None and node.get("kind") == "InternalResolvedType":
-            return node["resolved_type"]
-        if node is None:
-            return UNIT
-        generics = self.generic_names if generics is None else generics
-        self_type = self.self_type if self_type is None else self_type
-        kind = node["kind"]
-        if kind == "NamedType":
-            name = "::".join(node["path"]["parts"])
-            if name == "Self":
-                if self_type is None:
-                    self.fail(node, "Self 只能用于 impl/Trait 上下文", "XE-NAME-0001")
-                return self_type
-            if name in generics:
-                return Type("$" + name)
-            if name in self.aliases:
-                if node["arguments"]:
-                    self.fail(node, f"类型别名 {name} 不接受类型附件；泛型别名暂不支持", "XE-GENERIC-0001")
-                return self.resolve_alias(name)
-            if name in IO_TYPE_ALIASES:
-                if node["arguments"]:
-                    self.fail(node, f"{name} 不接受类型参数", "XE-GENERIC-0001")
-                return IO_TYPE_ALIASES[name]
-            if name not in PRIMITIVES | STANDARD and name not in self.types:
-                self.fail(node, f"未知类型 {name}", "XE-NAME-0001")
-            if name in {"Map", "Set", "Iterator", "Formatter"} and name not in self.types:
-                self.fail(node, f"当前版本尚未实现内建 {name} 类型的运行布局与接口；此声明仅属于后续目标能力",
-                          "XE-SEM-0001", "目前可使用已实现的 Vec/Box/Step 接口，或定义自己的模块类型；不是语言设计上禁止此类类型")
-            if name in self.types and self.types[name]["kind"] == "Trait":
-                self.fail(node, f"{name} 是 Trait 约束，不是具体值类型；动态 Trait 对象尚未设计",
-                          "XE-SEM-0001")
-            args = []
-            for arg in node["arguments"]:
-                if arg["kind"] == "Literal":
-                    args.append(Type(str(arg["value"])))
-                else:
-                    args.append(self.type_of(arg, generics, self_type))
-            arities = {"Array": 2, "Vec": 1, "Slice": 1, "SliceMut": 1,
-                       "Box": 1, "Map": 2, "Set": 1, "Range": 1, "Iterator": 1, "FromFn": 1, "Step": 1,
-                       **{name: 1 for name in SYNC_TYPES}}
-            arity = len(self.types[name].get("generics", [])) if name in self.types else arities.get(name, 0)
-            if len(args) != arity:
-                self.fail(node, f"{name} 需要 {arity} 个类型附件，实际为 {len(args)} 个")
-            if name == "Array" and not args[1].name.isdigit():
-                self.fail(node, "Array 的第二个附件必须是非负整数长度")
-            if name == "FromFn" and not self.has_variable(args[0]):
-                self.iterator_callback_result(args[0], node)
-            return Type(name, tuple(args))
-        if kind == "PointerType":
-            base = self.type_of(node["target"], generics, self_type)
-            modifiers = [m["name"] for m in node["modifiers"]]
-            if len(modifiers) != len(set(modifiers)):
-                self.fail(node, "指针修饰符重复")
-            if any(m not in {"mut", "unsafe"} | set(generics) for m in modifiers):
-                self.fail(node, "未知指针修饰符")
-            return ptr(base, "mut" in modifiers, "unsafe" in modifiers)
-        if kind == "MaybeType":
-            # None 是无负载结果标记，只在问号的错误附件内具有类型语法身份。
-            # 它不是普通存储类型，不能通过 fn(x: None) 引入伪造的值类型。
-            error_node = node["error"]
-            error = (NONE if error_node is None or error_node["kind"] == "NoneTypeMarker"
-                     else self.type_of(error_node, generics, self_type))
-            return maybe(self.type_of(node["value"], generics, self_type), error)
-        if kind == "NoneTypeMarker":
-            self.fail(node, "None 不是普通值类型；仅作为 T? / T?[None] 的无负载标记",
-                      "XE-RESULT-0001")
-        if kind == "FunctionType":
-            return callable_type([self.type_of(p, generics, self_type) for p in node["parameters"]],
-                                 self.type_of(node["result"], generics, self_type))
-        if kind == "TupleType":
-            return Type("tuple", tuple(self.type_of(t, generics, self_type) for t in node["elements"]))
-        self.fail(node, f"尚未支持的类型结构 {kind}", "XE-SEM-0001")
 
     def copyable(self, type_: Type, visited=None) -> bool:
         if type_.name in PRIMITIVES | {"$integer", "fn", "None", "ConversionError", "AllocError"} | SYNC_MARKERS:
@@ -602,14 +588,14 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if type_.name in {"tuple", "Array", "maybe", "Step"}:
             return all(self.copyable(arg, visited) for arg in type_.args
                        if not arg.name.isdigit())
-        if type_.name in {"Slice", "SliceMut", "Range", "Bytes", "Chars"}:
+        if type_.name in {"Slice", "SliceMut", VIEW_NAME, "Range", "Bytes", "Chars"}:
             return True
         if (type_, Type("Copy")) in self.trait_assumptions:
             return True
         return self.find_trait_implementation(type_, Type("Copy"), visited) is not None
 
     def carries_borrow(self, type_: Type, visited=None) -> bool:
-        if type_.name in {"ptr", "str", "Slice", "SliceMut", "closure", "Bytes", "Chars"}:
+        if type_.name in {"ptr", "str", "Slice", "SliceMut", VIEW_NAME, "closure", "Bytes", "Chars"}:
             return True
         if type_.name in (visited or set()):
             return False
@@ -668,8 +654,17 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     if function["name"] in seen:
                         self.fail(function, f"顶层名称 {function['name']} 重复", "XE-NAME-0002")
                     seen.add(function["name"])
-        for name in self.aliases:
-            self.resolve_alias(name)
+        self.resolve_type_declarations()
+        if current_profile() == "core":
+            # Alias expansion must precede this boundary: implementing Drop
+            # through an enum alias must not evade the phase's explicit ban.
+            for node in self.tree["items"]:
+                if (node["kind"] == "Impl" and node["trait"] is not None
+                        and node["trait"].get("path", {}).get("parts") == ["Drop"]):
+                    target = self.type_of(node["target"], self.generic_set(node))
+                    if self.types.get(target.name, {}).get("kind") == "Enum":
+                        self.fail(node, "当前核心禁止 enum 自定义 Drop；由编译器按活动变体自动清理负载",
+                                  "XE-OWN-0002")
         self.collect_traits()
         for node in self.tree["items"]:
             kind = node["kind"]
@@ -770,8 +765,14 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             visit(name)
 
     def check(self) -> list[Diagnostic]:
+        self.core_branch_plans.clear()
         try:
+            # Parsing is not the only entry: module clients may provide an AST.
+            # Revalidate before collecting declarations or generating side tables.
+            validate_core_source(self.source, self.tree)
             self.collect()
+            from .generic_core import check_core_templates
+            check_core_templates(self)
             from .ffi import validate_externals
             validate_externals(self)
             # 先注册所有全局类型/位置，再检查初值，允许静态地址引用后声明对象。
@@ -806,7 +807,11 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 binding.type = value.type
                 self.record_type(node, binding.type, binding.name)
         except Diagnostic as error:
-            return [error]
+            # Direct backend clients inspect this same diagnostics list. A
+            # template/collection failure must not leave an apparently valid
+            # checker whose uninstantiated bad template can simply be skipped.
+            self.diagnostics.append(error)
+            return self.diagnostics
         def concrete_signatures():
             return [s for s in list(self.functions.values()) + list(self.methods.values()) if not s.generics]
         signatures = concrete_signatures()
@@ -847,6 +852,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
 
     def check_function(self, signature):
         self.scopes = [{}]
+        self.temporary_sources = {}
+        self.temporary_frames = []
+        self.temporary_enabled = False
+        self.pending_arguments = []
         self.generic_names, self.self_type = signature.generics, signature.self_type
         self.type_substitutions = signature.type_substitutions
         self.copy_generics = set()
@@ -856,6 +865,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         self.result = signature.result
         self.last_uses = names_used(signature.node["body"])
         self.loop_depths, self.temporary_loans = [], []
+        self.loop_targets = []
         self.parameter_roots = set(self.static_roots)
         self.return_origins = set()
         self.invalid_roots = {}
@@ -898,7 +908,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             self.fail(node, f"当前作用域中的 {name} 重复", "XE-NAME-0002")
         self.uid += 1
         binding = Binding(self.uid, name, type_, node, mutable, initialized,
-                          origins=origins, last_use=self.last_uses.get(name, -1), parameter=parameter)
+                          origins=origins, last_use=self.last_uses.get(name, -1), parameter=parameter,
+                          ever_initialized=initialized)
         self.scopes[-1][name] = binding
         self.record_type(node, type_, name)
         return binding
@@ -908,6 +919,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if binding is None:
             self.fail(node, f"未定义名称 {name}", "XE-NAME-0001")
         if read:
+            if current_profile() == "core" and binding.moved:
+                self.fail(node, f"{name} 已移动或在某条分支中移动", "XE-MOVE-0001")
             if not binding.initialized:
                 self.fail(node, f"{name} 可能尚未初始化", "XE-INIT-0001")
             if binding.moved or (binding.moved_fields and not partial):
@@ -916,7 +929,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
 
     def by_uid(self, uid):
         return next((b for scope in self.scopes for b in scope.values() if b.uid == uid),
-                    next((b for b in self.globals.values() if b.uid == uid), None))
+                    next((b for b in self.globals.values() if b.uid == uid), self.temporary_sources.get(uid)))
 
     def bindings(self):
         return {b.uid: b for scope in self.scopes for b in scope.values()}
@@ -927,6 +940,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             states = [state[binding.uid] for state in alternatives if binding.uid in state]
             if states:
                 binding.initialized = all(b.initialized for b in states)
+                binding.ever_initialized = any(b.ever_initialized for b in states)
                 binding.moved = any(b.moved for b in states)
                 binding.moved_fields = set().union(*(b.moved_fields for b in states))
                 binding.origins = tuple(set().union(*(set(b.origins) for b in states)))
@@ -939,12 +953,30 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         # 保留地址来源仅用于风险告警；写权限由 mutable_place 单独检查。
         return
 
-    def consume(self, value: Value):
-        if self.copyable(value.type) or value.type == NEVER:
+    def consume(self, value: Value, explicit=False):
+        explicit = explicit and current_profile() == "core"
+        if value.type == NEVER or self.copyable(value.type) and not explicit:
             return
+        if explicit and self.copyable(value.type) and value.place:
+            # Only a directly named owning box has an approved Copy transfer
+            # state operation. A pointer target/Array child is not silently
+            # converted into an owned binding or an invented partial move.
+            if value.borrowed or value.place[1] or ungroup(value.node)["kind"] != "Name":
+                self.fail(value.node, "Copy 位置的显式移出尚未确认；本阶段只转移直接绑定或新量",
+                          "XE-CORE-0002")
         if value.borrowed:
             self.fail(value.node, "该存储访问不提供资源所有权，不能移走资源", "XE-MOVE-0002",
                       "显式传递指针或 clone；Vec 可通过 pop() 取出末尾元素")
+        if (current_profile() == "core" and
+                (value.place and value.place[1] or ungroup(value.node)["kind"] == "FieldAccess")):
+            # Complete resource construction and whole-object transfers are
+            # reviewed; exposing historical partial moves merely by enabling
+            # fields would also expose their unreviewed reconstruction/Drop
+            # interactions. Fresh constructors/calls also have resource fields,
+            # even without a source-name place in the checker. Their partial
+            # transfer requires the same separate cleanup contract.
+            self.fail(value.node, "资源字段的单独移出与部分对象重建尚未接入；请传递整个对象或字段指针",
+                      "XE-CORE-0002")
         self.note_closure_access(value, "once")
         if value.place:
             uid, fields = value.place
@@ -972,10 +1004,68 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     binding.moved_fields.add(fields)
                 else:
                     binding.moved = True
+                    if current_profile() == "core":
+                        binding.initialized = False
                 self.invalidate_storage(uid, value.node, "已移动或部分移动")
+
+    def storage_lifetime_error(self, value, owner, node=None):
+        label = "Array 来源" if owner.type.name == "Array" else "存储来源"
+        self.fail(node or value.node,
+                  f"派生指针或视图不能逃逸：{label} {owner.name} 将先于保存它的位置结束存活",
+                  "XE-PTR-0004",
+                  "先将所指对象保存到足够长寿的命名盒子，再取得地址或构造视图；"
+                  "也可复制不再依赖该存储的独立量。不会自动延长来源生命期，随后覆盖也不撤销此保存错误。")
+
+    def local_scope_depth(self, uid):
+        """Lexical depth of a real local box; external pseudo roots have none."""
+        return next((depth for depth, scope in enumerate(self.scopes)
+                     if any(binding.uid == uid for binding in scope.values())), None)
+
+    def reject_storage_escape(self, value, leaving, function_exit=False):
+        """Reject a known, ending local target in the reviewed core.
+
+        Origins describe the target storage, not merely the expression which
+        produced an address. Copying a pointer stored in an Array refines its
+        origins at value conversion, so an external pointee is not confused
+        with the Array's own element slot. Parameter pointee pseudo roots and
+        static roots are external to this local lexical comparison. The real
+        parameter box, in contrast, ends with its function just like a local.
+        This is not a non-lexical region solver or an implicit lifetime extension.
+        """
+        if current_profile() != "core" or not self.carries_borrow(value.type):
+            return
+        for uid, _ in value.origins:
+            ending = uid in leaving or (function_exit and uid not in self.parameter_roots)
+            owner = self.by_uid(uid)
+            if ending and uid not in self.static_roots and owner is not None:
+                self.storage_lifetime_error(value, owner)
+
+    def reject_short_store(self, value, destination, node):
+        """Reject a short target address at the store, even if later overwritten.
+
+        Compare pointee roots with the destination box, not the lifetime of a
+        source pointer variable. Only real lexical boxes are ordered here;
+        unknown indirect destinations are refused by the separate write-back
+        gate rather than being guessed to have a compatible lifetime.
+        """
+        if current_profile() != "core" or not self.carries_borrow(value.type) or destination is None:
+            return
+        target_depth = self.local_scope_depth(destination.uid)
+        if target_depth is None:
+            return
+        for uid, _ in value.origins:
+            if uid in self.static_roots or uid in self.parameter_roots:
+                continue
+            if uid in self.temporary_sources:
+                self.storage_lifetime_error(value, self.temporary_sources[uid], node)
+            source_depth = self.local_scope_depth(uid)
+            owner = self.by_uid(uid)
+            if source_depth is not None and source_depth > target_depth and owner is not None:
+                self.storage_lifetime_error(value, owner, node)
 
     def escape(self, value, leaving=None, function_exit=False):
         leaving = leaving or set()
+        self.reject_storage_escape(value, leaving, function_exit)
         for uid, _ in value.origins:
             if uid in leaving or (function_exit and uid not in self.parameter_roots and uid not in self.static_roots):
                 self.warn_pointer(value, "地址或视图可能超过所指存储的生存时间", "XE-PTR-0001")
@@ -989,20 +1079,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
     def unresolved(self, type_):
         return type_ == UNKNOWN or any(self.unresolved(t) for t in type_.args)
 
-    def compatible(self, actual, expected, pointer_weakening=True):
-        if actual == NEVER or actual == expected or actual == UNKNOWN or expected == UNKNOWN:
-            return True
-        if actual == INT_LITERAL and expected.name in NUMERIC:
-            return True
-        if actual.name == expected.name == "ptr":
-            # 仅能丢掉当前这一级的写权限。指向类型必须完全相同；
-            # 不递归降权，否则 T@[mut]@ -> T@@ 可经二级指针洗白写能力。
-            return actual.args == expected.args and (actual.mutable == expected.mutable or
-                    pointer_weakening and actual.mutable and not expected.mutable)
-        if actual.name == expected.name and len(actual.args) == len(expected.args):
-            return actual.identity == expected.identity and actual.mutable == expected.mutable and all(
-                self.compatible(a, b, pointer_weakening=False) for a, b in zip(actual.args, expected.args))
-        return False
+    def compatible(self, actual, expected, pointer_weakening=True, never_coercion=True):
+        # Historical compatibility is deliberately not set inclusion/subtyping.
+        return legacy_compatible(actual, expected, pointer_weakening, never_coercion)
 
     def convert(self, value, target, lift=False):
         if value.type == NEVER:
@@ -1018,6 +1097,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                          writable=value.writable)
         if not self.compatible(value.type, target):
             self.fail(value.node, f"类型不匹配：需要 {target}，实际为 {value.type}", "XE-TYPE-0001")
+        if current_profile() == "core" and target.name in NUMERIC - {"f32", "f64"}:
+            from .core_numeric import validate_static_integer
+            validate_static_integer(self, value.node, target)
         if value.type == INT_LITERAL and target.name in NUMERIC:
             for source_node, number in value.literal_sources:
                 # 用已有的精度和边界检查，避免复合表达式丢掉原字面量。
@@ -1056,6 +1138,32 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 # 真实依赖同一数组，赋值时记录的这类来源仍须保留。
                 origins = tuple(set(o for o in origins if o[0] != owner.uid) |
                                 set(owner.origins)) if self.carries_borrow(target) else ()
+        if (current_profile() == "core" and value.borrowed and value.place
+                and value.node["kind"] in {"Dereference", "Index", "FieldAccess"} and self.copyable(target)
+                and self.carries_borrow(target)):
+            # A joined pointer can point at several possible local boxes.
+            # place[0] retains only one representative for ordinary access;
+            # it must not erase the other candidates when a pointer quantity
+            # is read from that box. Refine every candidate and keep their
+            # union, including conservative Array-wide element origins.
+            refined, unknown = set(), False
+            for uid, mutable in origins:
+                owner = self.by_uid(uid)
+                if owner is not None and (owner.type == value.type or owner.type.name == "Array"
+                                          or self.owns_storage_type(owner.type, value.type)):
+                    # Reading the slot copies its stored target, not the
+                    # address of the slot. At value conversion only: taking
+                    # slot#@ must continue to refer to the slot's own box.
+                    refined.update(owner.origins)
+                else:
+                    refined.add((uid, mutable))
+                    unknown = True
+            origins = tuple(refined)
+            if unknown:
+                # An external pointer slot's own lifetime does not identify the
+                # target of the pointer stored there. Until projected return/
+                # retention summaries exist, retain a visible risk annotation.
+                self.warn_pointer(value, "从未知外部指针槽、字段或数组元素读取含地址量，其真正目标来源无法确认", "XE-PTR-0003")
         return Value(merge_unsafe(target, value.type), value.node, value.place, origins, value.borrowed,
                      value.access_uid, value.literal, value.writable,
                      value.literal_sources if target == INT_LITERAL else ())
@@ -1086,6 +1194,86 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         return Value(type_, node, origins=origins,
                      literal_sources=sources if type_ == INT_LITERAL else ())
 
+    def result_context(self, expected, previous):
+        if expected is not None:
+            return expected
+        # A complete preceding Maybe result can supply a missing constructor
+        # branch locally. Do not turn every common-type candidate into an
+        # annotation: pointers still need permission weakening, numeric literals
+        # retain their existing defaults, and generic enums need explicit context.
+        return next((value.type for value in previous
+                     if value.type.name == "maybe" and not self.has_variable(value.type)), None)
+
+    def strict_result(self, result, values):
+        """After static checking, an eager operation needs every operand value.
+
+        This is intentionally not used for short-circuit arms or loop exits.
+        It does not skip later operands' existing static checks, infer a new
+        generic argument, or claim that a Never function body is executed when
+        the function value itself is merely created.
+        """
+        return Value(NEVER, result.node) if any(value.type == NEVER for value in values) else result
+
+    @contextmanager
+    def control_path(self, reachable):
+        """Check dead expressions without inventing exits from active targets.
+
+        Static checking still needs their names, types and generic inference.
+        Only transfers recorded on entry are restored: a loop created inside
+        this subtree must retain its own condition transfers to compute its
+        local type. A global 'ignore break' flag would erase that distinction.
+        This is a local completion boundary, not a general reachability/CFG
+        analysis, and deliberately leaves the existing other state checks alone.
+        """
+        saved = ([(target, target.condition_transfers, set(target.condition_transfers))
+                  for target in self.loop_targets if target.condition_transfers is not None]
+                 if not reachable else [])
+        try:
+            yield
+        finally:
+            for target, transfers, previous in saved:
+                transfers.clear()
+                transfers.update(previous)
+                target.condition_transfers = transfers
+
+    @contextmanager
+    def temporary_mode(self, enabled):
+        previous = self.temporary_enabled
+        self.temporary_enabled = bool(enabled and current_profile() == "core")
+        try:
+            yield
+        finally:
+            self.temporary_enabled = previous
+
+    @contextmanager
+    def full_expression(self, enabled):
+        frame: list[int] = []
+        self.temporary_frames.append(frame)
+        try:
+            with self.temporary_mode(enabled):
+                yield frame
+                # A call's side effects must not retain a temporary in a live
+                # caller box, even when the call result itself is just Unit.
+                for scope in self.scopes:
+                    for binding in scope.values():
+                        if binding.initialized and not binding.moved:
+                            self.reject_storage_escape(
+                                Value(binding.type, binding.node, origins=binding.origins), set(frame))
+        finally:
+            for uid in frame:
+                self.invalid_roots[uid] = "所属完整表达式已结束"
+            self.temporary_frames.pop()
+
+    def initializer_value(self, node, expected):
+        with self.full_expression(True) as frame:
+            value = self.infer(node, expected)
+            value = self.convert(value, expected or self.default(value.type))
+            # The initializer result is about to enter a longer-lived box.
+            # Reading a stored external pointer has already refined origins;
+            # taking an element address still depends on this anonymous owner.
+            self.reject_storage_escape(value, set(frame))
+            return value
+
     def block(self, node, expected=None, lift=False):
         self.scopes.append({})
         terminated = False
@@ -1101,45 +1289,49 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                         self.fail(statement, "延后初始化需要显式类型", "XE-INIT-0001")
                     self.declare(statement["name"], annotation, statement, statement["mutable"], False)
                     continue
-                value = self.infer(statement["value"], annotation)
-                if annotation:
-                    value = self.convert(value, annotation)
-                else:
-                    value = self.convert(value, self.default(value.type))
+                value = self.initializer_value(statement["value"], annotation)
                 if self.unresolved(value.type):
                     self.fail(statement, "不能确定枚举的成功/错误类型，请添加完整类型注解")
                 if statement["operator"] == "=" and not self.copyable(value.type):
                     self.fail(statement, f"{value.type} 不能复制，必须使用 <<", "XE-OWN-0001")
-                if statement["operator"] == "<<" and value.type != NEVER and self.copyable(value.type):
+                if (current_profile() != "core" and statement["operator"] == "<<"
+                        and value.type != NEVER and self.copyable(value.type)):
                     self.fail(statement, f"{value.type} 是 Copy 值，使用 =；<< 只用于转移所有权", "XE-OWN-0001")
                 if statement["operator"] == "<<":
-                    self.consume(value)
+                    self.consume(value, explicit=True)
                 self.declare(statement["name"], value.type, statement, statement["mutable"], origins=value.origins)
+                terminated = value.type == NEVER
             elif kind == "Assignment":
-                self.assignment(statement)
+                with self.temporary_mode(False):
+                    terminated = self.assignment(statement).type == NEVER
             elif kind == "Destructure":
                 terminated = self.destructure(statement).type == NEVER
             elif kind == "Return":
-                value = self.infer(statement["value"], self.result, lift=True) if statement["value"] else Value(UNIT, statement)
+                with self.temporary_mode(False):
+                    value = self.infer(statement["value"], self.result, lift=True) if statement["value"] else Value(UNIT, statement)
                 value = self.convert(value, self.result, lift=True)
                 self.consume(value)
                 self.escape(value, function_exit=True)
                 self.return_origins.update(value.origins)
                 terminated = True
             elif kind in {"Break", "Continue"}:
-                if not self.loop_depths:
-                    self.fail(statement, f"{kind.lower()} 只能用于循环", "XE-FLOW-0001")
+                target = self.loop_target(statement)
+                if target.condition_transfers is not None:
+                    target.condition_transfers.add(kind)
                 terminated = True
             else:
-                value = self.infer(statement["expression"])
-                if value.type == INT_LITERAL:
-                    self.convert(value, I32)
-                self.consume(value)
-                terminated = value.type == NEVER
+                expression = statement["expression"]
+                with self.full_expression(ungroup(expression)["kind"] == "Call"):
+                    value = self.infer(expression)
+                    if value.type == INT_LITERAL:
+                        self.convert(value, I32)
+                    self.consume(value)
+                    terminated = value.type == NEVER
         if terminated:
             result = Value(NEVER, node)
         elif node["tail"]:
-            result = self.infer(node["tail"], expected, lift)
+            with self.temporary_mode(False):
+                result = self.infer(node["tail"], expected, lift)
             if expected:
                 result = self.convert(result, expected, lift)
             self.consume(result)
@@ -1160,8 +1352,14 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         # 块结果不是唯一的逃逸渠道：外层变量可能被赋为内层地址。
         for scope in self.scopes[:-1]:
             for binding in scope.values():
-                if binding.initialized and not binding.moved and binding.last_use >= node["span"]["end"]["offset"]:
-                    escaped = Value(binding.type, binding.node, origins=binding.origins)
+                if not binding.initialized or binding.moved:
+                    continue
+                escaped = Value(binding.type, binding.node, origins=binding.origins)
+                # DEC-039 forbids saving an ending local address even when
+                # the outer binding is never read. Do not broaden the older
+                # last-use-based warnings for unrelated pointer sources.
+                self.reject_storage_escape(escaped, local_ids)
+                if binding.last_use >= node["span"]["end"]["offset"]:
                     self.escape(escaped, local_ids)
                     if has_unsafe(escaped.type):
                         self.mark_binding_unsafe(binding)
@@ -1204,17 +1402,113 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if mode == "once" or self._closure_mode != "once":
                 self._closure_mode = mode
 
-    def assignment(self, node):
+    def owns_storage_type(self, owner_type, target_type, visited=None):
+        """Can this owned storage tree contain a slot of the given type?
+
+        Field provenance currently keeps a conservative union of stored target
+        origins. Follow only inline fields/Array children, never ordinary
+        pointer targets: the latter belong to another storage tree. This
+        distinguishes copying a field's pointer quantity from taking that
+        field box's address, without claiming precise field-sensitive loans.
+        """
+        if owner_type == target_type:
+            return True
+        visited = set(visited or ())
+        if owner_type in visited:
+            return False
+        visited.add(owner_type)
+        if owner_type.name == "Array":
+            return self.owns_storage_type(owner_type.args[0], target_type, visited)
+        definition = self.types.get(owner_type.name, {})
+        if definition.get("kind") != "Struct":
+            return False
+        substitutions = {"$" + p["name"]: t for p, t in
+                         zip(definition.get("generics", []), owner_type.args)}
+        return any(self.owns_storage_type(
+            substitute(self.type_of(field["type"], self.generic_set(definition)), substitutions),
+            target_type, visited) for field in definition["fields"])
+
+    def known_indirect_target(self, target, binding):
+        """Does the retained root identify this local box or an Array child?
+
+        Dereference provenance can retain an ancestor Array UID even after
+        reading a stored pointer. The UID alone therefore does not prove that
+        a second # still writes into that Array. Follow only owned Array child
+        types, never pointer targets, to keep such writes outside the reviewed
+        local-storage subset. This is a conservative stage gate, not a general
+        alias/field-path analysis.
+        """
+        if binding is None:
+            return False
+        if current_profile() == "core":
+            return self.owns_storage_type(binding.type, target.type)
+        type_ = binding.type
+        while True:
+            if type_ == target.type:
+                return True
+            if type_.name != "Array":
+                return False
+            type_ = type_.args[0]
+
+    def assignment(self, node) -> Value:
         operator = node["operator"]
         target_node = node["right"] if operator == ">>" else node["left"]
         source_node = node["left"] if operator == ">>" else node["right"]
+        if current_profile() == "core" and ungroup(target_node)["kind"] == "FieldAccess":
+            root = ungroup(target_node)
+            while root["kind"] == "FieldAccess":
+                root = ungroup(root["object"])
+            if root["kind"] == "Name" and len(root["path"]["parts"]) == 1:
+                owner = self.lookup(root["path"]["parts"][0], root, read=False)
+                if not owner.initialized and not owner.moved:
+                    self.fail(target_node,
+                              "分步构造未初始化struct字段的状态合同尚未接入；请先完整构造对象",
+                              "XE-CORE-0002")
         target = self.place(target_node, read=False)
         binding = self.by_uid(target.place[0]) if target.place else None
         initializing = bool(binding and not binding.initialized and target.place and not target.place[1])
+        if (current_profile() == "core" and binding and target.place is not None
+                and not target.borrowed and not target.place[1]):
+            # A moved immutable box is empty, but has already had its one
+            # initialization. Do not grant new write permission from emptiness.
+            initializing = not binding.ever_initialized
+            if (initializing and not binding.mutable and self.loop_depths
+                    and any(binding is candidate for scope in self.scopes[:self.loop_depths[-1] + 1]
+                            for candidate in scope.values())):
+                self.fail(target_node,
+                          "循环回边中的外层不可变首次初始化尚未接入完整路径分析",
+                          "XE-CORE-0002",
+                          "将每轮变量声明放入循环体，或明确使用 let[mut]；不猜测循环只执行一次。")
         if not initializing and not self.mutable_place(target):
             self.fail(target_node, "不能修改不可变绑定或只读指针", "XE-MUT-0001")
         self.note_closure_access(target, "mut")
         value = self.convert(self.infer(source_node, target.type), target.type)
+        # The write and its state transition only happen after the RHS finishes.
+        if value.type == NEVER:
+            return value
+        if (current_profile() == "core" and binding and target.place is not None
+                and not target.borrowed and not target.place[1]
+                and not binding.mutable and binding.ever_initialized):
+            # The RHS may itself have initialized the target. Check its actual
+            # state now rather than installing a second value in a read-only
+            # box based on the pre-RHS snapshot.
+            self.fail(target_node, "不可变绑定已完成初始化，不能再次写入", "XE-MUT-0001")
+        destination_bindings = [binding] if binding is not None else []
+        if current_profile() == "core" and target.borrowed and self.carries_borrow(target.type):
+            # A conditional pointer may identify several destination boxes.
+            # Checking only place[0] would let a short source escape through
+            # another (longer-lived) alternative of the same write.
+            candidates = [self.by_uid(uid) for uid, _ in target.origins]
+            if not candidates or any(not self.known_indirect_target(target, candidate)
+                                     for candidate in candidates):
+                self.fail(target_node,
+                          "向未知外部存储间接写入含地址量的写回/留存摘要尚未接入",
+                          "XE-CORE-0002",
+                          "本阶段可直接更新本函数能定位的盒子；跨函数指针输出需先明确写回与留存合同。"
+                          "普通二级指针读取及通过指针写入整数不受此门禁影响。")
+            destination_bindings = [candidate for candidate in candidates if candidate is not None]
+        for destination in destination_bindings:
+            self.reject_short_store(value, destination, target_node)
         # The target was checked before evaluating the RHS, but a nested place
         # still needs its owner afterwards.  Reinitializing an entire variable
         # (or an exactly moved field) is legal; indexing into a moved owner is
@@ -1265,12 +1559,17 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     self.warn_pointer(value, "写入外部对象的地址或视图可能在局部存储结束后失效", "XE-PTR-0001")
         if operator == "=" and not self.copyable(value.type):
             self.fail(source_node, "资源不能用 = 复制，使用 <<", "XE-OWN-0001")
-        if operator == "<<" and value.type != NEVER and self.copyable(value.type):
+        if (current_profile() != "core" and operator == "<<" and value.type != NEVER
+                and self.copyable(value.type)):
             self.fail(source_node, "Copy 值使用 =；<< 只用于转移所有权", "XE-OWN-0001")
-        if value.place == target.place and value.place and operator != "=" and not self.copyable(value.type):
-            self.fail(node, "不能把资源传递给自身", "XE-MOVE-0001")
+        direct_self = (ungroup(source_node)["kind"] == ungroup(target_node)["kind"] == "Name"
+                       and value.place == target.place and value.place is not None)
+        if (operator != "=" and (direct_self if current_profile() == "core" else
+                value.place == target.place and value.place and not self.copyable(value.type))):
+            self.fail(node, "不能将同一直接绑定显式转移给自身" if current_profile() == "core"
+                      else "不能把资源传递给自身", "XE-MOVE-0001")
         if operator != "=":
-            self.consume(value)
+            self.consume(value, explicit=True)
         if target.borrowed and not initializing and not self.copyable(target.type):
             # 写穿捕获别名或普通指针会替换外部资源，而非闭包环境字段。
             for uid in {uid for uid, _ in target.origins}:
@@ -1283,7 +1582,15 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if not initializing and not self.copyable(target.type):
                 self.invalidate_storage(binding.uid, node, "已被替换，旧资源可能已析构")
             binding.initialized, binding.moved = True, False
-            binding.origins = value.origins
+            binding.ever_initialized = True
+            if current_profile() == "core" and target.place[1]:
+                # Updating one field must not erase address dependencies of
+                # the owner's other fields. Aggregate origins are a may-set;
+                # keeping replaced-field origins can conservatively reject a
+                # program, but dropping unrelated ones would miss escapes.
+                binding.origins = tuple(set(binding.origins + value.origins))
+            else:
+                binding.origins = value.origins
             binding.type = merge_unsafe(binding.type, value.type)
             self.record_type(binding.node, binding.type, binding.name)
             if target.place[1]:
@@ -1292,9 +1599,11 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 binding.moved_fields.clear()
             # 新值已建立。旧别名已附上 unsafe；新取址不应继承旧资源风险。
             self.invalid_roots.pop(binding.uid, None)
-        elif binding and target.borrowed and value.origins:
+        elif target.borrowed and value.origins:
             # 经指针写入本地视图也会影响所有者；让块退出检查发现外层变量逃逸。
-            binding.origins = tuple(set(binding.origins + value.origins))
+            for destination in destination_bindings:
+                destination.origins = tuple(set(destination.origins + value.origins))
+        return Value(UNIT, node)
 
     def destructure(self, node):
         targets = node["targets"]
@@ -1358,7 +1667,20 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         return value
 
     def infer(self, node, expected=None, lift=False) -> Value:
-        value = self._infer(node, expected, lift)
+        if node["kind"] in {"If", "While", "Branch", "Pipeline"}:
+            # Their wider temporary cleanup boundaries have not been selected.
+            # An ordinary declaration/call statement nested in a body opens
+            # its own reviewed frame and can enable materialization locally.
+            with self.temporary_mode(False):
+                value = self._infer(node, expected, lift)
+        else:
+            value = self._infer(node, expected, lift)
+        if self.unresolved(value.type):
+            # Each expression has its own checked type in the backend side table.
+            # Converting a parent cannot later fill an unresolved constructor's
+            # missing Maybe branch, even when the parent's result is concrete.
+            self.fail(node, "不能确定枚举的成功/错误类型，请添加完整类型注解",
+                      hint="在接收变量、参数或返回值上提供完整结果类型；泛型调用可显式填写类型实参")
         invalid = [self.invalid_roots[uid] for uid, _ in value.origins if uid in self.invalid_roots]
         if invalid and self.carries_borrow(value.type):
             self.warn_pointer(value, "所指存储" + invalid[0] + "，地址或视图可能失效", "XE-PTR-0002")
@@ -1469,14 +1791,28 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             return Value(target, node)
         if kind == "Block":
             return self.block(node, expected, lift)
+        if kind == "Index":
+            return self.index_access(node)
+        if kind == "Restriction":
+            return self.range_access(node)
+        if kind == "ViewConstruct":
+            return self.range_access(node, construct=True)
         if kind == "Borrow":
             value = self.place(node["operand"])
+            if current_profile() == "core" and value.type == NEVER:
+                # Address-taking is strict in the place computation. A source
+                # or index which returned supplies neither a box nor an
+                # address; do not turn that already exiting path into a false
+                # "cannot take an address" error.
+                return Value(NEVER, node)
             if value.place is None:
                 self.fail(node, "只能对有存储位置的变量、字段或解引用取地址", "XE-BORROW-0001")
             mods = [m["name"] for m in node["modifiers"]]
             if any(m not in {"mut", "unsafe"} and m not in self.generic_names for m in mods) or len(mods) != len(set(mods)):
                 self.fail(node, "未知或重复的借用修饰")
             mutable = "mut" in mods
+            if mutable and value.place and value.place[0] in self.temporary_sources:
+                self.fail(node, "临时 Array 的可写取址权限尚未确认；本轮只接 Copy 读取和只读调用", "XE-CORE-0002")
             if mutable and not self.mutable_place(value):
                 self.fail(node, "可写借用需要 let[mut] 存储或已有可写指针", "XE-MUT-0001")
             if mutable:
@@ -1491,8 +1827,16 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             return Value(ptr(value.type, mutable, "unsafe" in mods), node, origins=origins)
         if kind == "Dereference":
             pointer = self.infer(node["operand"])
+            if pointer.type == NEVER and current_profile() == "core":
+                # Strict evaluation has already left this path. This does not
+                # convert Never into a pointer or open general Never coercions.
+                return Value(NEVER, node)
             if pointer.type.name != "ptr":
                 self.fail(node, "# 只能解引用指针")
+            # # consumes a pointer quantity. If its operand identified a box
+            # containing a pointer, read that quantity first; its pointee is
+            # not the pointer box itself (slot## versus slot#@).
+            pointer = self.convert(pointer, pointer.type)
             if has_unsafe(pointer.type):
                 self.warn_pointer(pointer, "正在解引用带 unsafe 风险注记的指针", "XE-PTR-0003")
             self.loan(pointer.origins, node, exclude=pointer.access_uid)
@@ -1505,6 +1849,15 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                          True, pointer.access_uid, writable=pointer.type.mutable)
         if kind == "FieldAccess":
             value = self.place(node["object"])
+            if current_profile() == "core" and value.type == NEVER:
+                return Value(NEVER, node)
+            if current_profile() == "core" and value.type.name == "ptr":
+                # The one-level field shorthand follows a pointer quantity.
+                # If that quantity was loaded from another field/slot, use its
+                # stored pointee provenance before selecting the next box.
+                # Borrow still operates on the original field place directly.
+                value = self.convert(value, value.type)
+                value.borrowed = False  # Already read as a pointer quantity.
             base = value.type.args[0] if value.type.name == "ptr" else value.type
             borrowed = value.borrowed or value.type.name == "ptr"
             if base.name == "tuple" and node["field"].isdigit():
@@ -1575,21 +1928,25 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             names = [f["name"] for f in node["fields"]]
             if len(set(names)) != len(names) or set(names) != set(fields):
                 self.fail(node, "结构体必须恰好初始化所有字段", "XE-INIT-0002")
-            origins, unsafe_fields = [], False
+            origins, unsafe_fields, values, continuing = [], False, [], True
             substitutions = {"$" + p["name"]: t for p, t in zip(definition.get("generics", []), constructed.args)}
             for field in node["fields"]:
                 self.member_access(fields[field["name"]], field)
                 type_ = substitute(self.type_of(fields[field["name"]]["type"], self.generic_set(definition)), substitutions)
-                value = self.convert(self.infer(field["value"], type_), type_)
+                with self.control_path(continuing):
+                    value = self.convert(self.infer(field["value"], type_), type_)
+                continuing = continuing and value.type != NEVER
                 if field["operator"] == "=" and not self.copyable(value.type):
                     self.fail(field, "资源字段必须使用 <<", "XE-OWN-0001")
-                if field["operator"] == "<<" and value.type != NEVER and self.copyable(value.type):
+                if (current_profile() != "core" and field["operator"] == "<<"
+                        and value.type != NEVER and self.copyable(value.type)):
                     self.fail(field, "Copy 字段使用 =；<< 只用于转移所有权", "XE-OWN-0001")
-                self.consume(value)
+                self.consume(value, explicit=field["operator"] in {"<<", ">>"})
+                values.append(value)
                 origins.extend(value.origins)
                 unsafe_fields = unsafe_fields or has_unsafe(value.type)
             result_type = mark_unsafe(constructed) if unsafe_fields else constructed
-            return Value(result_type, node, origins=tuple(origins))
+            return self.strict_result(Value(result_type, node, origins=tuple(origins)), values)
         if kind in {"Array", "Tuple"}:
             elem_expected = value_expected.args[0] if value_expected and value_expected.name == "Array" else None
             if kind == "Tuple" and value_expected and value_expected.name == "tuple":
@@ -1636,6 +1993,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if node["operator"] == "bitnot":
                 target = value_expected if value_expected and value_expected.name in NUMERIC else None
                 value = self.infer(node["operand"], target)
+                if value.type == NEVER and target and target.name not in {"f32", "f64"}:
+                    return Value(NEVER, node)
                 integer_type = self.default(value.type)
                 if integer_type.name not in NUMERIC - {"f32", "f64"}:
                     self.fail(node, "bitnot 需要整数；逻辑取反使用 not", "XE-TYPE-0004")
@@ -1647,7 +2006,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             value = self.infer(node["operand"], operand_expected)
             if node["operator"] == "not":
                 self.convert(value, BOOL)
-                return Value(BOOL, node)
+                return self.strict_result(Value(BOOL, node), [value])
+            if value.type == NEVER and value_expected and value_expected.name in NUMERIC:
+                return Value(NEVER, node)
             if value.type.name not in NUMERIC | {"$integer"}:
                 self.fail(node, "一元正负号需要数值")
             literal = (-value.literal if node["operator"] == "-" and
@@ -1656,25 +2017,46 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             result = Value(value.type, node, literal=literal,
                            literal_sources=sources if value.type == INT_LITERAL else ())
             target = value_expected
+            if current_profile() == "core" and result.type.name in NUMERIC - {"f32", "f64"}:
+                from .core_numeric import validate_static_integer
+                validate_static_integer(self, node, result.type)
             return self.convert(result, target) if target and target.name in NUMERIC else result
         if kind == "ComparisonChain":
-            values = [self.infer(operand) for operand in node["operands"]]
+            before = deepcopy(self.scopes)
+            values, alternatives, continuing = [], [], True
+            for index, operand in enumerate(node["operands"]):
+                # The first pair is eager. Each later operand is guarded by
+                # the preceding comparison, which may already be false.
+                if index >= 2 and continuing:
+                    alternatives.append(deepcopy(self.bindings()))
+                with self.control_path(continuing):
+                    value = self.infer(operand)
+                values.append(value)
+                continuing = continuing and value.type != NEVER
+            if continuing:
+                alternatives.append(deepcopy(self.bindings()))
             common = self.common(values, node)
             if common.type == INT_LITERAL:
                 self.convert(common, I32)
-            if common.type.name not in NUMERIC | {"$integer", "bool", "char", "str"}:
+            if common.type != NEVER and common.type.name not in NUMERIC | {"$integer", "bool", "char", "str"}:
                 self.fail(node, "该类型的比较 Trait 检查尚未实现", "XE-SEM-0001")
-            return Value(BOOL, node)
+            self.scopes = before
+            self.merge({}, alternatives)
+            return Value(BOOL if alternatives else NEVER, node)
         if kind == "Binary":
             left = self.infer(node["left"], value_expected)
             if node["operator"] in {"bitshl", "bitshr"}:
-                type_ = self.default(left.type)
+                type_ = (value_expected if left.type == NEVER and value_expected is not None
+                         else self.default(left.type))
                 if type_.name not in NUMERIC - {"f32", "f64"}:
                     self.fail(node, "移位左侧必须是整数", "XE-TYPE-0004")
                 self.convert(left, type_)
                 # 次数是独立的整数，不必与被移位值同宽；没有数值变量的隐式转换。
-                right = self.infer(node["right"])
+                with self.control_path(left.type != NEVER):
+                    right = self.infer(node["right"])
                 count_type = self.default(right.type)
+                if right.type == NEVER:
+                    return Value(NEVER, node)
                 if count_type.name not in NUMERIC - {"f32", "f64"}:
                     self.fail(node, "移位次数必须是整数", "XE-TYPE-0004")
                 self.convert(right, count_type)
@@ -1692,62 +2074,108 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                             self.fail(node, f"左移结果超出 {type_} 范围", "XE-BIT-0002")
                 except StaticValueError as error:
                     self.fail(node, str(error), "XE-BIT-0001")
-                return Value(type_, node)
+                return self.strict_result(Value(type_, node), [left, right])
             if node["operator"] in {"and", "or"}:
                 self.convert(left, BOOL)
                 before = deepcopy(self.scopes)
-                right = self.infer(node["right"], BOOL)
+                with self.control_path(left.type != NEVER):
+                    right = self.infer(node["right"], BOOL)
                 right_states = deepcopy(self.bindings())
                 self.scopes = before
-                self.merge({}, [self.bindings(), right_states])
                 self.convert(right, BOOL)
-                return Value(BOOL, node)
-            right = self.infer(node["right"], left.type if left.type != INT_LITERAL else value_expected)
+                # Right-hand return/panic cannot affect the path that skips it.
+                alternatives = ([deepcopy(self.bindings())] if left.type != NEVER else [])
+                if left.type != NEVER and right.type != NEVER:
+                    alternatives.append(right_states)
+                self.merge({}, alternatives)
+                return Value(BOOL if alternatives else NEVER, node)
+            with self.control_path(left.type != NEVER):
+                right = self.infer(node["right"], left.type if left.type != INT_LITERAL else value_expected)
             common = self.common([left, right], node)
+            if common.type == NEVER:
+                return Value(NEVER, node)
             if node["operator"] in {"bitand", "bitor", "bitxor"}:
                 integer_type = self.default(common.type)
                 if integer_type.name not in NUMERIC - {"f32", "f64"}:
                     self.fail(node, "bitand/bitor/bitxor 两侧必须是同类型整数；逻辑运算使用 and/or", "XE-TYPE-0004")
                 self.convert(common, integer_type)
-                return Value(integer_type, node)
+                return self.strict_result(Value(integer_type, node), [left, right])
             if common.type.name not in NUMERIC | {"$integer"}:
                 self.fail(node, "算术运算需要数值")
             if node["operator"] == "%" and common.type.name in {"f32", "f64"}:
                 self.fail(node, "% 只用于整数余数；浮点余数接口尚未设计", "XE-TYPE-0004")
-            return Value(common.type, node, literal_sources=common.literal_sources)
+            if current_profile() == "core" and common.type.name in NUMERIC - {"f32", "f64"}:
+                from .core_numeric import validate_static_integer
+                validate_static_integer(self, node, common.type)
+            return self.strict_result(Value(common.type, node, literal_sources=common.literal_sources),
+                                      [left, right])
         if kind == "Range":
             endpoint = expected.args[0] if expected and expected.name == "Range" else None
-            values = [self.infer(node[key], endpoint) for key in ("lower", "upper") if node[key]]
+            values, continuing = [], True
+            for key in ("lower", "upper"):
+                if node[key]:
+                    with self.control_path(continuing):
+                        value = self.infer(node[key], endpoint)
+                    values.append(value)
+                    continuing = continuing and value.type != NEVER
             common = self.common(values, node) if values else Value(USIZE, node)
+            if common.type == NEVER:
+                return Value(NEVER, node)
             if common.type == INT_LITERAL:
                 self.convert(common, I32)
             type_ = self.default(common.type)
             if type_.name not in NUMERIC - {"f32", "f64"}:
                 self.fail(node, "范围端点必须是整数")
-            return Value(Type("Range", (type_,)), node)
+            return self.strict_result(Value(Type("Range", (type_,)), node), values)
         if kind == "If":
-            self.convert(self.infer(node["condition"], BOOL), BOOL)
+            condition = self.convert(self.infer(node["condition"], BOOL), BOOL)
             before = deepcopy(self.scopes)
-            left = self.infer(node["then"], expected, lift)
+            branch_expected = None if condition.type == NEVER and expected == NEVER else expected
+            with self.control_path(condition.type != NEVER):
+                left = self.infer(node["then"], branch_expected, lift)
             alternatives = [deepcopy(self.bindings())] if left.type != NEVER else []
             self.scopes = deepcopy(before)
-            right = self.infer(node["otherwise"], expected, lift) if node["otherwise"] else Value(UNIT, node)
+            context = self.result_context(branch_expected, [left])
+            with self.control_path(condition.type != NEVER):
+                right = self.infer(node["otherwise"], context, lift) if node["otherwise"] else Value(UNIT, node)
             if right.type != NEVER:
                 alternatives.append(deepcopy(self.bindings()))
             self.scopes = before
+            result = self.common([left, right], node)
+            if condition.type == NEVER:
+                return Value(NEVER, node)
             self.merge({}, alternatives)
-            return self.common([left, right], node)
+            return result
         if kind in {"While", "For"}:
             return self.loop(node)
         if kind == "Pipeline":
-            value = self.infer(node["input"])
-            self.consume(value)
-            return self.handle(node["handler"], [value], expected, lift)
+            context = None
+            if current_profile() == "core":
+                # `value |> f` gets the very same input context as f(value).
+                # Never infer an input integer from the pipe's result type.
+                handler = node["handler"]
+                if handler["kind"] == "FunctionTarget":
+                    resolved = self.signature_target(handler["target"])
+                    if resolved and not resolved[0].generics and len(resolved[0].parameters) == 1:
+                        context = substitute(resolved[0].parameters[0], resolved[1])
+                elif len(handler["parameters"]) == 1 and handler["parameters"][0]["type"] is not None:
+                    context = self.type_of(handler["parameters"][0]["type"])
+            value = self.infer(node["input"], context)
+            if current_profile() == "legacy":
+                self.consume(value)
+            handler_expected = None if value.type == NEVER and expected == NEVER else expected
+            with self.control_path(value.type != NEVER):
+                result = self.handle(node["handler"], [value], handler_expected, lift)
+            return self.strict_result(result, [value])
         if kind == "Branch":
             return self.branch(node, expected, lift)
         if kind == "Propagate":
             value = self.infer(node["operand"])
-            if value.type.name != "maybe" or self.result.name != "maybe":
+            if self.result.name != "maybe":
+                self.fail(node, "?[return] 需要结果值及返回结果的外层函数", "XE-RESULT-0002")
+            if value.type == NEVER:
+                return Value(NEVER, node)
+            if value.type.name != "maybe":
                 self.fail(node, "?[return] 需要结果值及返回结果的外层函数", "XE-RESULT-0002")
             if value.type.args[1] != self.result.args[1]:
                 self.fail(node, "传播错误类型必须与外层函数相同", "XE-RESULT-0002")
@@ -1760,6 +2188,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                          origins=value.origins if self.carries_borrow(value.type.args[0]) else ())
         if kind == "Unwrap":
             value = self.infer(node["operand"])
+            if value.type == NEVER:
+                return Value(NEVER, node)
             if value.type.name != "maybe":
                 self.fail(node, "?[panic] 需要 T? 或 T?[E] 结果值", "XE-RESULT-0002")
             # panic 无继续执行路径，不参与正常分支的状态合并。
@@ -1873,6 +2303,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if variant:
             result, parameters = variant
             values = self.arguments(node["arguments"], parameters, node)
+            # No variant is completed if evaluating a payload leaves the block.
+            # In particular, Maybe::Yes[panic(...)] is Never, not Maybe[Never].
+            if any(value.type == NEVER for value in values):
+                return Value(NEVER, node)
             if result.name == "maybe":
                 args = list(result.args)
                 member = obj["path"]["parts"][-1] if obj["kind"] == "Name" else obj["member"]
@@ -1910,27 +2344,34 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     base.name == "SliceMut" or self.mutable_place(value))
         if has_unsafe(value.type) and self.carries_borrow(element_type):
             element_type = mark_unsafe(element_type)
-        return Value(element_type, node, value.place, origins, borrowed=True,
-                     access_uid=value.access_uid, writable=writable)
+        self.index_accesses.add(id(node))
+        result = Value(element_type, node, value.place, origins, borrowed=True,
+                       access_uid=value.access_uid, writable=writable)
+        return self.strict_result(result, [value, index])
 
     def arguments(self, nodes, parameters, node):
         if len(nodes) != len(parameters):
             self.fail(node, f"参数数量不匹配：需要 {len(parameters)} 个，实际 {len(nodes)} 个", "XE-CALL-0001")
-        values, substitutions = [], {}
+        values, substitutions, continuing = [], {}, True
         saved = list(self.temporary_loans)
+        pending_start = len(self.pending_arguments)
         try:
             for argument, parameter in zip(nodes, parameters):
                 parameter = substitute(parameter, substitutions)
-                value = self.infer(argument, None if parameter.name.startswith("$") else parameter)
+                with self.control_path(continuing):
+                    value = self.infer(argument, None if parameter.name.startswith("$") else parameter)
+                continuing = continuing and value.type != NEVER
                 if parameter.name.startswith("$") and parameter != UNKNOWN:
                     substitutions[parameter.name] = self.default(value.type)
                     parameter = substitutions[parameter.name]
                 value = self.convert(value, parameter) if parameter != UNKNOWN else value
                 self.consume(value)
                 values.append(value)
+                self.pending_arguments.append(value)
                 self.temporary_loans.extend(value.origins)
         finally:
             self.temporary_loans = saved
+            del self.pending_arguments[pending_start:]
         return values
 
     def box_constructor(self, owner, node):
@@ -1963,7 +2404,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if sync is not None:
                 return sync
             if owner.name == "Vec" and callee["member"] in {"new", "with_capacity"}:
-                self.arguments(node["arguments"], [] if callee["member"] == "new" else [USIZE], node)
+                values = self.arguments(node["arguments"], [] if callee["member"] == "new" else [USIZE], node)
+                if any(value.type == NEVER for value in values):
+                    return Value(NEVER, node)
                 return Value(owner, node)
             if owner.name == "Box" and callee["member"] == "new":
                 return self.box_constructor(owner, node)
@@ -2003,34 +2446,191 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 if signature:
                     return self.apply_signature(signature, node["arguments"], node)
         function = self.infer(callee)
+        if function.type == NEVER and current_profile() == "core":
+            self.access_plans[id(node)] = AccessPlan("index", NEVER, None)
+            return Value(NEVER, node)
+        if current_profile() == "core" and function.type.name in {"Array", VIEW_NAME}:
+            self.fail(node, "旧 Call 定位已取消；请使用 a⟦i⟧ 或 w⟦i⟧", "XE-CORE-0001")
         return self.invoke(function, node["arguments"], node)
+
+    def access_domain(self, source):
+        """Recover only stable facts; mutable descriptors may be rebound.
+
+        Bounds belong to view values, not to their type identity. Immutable
+        inferred bindings can retain their initializer's known bounds. Unknown
+        bounds still require the runtime check, never a guessed zero origin.
+        """
+        if source.type.name == "Array":
+            return (0, int(source.type.args[1].name))
+        plan = self.access_plans.get(id(source.node))
+        if plan is not None and plan.kind == "slice":
+            return plan.domain
+        if source.place:
+            binding = self.by_uid(source.place[0])
+            if binding is not None and not binding.mutable and binding.node["kind"] == "Binding":
+                value = binding.node.get("value")
+                if value is not None:
+                    value = ungroup(value)
+                    plan = self.access_plans.get(id(value))
+                    if plan is not None and plan.kind == "slice":
+                        return plan.domain
+                    if value["kind"] == "Name":
+                        name = "::".join(value["path"]["parts"])
+                        original = self.lookup(name, value)
+                        if original.uid != binding.uid:
+                            return self.access_domain(Value(original.type, value, (original.uid, ())))
+        return None
+
+    def access_source(self, source, node):
+        if source.type.name not in {"Array", VIEW_NAME}:
+            self.fail(node, "索引或切片的来源必须是 Array 或原坐标视图", "XE-TYPE-0001")
+        if source.type.name == "Array" and source.place is None:
+            self.fail(node, "临时数组的定位和视图生存期合同尚未接入；请先保存数组", "XE-CORE-0002")
+        return self.access_domain(source)
+
+    def access_origins(self, source, mutable):
+        if source.type.name == "Array" and not source.borrowed and source.place:
+            return ((source.place[0], mutable),)
+        return tuple((uid, mutable) for uid, _ in source.origins)
+
+    def require_access_write(self, source, node):
+        writable = self.mutable_place(source)
+        if not writable:
+            self.fail(node, "可写访问需要可写来源；[mut] 不能提升只读权限", "XE-MUT-0001")
+        if not self.copyable(source.type.args[0]):
+            self.fail(node, "非 Copy 元素的覆盖析构尚未接入本核心；不允许跳过原值清理", "XE-CORE-0002")
+
+    def index_access(self, node):
+        source = self.infer(node["target"])
+        if source.type == NEVER:
+            self.access_plans[id(node)] = AccessPlan("index", NEVER, None)
+            return Value(NEVER, node)
+        temporary = source.type.name == "Array" and source.place is None
+        if temporary:
+            if not self.temporary_enabled or not self.temporary_frames:
+                self.fail(node, "临时 Array 索引仅接普通 let 初始化或独立调用的完整表达式；此处边界尚未确认",
+                          "XE-CORE-0002")
+            self.uid += 1
+            owner = Binding(self.uid, "匿名 Array", source.type, node["target"], origins=source.origins)
+            self.temporary_sources[owner.uid] = owner
+            self.temporary_frames[-1].append(owner.uid)
+            source = Value(source.type, source.node, (owner.uid, ()), source.origins)
+        domain = self.access_source(source, node["target"])
+        argument = node["index"]
+        writable = (self.mutable_place(source) if source.type.name == "Array"
+                    else source.type.args[0].mutable)
+        self.access_plans[id(node)] = AccessPlan("index", source.type, domain, writable, temporary)
+        index = self.convert(self.infer(argument, USIZE), USIZE)
+        if index.type == NEVER:
+            return Value(NEVER, node)
+        number = literal_index(argument)
+        if number is not None and domain is not None and not domain[0] <= number < domain[1]:
+            self.fail(argument, f"元素坐标 {number} 不在当前范围 {domain[0]}..{domain[1]} 内", "XE-INDEX-0001")
+        self.access_plans[id(node)] = AccessPlan("index", source.type, domain, writable, temporary)
+        if source.type.name == "Array":
+            # Indexing identifies the existing child box. Reading a Copy value
+            # and taking this box's address are separate ordinary contexts.
+            return Value(source.type.args[0], node, source.place,
+                         self.access_origins(source, writable), borrowed=True, writable=writable)
+        pointer = source.type.args[0]
+        if has_unsafe(source.type):
+            pointer = mark_unsafe(pointer)
+        return Value(pointer, node, origins=self.access_origins(source, pointer.mutable))
+
+    def range_access(self, node, construct=False):
+        restriction = node["target"] if construct else node
+        source = self.infer(restriction["target"])
+        if source.type == NEVER:
+            self.access_plans[id(node)] = AccessPlan("slice", NEVER, None)
+            return Value(NEVER, node)
+        domain = self.access_source(source, restriction["target"])
+        if construct and source.type.name != "Array":
+            self.fail(node, "已有 View 只保留 P 限制范围，不再附加地址构造模式", "XE-TYPE-0001")
+        if not construct and source.type.name != VIEW_NAME:
+            self.fail(node, "Array 范围必须通过 [@] / [@[mut]] 构造地址映射", "XE-TYPE-0001")
+        range_ = ungroup(restriction["range"])
+        if range_["kind"] != "Range" or range_["operator"] not in {"..", "..="}:
+            self.fail(node, "⟨⟩ 只接受连续范围，不能选择离散索引", "XE-TYPE-0001")
+        names = [modifier["name"] for modifier in node["modifiers"]] if construct else []
+        if construct and names not in ([], ["mut"]):
+            self.fail(node, "切片仅接入一个 [mut] 附件", "XE-TYPE-0001")
+        mutable = names == ["mut"] if construct else source.type.args[0].mutable
+        if construct and mutable:
+            self.require_access_write(source, node)
+        self.access_plans[id(node)] = AccessPlan("slice", source.type, None, mutable)
+        lower_node, upper_node = range_["lower"], range_["upper"]
+        if lower_node is None and upper_node is None:
+            result_domain = domain
+        else:
+            if lower_node is None or upper_node is None:
+                self.fail(range_, "仅省略一个端点的规则尚未确认", "XE-CORE-0001")
+            lower_value = self.convert(self.infer(lower_node, USIZE), USIZE)
+            if lower_value.type == NEVER:
+                return Value(NEVER, node)
+            upper_value = self.convert(self.infer(upper_node, USIZE), USIZE)
+            if upper_value.type == NEVER:
+                return Value(NEVER, node)
+            lower, upper = literal_index(lower_node), literal_index(upper_node)
+            if upper is not None and range_["operator"] == "..=":
+                if lower is not None and lower > upper:
+                    self.fail(range_, "闭区间的起点不能大于终点", "XE-INDEX-0001")
+                limits = integer_limits(USIZE)
+                assert limits is not None
+                if upper >= limits[2]:
+                    self.fail(upper_node, "闭区间终点不能表示为合法元素坐标", "XE-INDEX-0001")
+                upper += 1
+            result_domain = (lower, upper) if lower is not None and upper is not None else None
+        if result_domain is not None:
+            lower, upper = result_domain
+            if lower > upper:
+                self.fail(range_, "切片起点不能大于终点", "XE-INDEX-0001")
+            if domain is not None and not domain[0] <= lower <= upper <= domain[1]:
+                self.fail(range_, f"切片范围不包含于当前坐标域 {domain[0]}..{domain[1]}", "XE-INDEX-0001")
+        self.access_plans[id(node)] = AccessPlan("slice", source.type, result_domain, mutable)
+        type_ = (view_type(ptr(source.type.args[0], mutable)) if construct else source.type)
+        if has_unsafe(source.type):
+            type_ = mark_unsafe(type_)
+        return Value(type_, node, origins=self.access_origins(source, mutable))
 
     def apply_signature(self, signature, nodes, node, substitutions=None, prefix_values=()):
         """先按具体实参推导，再登记实例；具体函数体由检查队列独立复查。"""
         self.member_access(signature.node, node)
         if len(nodes) + len(prefix_values) != len(signature.parameters):
             self.fail(node, "函数参数数量不匹配", "XE-CALL-0001")
-        substitutions, values = dict(substitutions or {}), []
+        substitutions, values, continuing = dict(substitutions or {}), [], True
         saved = list(self.temporary_loans)
+        pending_start = len(self.pending_arguments)
         try:
             arguments = list(prefix_values) + list(nodes)
             for argument, pattern in zip(arguments, signature.parameters):
                 parameter = substitute(pattern, substitutions)
-                value = (argument if isinstance(argument, Value) else
-                         self.infer(argument, None if self.has_variable(parameter) else parameter))
+                with self.control_path(continuing):
+                    value = (argument if isinstance(argument, Value) else
+                             self.infer(argument, None if self.has_variable(parameter) else parameter))
+                continuing = continuing and value.type != NEVER
                 # 已显式绑定的类型只进行普通转换，允许 mut 指针降为只读；
                 # 尚未确定的类型才推导，不能覆盖调用者明确给出的附件。
-                if self.has_variable(parameter):
+                if self.has_variable(parameter) and not (
+                        current_profile() == "core" and getattr(self, "_checking_core_template", False)):
+                    # Core abstract calls already supplied every type argument.
+                    # The remaining $T is rigid in the caller's type scope,
+                    # not a metavariable to infer again (e.g. grow[T@](x@)).
                     self.unify_generic(parameter, value.type, substitutions, value.node)
                 value = self.convert(value, substitute(pattern, substitutions))
                 self.consume(value)
                 self.temporary_loans.extend(value.origins)
                 values.append(value)
+                self.pending_arguments.append(value)
         finally:
             self.temporary_loans = saved
+            del self.pending_arguments[pending_start:]
         concrete = self.instantiate(signature, substitutions, node)
         if concrete.node["name"] in self.functions and self.functions[concrete.node["name"]] is concrete:
             self.call_targets[id(node)] = concrete.node["name"]
+        # Keep checking all arguments and registering concrete instances above:
+        # later arguments can supply generic types even though no call occurs.
+        if any(value.type == NEVER for value in values):
+            return Value(NEVER, node)
         result = self.call_result_type(concrete, values)
         value = Value(result, node, origins=self.call_origins(concrete, values)
                       if self.carries_borrow(result) else ())
@@ -2079,6 +2679,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if info:
             mode = self.closure_receiver_mode(function, signature, node)
             self.closure_call_modes[id(node)] = mode
+        # Argument evaluation can leave the caller before entering this body.
+        # Do not consume/invalidate the callable as though it had been invoked.
+        if any(value.type == NEVER for value in values):
+            return Value(NEVER, node)
         if mode == "owning" or info is None and not pointer_call:
             self.consume(function)
         if info:
@@ -2136,16 +2740,23 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if standard_signature is not None:
             name = normalize_io_name(name)
             if not standard_signature.formatted:
-                self.arguments(nodes, list(standard_signature.parameters), node)
+                values = self.arguments(nodes, list(standard_signature.parameters), node)
+                if any(value.type == NEVER for value in values):
+                    return Value(NEVER, node)
                 return Value(standard_signature.result, node)
         parts = name.split("::")
         if len(parts) == 2 and parts[0] in NUMERIC and parts[1] == "try_from":
             if len(nodes) != 1:
                 self.fail(node, "数值 try_from 需要且仅需要一个参数", "XE-CALL-0001")
             value = self.infer(nodes[0])
+            if parts[0] in {"f32", "f64"}:
+                self.fail(node, "数值 try_from 当前仅定义整数之间的检查转换；浮点策略尚未确定",
+                          "XE-SEM-0001")
+            if value.type == NEVER:
+                return Value(NEVER, node)
             source = self.default(value.type)
             integers = NUMERIC - {"f32", "f64"}
-            if source.name in {"f32", "f64"} or parts[0] in {"f32", "f64"}:
+            if source.name in {"f32", "f64"}:
                 self.fail(node, "数值 try_from 当前仅定义整数之间的检查转换；浮点策略尚未确定",
                           "XE-SEM-0001")
             if source.name not in integers:
@@ -2162,7 +2773,27 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if not nodes:
                 self.fail(node, "格式化调用需要格式字符串", "XE-CALL-0001")
             template = self.convert(self.infer(nodes[0]), STR)
-            values = [self.infer(n) for n in nodes[1:]]
+            values, continuing = [], template.type != NEVER
+            saved = list(self.temporary_loans)
+            pending_start = len(self.pending_arguments)
+            try:
+                for argument in nodes[1:]:
+                    with self.control_path(continuing):
+                        value = self.infer(argument)
+                    continuing = continuing and value.type != NEVER
+                    # Formatting receives ordinary values, not a privileged
+                    # implicit reference. Materialize a field/slot's Copy
+                    # quantity through the same conversion boundary used by
+                    # calls, then transfer this argument before the next one
+                    # can read/move the same resource or invalidate its target.
+                    value = self.convert(value, value.type)
+                    self.consume(value)
+                    values.append(value)
+                    self.pending_arguments.append(value)
+                    self.temporary_loans.extend(value.origins)
+            finally:
+                self.temporary_loans = saved
+                del self.pending_arguments[pending_start:]
             if template.literal is None:
                 self.fail(nodes[0], "当前阶段要求格式字符串为字面量", "XE-SEM-0001")
             try:
@@ -2179,7 +2810,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 issue = format_argument_issue(value.type, spec)
                 if issue:
                     self.fail(value.node, issue, "XE-TYPE-0001" if spec == "p" else "XE-SEM-0001")
-                self.consume(value)
+            if any(value.type == NEVER for value in values):
+                return Value(NEVER, node)
             return Value(UNIT, node)
         signatures = {"String::from": ([STR], STRING), "String::new": ([], STRING),
                       "File::open": ([STR], maybe(FILE, IO_ERROR)),
@@ -2188,7 +2820,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         if name not in signatures:
             return None
         parameters, result = signatures[name]
-        self.arguments(nodes, parameters, node)
+        values = self.arguments(nodes, parameters, node)
+        if any(value.type == NEVER for value in values):
+            return Value(NEVER, node)
         return Value(result, node)
 
     def iterator_callback_result(self, callback, node):
@@ -2236,6 +2870,12 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
 
     def method(self, callee, nodes, node, type_arguments=None):
         receiver = self.place(callee["object"])
+        if current_profile() == "core" and receiver.type.name == "ptr":
+            # Calling through a stored pointer first reads that pointer value,
+            # just as explicit # does. Skipping this boundary would silently
+            # use the pointer slot/containing struct as its pointee source.
+            receiver = self.convert(receiver, receiver.type)
+            receiver.borrowed = False  # apply_signature must not read it twice.
         base = receiver.type.args[0] if receiver.type.name == "ptr" else receiver.type
         name = callee["field"]
         element = base.args[0] if base.args else I32
@@ -2269,16 +2909,34 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                         self.fail(node, "方法类型参数与对象类型冲突", "XE-GENERIC-0001")
                     substitutions[key] = type_
             self_parameter = substitute(signature.parameters[0], substitutions)
-            temporary_receiver = not receiver.place and not receiver.origins
+            temporary_receiver = (not receiver.place and
+                                  (receiver.type.name != "ptr" if current_profile() == "core"
+                                   else not receiver.origins))
             if self_parameter.name == "ptr":
                 writable = receiver.type.mutable if receiver.type.name == "ptr" else self.mutable_place(receiver)
                 if self_parameter.mutable and not writable:
                     self.fail(node, "可写方法需要 let[mut] 或 T@[mut]", "XE-BORROW-0004")
                 if self_parameter.mutable and receiver.type.name != "ptr":
                     self.note_closure_access(receiver, "mut")
-                origins = receiver.origins or (((receiver.place[0], self_parameter.mutable),) if receiver.place else ())
+                if current_profile() == "core":
+                    # self@ points at the receiver's storage, not at values
+                    # stored inside its pointer fields. A local Holder may
+                    # contain a long-lived p while Holder's own box is short.
+                    # An existing pointer/projection already records its
+                    # storage roots; an owned named box supplies its own UID.
+                    if receiver.type.name == "ptr" or receiver.borrowed:
+                        origins = receiver.origins
+                        if not origins and receiver.place:
+                            origins = ((receiver.place[0], self_parameter.mutable),)
+                    else:
+                        origins = (((receiver.place[0], self_parameter.mutable),)
+                                   if receiver.place else ())
+                else:
+                    origins = receiver.origins or (((receiver.place[0], self_parameter.mutable),) if receiver.place else ())
                 receiver = Value(ptr(base, self_parameter.mutable, has_unsafe(receiver.type)), receiver.node,
-                                 receiver.place, origins, receiver.borrowed, receiver.access_uid)
+                                 receiver.place, origins,
+                                 False if current_profile() == "core" else receiver.borrowed,
+                                 receiver.access_uid)
             elif receiver.type.name == "ptr":
                 if not self.copyable(base):
                     self.fail(node, f"{base}::{name} 的 self: {self_parameter} 会消耗资源；"
@@ -2286,12 +2944,35 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                               "用拥有的值调用，或把方法定义为 self: Self@ / self: Self@[mut]")
                 # Copy 接收器按已确认的规则复制所指值，不消耗指针或原对象。
                 # 只有非 Copy 的 self: Self 才需要资源所有权而被拒绝。
-                receiver = Value(base, receiver.node, receiver.place, receiver.origins, True, receiver.access_uid)
+                if current_profile() == "core":
+                    # Copy through p must be the same value read as an
+                    # explicit p#: aggregate pointer fields refer to their
+                    # stored targets, not to the aggregate's own box. Use an
+                    # internal node only; the public source AST stays intact.
+                    read_node = {"kind": "Dereference", "span": receiver.node.get("span", {}),
+                                 "operand": receiver.node}
+                    for metadata in ("_file", "_module"):
+                        if metadata in receiver.node:
+                            read_node[metadata] = receiver.node[metadata]
+                    if has_unsafe(receiver.type):
+                        self.warn_pointer(receiver, "正在解引用带 unsafe 风险注记的指针", "XE-PTR-0003")
+                    copied_type = mark_unsafe(base) if has_unsafe(receiver.type) and self.carries_borrow(base) else base
+                    root = receiver.origins[0][0] if receiver.origins else None
+                    receiver = self.convert(Value(copied_type, read_node,
+                        (root, ()) if root is not None else None, receiver.origins,
+                        True, receiver.access_uid, writable=receiver.type.mutable), base)
+                    receiver.borrowed = False  # Prefix is the already copied quantity.
+                else:
+                    receiver = Value(base, receiver.node, receiver.place, receiver.origins, True, receiver.access_uid)
             result = self.apply_signature(signature, nodes, node, substitutions, [receiver])
             concrete = self.functions.get(self.call_targets.get(id(node), ""), signature)
             depends_on_receiver = concrete.borrow_parameters is None or 0 in concrete.borrow_parameters
             if (temporary_receiver and self_parameter.name == "ptr" and self.carries_borrow(result.type)
-                    and (depends_on_receiver or not self.copyable(base))):
+                    and (depends_on_receiver or current_profile() != "core" and not self.copyable(base))):
+                if current_profile() == "core" and depends_on_receiver:
+                    self.fail(node, "匿名struct接收者返回依赖自身存储的地址，其结果存储与生命期合同尚未接入",
+                              "XE-CORE-0002",
+                              "先把接收者保存为生命期明确的具名盒子，再调用方法；不会用其指针字段的来源冒充自身存储。")
                 self.warn_pointer(result, "临时对象产生的地址或视图可能在使用前失效", "XE-PTR-0003")
             return result
         elif base.name == "maybe" and name == "expect":
@@ -2370,6 +3051,10 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             values = self.arguments(nodes, parameters, node)
         finally:
             self.temporary_loans = saved
+        # An uncompleted argument leaves before the library method modifies
+        # storage or returns a view. Its signature was still checked in full.
+        if any(value.type == NEVER for value in values):
+            return Value(NEVER, node)
         if base.name == "Vec" and name == "push" and self.carries_borrow(element):
             # 容器保存的地址来源应随 Vec 移动、pop 和函数返回传播。
             owners = ({receiver.place[0]} if receiver.place and receiver.type.name != "ptr" else
@@ -2422,9 +3107,27 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         return Value(result, node, origins=origins)
 
     def handle(self, handler, payloads, expected=None, lift=False):
+        core = current_profile() == "core"
+        if core and len(payloads) > 1:
+            self.fail(handler, "管道处理器只接收零个或一个输入，不自动展开多个负载", "XE-CALL-0001")
+        if core and handler["kind"] not in {"FunctionTarget", "HandlerBinding"}:
+            self.fail(handler, "管道后必须是函数目标或单输入参数绑定", "XE-CORE-0001")
         if handler["kind"] == "FunctionTarget":
             target = handler["target"]
             resolved = self.signature_target(target)
+            if core and resolved and not resolved[0].generics:
+                # Use the ordinary direct-call path, including its parameter
+                # dependencies and pointer-result warnings. Treating a known
+                # function as an opaque function value would invent a lifetime
+                # dependency on every pointer argument, unlike f(value).
+                self.infer(target)
+                signature, substitutions = resolved
+                result = self.apply_signature(signature, [], handler, substitutions,
+                                              prefix_values=payloads)
+                if expected:
+                    result = self.convert(result, expected, lift)
+                self.consume(result)
+                return result
             if resolved and resolved[0].generics:
                 signature, substitutions = resolved
                 if len(signature.parameters) != len(payloads):
@@ -2451,7 +3154,14 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             self.consume(result)
             return result
         parameters = handler["parameters"]
-        ignore = len(parameters) == 1 and parameters[0]["name"] == "_" and parameters[0]["type"] is None
+        if core and (len(parameters) > 1 or len(parameters) != len(payloads)):
+            self.fail(handler, "处理参数必须与零个或一个输入对应；零负载使用 () ->，_ 只忽略一个输入",
+                      "XE-CALL-0001")
+        # The archived rule treats an untyped `_` as an arbitrary argument pack.
+        # Core instead checks arity above, and discards exactly one typed input.
+        # Keeping the distinction here avoids changing ordinary call semantics.
+        ignore = (not core and len(parameters) == 1 and parameters[0]["name"] == "_"
+                  and parameters[0]["type"] is None)
         if not ignore and len(parameters) != len(payloads):
             self.fail(handler, "分支绑定数量与载荷不一致（None/无载荷分支使用 _）", "XE-CALL-0001")
         self.scopes.append({})
@@ -2459,14 +3169,30 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             for parameter, value in zip(parameters, payloads):
                 type_ = self.type_of(parameter["type"]) if parameter["type"] else value.type
                 value = self.convert(value, type_)
-                self.declare(parameter["name"], value.type, parameter, parameter["mutable"], origins=value.origins)
+                if core:
+                    # Bind/discard is the argument-delivery point, just like
+                    # apply_signature above. Copy inputs remain usable; owned
+                    # resources transfer once, not again at the outer pipe.
+                    self.consume(value)
+                if core and parameter["name"] == "_":
+                    # An ignored input still has a checked type and runtime
+                    # owning cleanup slot, but never becomes a readable source
+                    # name. DEC-024 keeps that slot alive through the body and
+                    # cleans it on normal exit or an enclosing-fn return.
+                    self.record_type(parameter, value.type)
+                    binding_types = getattr(self, "binding_types", None)
+                    if binding_types is not None:
+                        binding_types[id(parameter)] = value.type
+                else:
+                    self.declare(parameter["name"], value.type, parameter, parameter["mutable"], origins=value.origins)
         result = self.infer(handler["body"], expected, lift)
         if expected:
             result = self.convert(result, expected, lift)
         self.consume(result)
         self.scope_escape(result, handler, set(b.uid for b in self.scopes[-1].values()))
         self.scopes.pop()
-        return Value(result.type, handler, origins=result.origins)
+        return Value(result.type, handler, origins=result.origins,
+                     literal=result.literal, literal_sources=result.literal_sources)
 
     def selector_cases(self, selector, base, variants):
         """验证一层选择器，返回独立的常量/_ 选择行。
@@ -2529,6 +3255,8 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         return [SelectorCase(key, tuple(values), tuple(types), payload_types) for values in product(*options)]
 
     def branch(self, node, expected=None, lift=False):
+        if current_profile() == "core":
+            return self.core_branch(node, expected)
         value = self.infer(node["input"])
         borrowed = "borrow" in node["modifiers"]
         mutable = "mut" in node["modifiers"]
@@ -2596,7 +3324,9 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 types = [mark_unsafe(t) if self.carries_borrow(t) else t for t in types]
             payloads = [Value(ptr(t, mutable, has_unsafe(value.type)) if borrowed else t,
                               arm, origins=origins if borrowed or self.carries_borrow(t) else ()) for t in types]
-            result = self.handle(arm["handler"], payloads, expected, lift)
+            context = self.result_context(None if value.type == NEVER and expected == NEVER else expected, results)
+            with self.control_path(value.type != NEVER):
+                result = self.handle(arm["handler"], payloads, context, lift)
             results.append(result)
             if result.type != NEVER:
                 states.append(deepcopy(self.bindings()))
@@ -2604,7 +3334,86 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         self.merge({}, states)
         if not all(covered(case, previous_cases) for case in full_cases):
             self.fail(node, "模式匹配没有覆盖所有情况", "XE-MATCH-0003", "补齐所有变体，或添加 _ 分支")
-        return self.common(results, node)
+        return self.strict_result(self.common(results, node), [value])
+
+    def core_branch(self, node, expected=None):
+        """Reviewed enum delivery, including one final homogeneous/whole else.
+
+        This intentionally does not reuse the legacy selector lattice or its
+        common-type coercions. Remaining branch forms stay fail-closed even
+        for a hand-provided AST or a caller using this component directly.
+        """
+        value = self.infer(node["input"])
+        declaration = self.types.get(value.type.name, {})
+        if node["modifiers"] or value.type.name == "ptr":
+            self.fail(node, "指针匹配与分支修饰尚未接入最小核心", "XE-CORE-0002")
+        if declaration.get("kind") != "Enum":
+            self.fail(node, "最小核心分支只接受已声明枚举，不默认开放 Maybe 或标量匹配",
+                      "XE-CORE-0002")
+        variants = {variant["name"]: tuple(self.type_of(t) for t in variant["payload"])
+                    for variant in declaration["variants"]}
+
+        def resolve_variant(selector):
+            return self.selector_cases(selector, value.type, variants)[0].tag
+
+        plans = plan_core_branch(node, value.type, variants,
+                                 resolve_variant=resolve_variant, reject=self.fail)
+        self.core_branch_plans[id(node)] = plans
+        self.consume(value)
+        before = deepcopy(self.scopes)
+        results, states = [], []
+        for arm, plan in zip(node["arms"], plans):
+            self.scopes = deepcopy(before)
+            payloads = [Value(type_, arm, origins=value.origins if self.carries_borrow(type_) else ())
+                        for type_ in plan.payload_types]
+            # An immediate return still uses self.result, i.e. the nearest real
+            # function. Inference must preserve the actual normal result here:
+            # expected types would weaken e.g. mut pointers inside Block tails
+            # before the exact branch join could detect the mismatch.
+            result = self.handle(arm["handler"], payloads, lift=False)
+            results.append(result)
+            if result.type != NEVER:
+                states.append(deepcopy(self.bindings()))
+        self.scopes = before
+        self.merge({}, states)
+        usable = [result for result in results if result.type != NEVER]
+        if any(result.type.name in {"Array", VIEW_NAME} for result in usable):
+            # A syntax-only descriptor can miss an Array behind an if whose
+            # other path returns. Do not let that reopen unreviewed recursive
+            # branch-result contexts at the typed public boundary.
+            self.fail(node, "数组/视图作为分支结果的递归上下文尚未接入", "XE-CORE-0002")
+        if not usable:
+            return Value(NEVER, node)
+        context = (expected if expected is not None and expected.name in NUMERIC else
+                   next((result.type for result in usable if result.type != INT_LITERAL), None))
+        if context is None and any(result.type == INT_LITERAL for result in usable):
+            self.fail(node, "分支整数字面量没有显式机器整数上下文或已定型同伴；默认整数规则未确认",
+                      "XE-CORE-0001")
+        if context is not None:
+            usable = [self.convert(result, context) if result.type == INT_LITERAL else result
+                      for result in usable]
+        type_ = usable[0].type
+        for result in usable[1:]:
+            if result.type != type_:
+                self.fail(node, f"分支正常结果必须同类型：{type_} 与 {result.type}", "XE-TYPE-0001")
+        origins = tuple(set().union(*(set(result.origins) for result in usable)))
+        return Value(type_, node, origins=origins)
+
+    def loop_target(self, node):
+        """Resolve in a separate, function-local namespace, nearest first.
+
+        A for target is installed only after its source has been evaluated;
+        a while target is already active during its condition. Inline pipeline
+        handlers execute here, whereas fn closures reset the entire stack.
+        """
+        name = node.get("target")
+        for target in reversed(self.loop_targets):
+            if name is None or target.label == name:
+                return target
+        if name is not None:
+            self.fail(node, f"找不到包围当前语句的循环标签 {name}", "XE-FLOW-0001",
+                      "在包围循环上声明 [label = 名字]；不能跨函数或闭包跳转")
+        self.fail(node, f"{node['kind'].lower()} 只能用于循环", "XE-FLOW-0001")
 
     def loop(self, node):
         source, element, iterator = None, None, False
@@ -2655,9 +3464,14 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 self.consume(source)
         before = deepcopy(self.scopes)
         self.loop_depths.append(len(self.scopes)-1)
+        target = LoopContext(node.get("label"), set() if node["kind"] == "While" else None)
+        self.loop_targets.append(target)
         self.scopes.append({})
+        condition, condition_jumps = None, set()
         if node["kind"] == "While":
-            self.convert(self.infer(node["condition"]), BOOL)
+            condition = self.convert(self.infer(node["condition"], BOOL), BOOL)
+            condition_jumps = target.condition_transfers or set()
+            target.condition_transfers = None
         else:
             assert source is not None and element is not None  # for 的源与元素已在上方解析。
             annotation = self.type_of(node["type"]) if node["type"] else self.default(element)
@@ -2683,14 +3497,20 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
             if element.name == "ptr":
                 origins = tuple((uid, element.mutable) for uid, _ in origins)
             self.declare(node["name"], annotation, node, origins=origins)
-        self.block(node["body"])
+        with self.control_path(condition is None or condition.type != NEVER):
+            self.block(node["body"])
         self.scope_escape(Value(UNIT, node), node, {b.uid for b in self.scopes[-1].values()})
         self.scopes.pop()
         after = deepcopy(self.bindings())
         self.scopes = before
         self.merge({}, [deepcopy(self.bindings()), after])
         self.loop_depths.pop()
-        return Value(UNIT, node)
+        self.loop_targets.pop()
+        # A local break can finish the loop; local continue goes back to its
+        # condition. Neither is a return from this enclosing function. Keep the
+        # baseline Unit loop rule unless the condition leaves it altogether.
+        return Value(NEVER if condition is not None and condition.type == NEVER
+                     and not condition_jumps else UNIT, node)
 
     def anonymous(self, node):
         captures = []
@@ -2721,7 +3541,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                 value = Value(value.type, capture,
                               origins=value.origins if self.carries_borrow(value.type) else ())
             captures.append((capture["name"], value))
-        saved = (self.scopes, self.result, self.last_uses, self.loop_depths,
+        saved = (self.scopes, self.result, self.last_uses, self.loop_depths, self.loop_targets,
                  self.parameter_roots, self.return_origins, self.invalid_roots,
                  self.function_unsafe_return, self.temporary_loans,
                  self._closure_bindings, self._closure_mode, self.position,
@@ -2730,6 +3550,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
         try:
             self.scopes, self.result = [{}], self.type_of(node["result"])
             self.last_uses, self.loop_depths, self.temporary_loans = names_used(node["body"]), [], []
+            self.loop_targets = []
             self.parameter_roots = self.static_roots | {uid for _, value in captures for uid, _ in value.origins}
             self.return_origins, self.invalid_roots = set(), {}
             self.function_unsafe_return = False
@@ -2782,7 +3603,7 @@ class Checker(TraitChecker, SyncChecker, GlobalChecker):
                     frozenset(self._closure_external_invalidated))
             return Value(type_, node, origins=tuple(o for _, value in captures for o in value.origins))
         finally:
-            (self.scopes, self.result, self.last_uses, self.loop_depths,
+            (self.scopes, self.result, self.last_uses, self.loop_depths, self.loop_targets,
              self.parameter_roots, self.return_origins, self.invalid_roots,
              self.function_unsafe_return, self.temporary_loans,
              self._closure_bindings, self._closure_mode, self.position,

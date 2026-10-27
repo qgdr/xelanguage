@@ -1,10 +1,11 @@
 """共同类型推断不能绕过整数字面量的目标类型边界。"""
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.semantic import check_source
 
 
-class NumericCommonTests(unittest.TestCase):
+class NumericCommonTests(LegacyTestCase):
     def assert_range_error(self, expression):
         source = f"fn main() {{ let byte: u8 = 1; let result = {expression}; }}"
         errors = check_source(source)

@@ -4,14 +4,19 @@
 工作流的真正执行须在用户决定 push 后由 GitHub-hosted runner 验收。
 """
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+from compiler.tests.legacy_support import LegacyTestCase
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release-check.yml"
 
 
-class ReleaseCIPolicyTests(unittest.TestCase):
+class ReleaseCIPolicyTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
@@ -54,8 +59,35 @@ class ReleaseCIPolicyTests(unittest.TestCase):
     def test_locked_install_and_one_shared_release_gate(self):
         self.assertIn("run: uv sync --locked --dev --python python", self.configuration)
         self.assertEqual(self.configuration.count("run: make release-check CC=gcc RELEASE_FLAGS=--require-clean"), 1)
+        self.assertNotIn("LANGUAGE_PROFILE=legacy", self.configuration)
         self.assertLess(self.configuration.index("run: uv sync --locked"),
                         self.configuration.index("run: make release-check"))
+
+    def test_shared_gate_keeps_all_regressions_and_requires_core_consumer(self):
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        gate = makefile.split("release-check:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("$(MAKE) compiler-test", gate)
+        self.assertIn("$(MAKE) release-package", gate)
+        self.assertIn("$(MAKE) release-smoke LANGUAGE_PROFILE=core", gate)
+        self.assertNotIn("LANGUAGE_PROFILE=legacy", gate)
+
+    @unittest.skipUnless(shutil.which("make"), "Makefile consumer checks need make")
+    def test_public_demo_and_private_development_guards_without_internal_directory(self):
+        with tempfile.TemporaryDirectory(prefix="xe-preview-make-") as directory:
+            for target in ("proof-check", "planner-check", "planner-sanitize"):
+                with self.subTest(target=target):
+                    result = subprocess.run(["make", "--no-print-directory", "-f", str(ROOT / "Makefile"),
+                                             "-n", target], cwd=directory, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("local development material", result.stderr)
+            for target, source in (("demo", "examples/core/main.xe"),
+                                   ("planner", "examples/dependency-planner/main.xe")):
+                with self.subTest(target=target):
+                    result = subprocess.run(["make", "--no-print-directory", "-f", str(ROOT / "Makefile"),
+                                             "-n", target], cwd=directory, capture_output=True, text=True)
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+                    self.assertIn(source, result.stdout)
+                    self.assertNotIn("--language-profile=legacy", result.stdout)
 
     def test_sanitizers_are_not_suppressed_or_failures_ignored(self):
         self.assertNotRegex(self.configuration, r"detect_leaks\s*[=:]\s*0")

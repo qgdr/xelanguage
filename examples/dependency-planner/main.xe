@@ -1,0 +1,194 @@
+// 固定容量的依赖规划器：稳定拓扑序、最早完成时间、循环检测。
+// 本例显式选择容量8，不使用动态容器；不是语言数组长度的上限。
+type Graph = Array[i32, 64];
+type Times = Array[i32, 8];
+type Counts = Array[i32, 8];
+type Order = Array[usize, 8];
+
+// 同一任务的状态放在同一类型里，避免多组平行数组靠下标约定关联。
+// Copy显式声明；这里每个字段都是已确认的基本Copy量。
+struct Task {
+    length: i32,
+    need: i32,
+    met: i32,
+    done: bool,
+    earliest: i32,
+    finish: i32,
+}
+impl Copy for Task {}
+
+impl Task {
+    fn empty() -> Self {
+        Self {
+            .length = 0;
+            .need = 0;
+            .met = 0;
+            .done = false;
+            .earliest = 0;
+            .finish = 0;
+        }
+    }
+
+    fn ready(self: Self@) -> bool { not self.done and self.need == self.met }
+
+    fn complete(self: Self@[mut]) -> Unit {
+        self.finish = self.earliest + self.length;
+        self.done = true;
+    }
+}
+
+type Tasks = Array[Task, 8];
+
+enum Candidate {
+    Found[usize],
+    Missing,
+}
+
+enum Outcome {
+    Complete[i32],
+    Cycle[usize],
+}
+
+fn[T] identity(value: T) -> T { value }
+
+// 整数乘加逐步检查溢出，行主序坐标不依赖隐式转换。
+fn coordinate(from: usize, to: usize) -> usize {
+    from * 8 + to
+}
+
+fn has_edge(graph: Graph@, from: usize, to: usize) -> bool {
+    0 < graph#⟦coordinate(from, to)⟧
+}
+
+fn count_predecessors(graph: Graph@) -> Counts {
+    let[mut] counts: Counts = [0, 0, 0, 0, 0, 0, 0, 0];
+    let[mut] from: usize = 0;
+    while from < 8 {
+        let[mut] to: usize = 0;
+        while to < 8 {
+            if has_edge(graph, from, to) {
+                counts⟦to⟧ = counts⟦to⟧ + 1;
+            }
+            to = to + 1;
+        }
+        from = from + 1;
+    }
+    counts
+}
+
+// 按编号寻找第一个可运行任务，让相同图的输出稳定、易于复现。
+fn find_ready(tasks: Tasks@) -> Candidate {
+    let[mut] task: usize = 0;
+    while task < 8 {
+        if tasks#⟦task⟧.ready() {
+            return Candidate::Found[task];
+        }
+        task = task + 1;
+    }
+    Candidate::Missing
+}
+
+// graph只读，tasks可写；方法签名进一步限制一次操作的接收权限。
+// #取得整个数组盒子，⟦i⟧再找到该数组的元素盒子，不插入隐式取址。
+fn complete_task(
+    graph: Graph@,
+    tasks: Tasks@[mut],
+    task: usize
+) -> Unit {
+    tasks#⟦task⟧.complete();
+    let[mut] next: usize = 0;
+    while next < 8 {
+        if has_edge(graph, task, next) {
+            tasks#⟦next⟧.met = tasks#⟦next⟧.met + 1;
+            if tasks#⟦next⟧.earliest < tasks#⟦task⟧.finish {
+                tasks#⟦next⟧.earliest = tasks#⟦task⟧.finish;
+            }
+        }
+        next = next + 1;
+    }
+}
+
+fn analyze(graph: Graph@, lengths: Times@, order: Order@[mut], finish: Times@[mut]) -> Outcome {
+    let need: Counts = identity[Counts](count_predecessors(graph));
+    let empty: Task = Task::empty();
+    let[mut] tasks: Tasks = [empty, empty, empty, empty, empty, empty, empty, empty];
+    let[mut] setup: usize = 0;
+    while setup < 8 {
+        tasks⟦setup⟧.length = lengths#⟦setup⟧;
+        tasks⟦setup⟧.need = need⟦setup⟧;
+        setup = setup + 1;
+    }
+    let[mut] processed: usize = 0;
+
+    while processed < 8 {
+        let candidate: Candidate << find_ready(tasks@);
+        candidate ? {
+            Candidate::Found :> task: usize -> {
+                order#⟦processed⟧ = task;
+                complete_task(graph, tasks@[mut], task);
+                // 对外报告按任务编号保存；遇到环时也保留已完成任务的结果。
+                finish#⟦task⟧ = tasks⟦task⟧.finish;
+            },
+            Candidate::Missing :> () -> {
+                // 立即分支不创建fn边界：return退出analyze。
+                return Outcome::Cycle[processed];
+            },
+        };
+        processed = processed + 1;
+    }
+
+    let[mut] longest: i32 = 0;
+    let[mut] task: usize = 0;
+    while task < 8 {
+        if longest < finish#⟦task⟧ {
+            longest = finish#⟦task⟧;
+        }
+        task = task + 1;
+    }
+    Outcome::Complete[longest]
+}
+
+fn report(result: Outcome, order: Order@, finish: Times@) -> Unit {
+    result ? {
+        Outcome::Complete :> length: i32 -> println("complete {}", length),
+        Outcome::Cycle :> processed: usize -> println("cycle {}", processed),
+    };
+    let[mut] slot: usize = 0;
+    while slot < 8 {
+        // order按输出槽索引，finish按原任务编号索引，二者有意分别输出。
+        println("task {} {} {}", slot, order#⟦slot⟧, finish#⟦slot⟧);
+        slot = slot + 1;
+    }
+}
+
+fn run_case(case_id: i32, graph: Graph, lengths: Times) -> Unit {
+    let[mut] order: Order = [8, 8, 8, 8, 8, 8, 8, 8];
+    let[mut] finish: Times = [0, 0, 0, 0, 0, 0, 0, 0];
+
+    println("case {}", case_id);
+    let row: View[i32@] = graph⟨0..8⟩[@];
+    let selected: View[i32@] = row⟨2..5⟩;
+    // 子视图仍用来源坐标2，不用重基后的0。
+    println("row {} {}", row⟦0⟧#, selected⟦2⟧#);
+
+    let result: Outcome << analyze(graph@, lengths@, order@[mut], finish@[mut]);
+    report(result, order@, finish@);
+}
+
+// GENERATED_CASES_BEGIN
+fn main() -> Unit {
+    // 0→1→2→3，再分成3→4→6与3→5→6，最后6→7。
+    let graph: Graph = [
+        0, 1, 0, 0, 0, 0, 0, 0,
+        0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 1, 0, 0,
+        0, 0, 0, 0, 0, 0, 1, 0,
+        0, 0, 0, 0, 0, 0, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 0
+    ];
+    let lengths: Times = [2, 3, 4, 2, 5, 2, 3, 1];
+    run_case(0, graph, lengths);
+}
+// GENERATED_CASES_END

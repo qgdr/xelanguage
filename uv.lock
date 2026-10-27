@@ -60,7 +60,7 @@ wheels = [
 
 [[package]]
 name = "xelanguage"
-version = "1.0.0rc1"
+version = "0.1.0a1"
 source = { virtual = "." }
 
 [package.dev-dependencies]

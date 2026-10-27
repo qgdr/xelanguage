@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.cli import main
@@ -25,7 +26,7 @@ def shape(value):
     return value
 
 
-class BindingModifierTests(unittest.TestCase):
+class BindingModifierTests(LegacyTestCase):
     def test_parameter_mutability_syntax_is_rejected_in_every_context(self):
         for parameter in ("let[mut] index: i32", "let index: i32", "var index: i32", "index[mut]: i32"):
             for source in (f"fn f({parameter}) {{}}",
@@ -82,7 +83,7 @@ class BindingModifierTests(unittest.TestCase):
         for flags in ([], ["--check-safety"], ["--check-borrows"]):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                statuses.append(main([str(source), "--check", *flags]))
+                statuses.append(main(["--language-profile=legacy", str(source), "--check", *flags]))
         self.assertEqual(statuses, [0, 0, 0])
 
     def test_default_mode_does_not_upgrade_shared_pointer_permissions(self):

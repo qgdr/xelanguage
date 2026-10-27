@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
@@ -16,7 +18,7 @@ FLAGS = ('-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-no-pie')
 
 
 @unittest.skipUnless(shutil.which('cc'), '需要 POSIX C 编译器')
-class SyncExecutionTests(unittest.TestCase):
+class SyncExecutionTests(LegacyTestCase):
     def run_xe(self, text, expected, inject=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,7 +45,7 @@ class SyncExecutionTests(unittest.TestCase):
                     'shared Xe\nshared Xe\nshared object expired\n')
 
     def test_threads_example(self):
-        self.run_xe((ROOT/'examples/threads/main.xe').read_text(), 'completed=2000 counter=2000\n')
+        self.run_xe(private_example('threads/main.xe').read_text(), 'completed=2000 counter=2000\n')
 
     def test_shared_resource_dropped_once_weak_survives(self):
         self.run_xe('''struct Item{n:i32,} impl Drop for Item{
@@ -187,7 +189,7 @@ class SyncExecutionTests(unittest.TestCase):
             })?[panic];println("{}",outer.join()?[panic]);}''','nested\n')
 
 
-class SyncSemanticTests(unittest.TestCase):
+class SyncSemanticTests(LegacyTestCase):
     def test_illegal_copy_write_and_consumption(self):
         for statement in ('let other=owner;', 'owner.ptr_mut();', 'let n=owner#;',
                           'owner@.join();'):

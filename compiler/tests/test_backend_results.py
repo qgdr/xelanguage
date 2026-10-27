@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 
 CC = shutil.which("cc") or ""
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")
-class ResultExecutionTests(unittest.TestCase):
+class ResultExecutionTests(LegacyTestCase):
     def run_source(self, text, *, sanitize=False, status=0):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:

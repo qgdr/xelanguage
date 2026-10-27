@@ -1,0 +1,32 @@
+// _只忽略名字：仍按类型接收输入，并保留资源清理责任。
+enum Message {
+    Text[String],
+    End,
+}
+
+fn ignore_message(message: Message) -> i32 {
+    message ? {
+        Message::Text :> _ -> {
+            println("handling text");
+            42
+        }, // 正常完成处理体后，清理刚才接收的String。
+        Message::End :> () -> 0,
+    }
+}
+
+fn finish(message: Message) -> str {
+    message ? {
+        Message::Text :> _: String -> {
+            println("before return");
+            return "done"; // 先计算返回值，再清理输入，最后返回finish的调用者。
+        },
+        Message::End :> () -> "empty",
+    }
+}
+
+fn main() -> Unit {
+    String::from("pipe input") |> _ -> { println("handling pipe"); };
+    let answer: i32 = ignore_message(Message::Text[String::from("branch input")]);
+    println("{}", answer);
+    println("{}", finish(Message::Text[String::from("early return input")]));
+}

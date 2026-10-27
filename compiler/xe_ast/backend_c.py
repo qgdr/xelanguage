@@ -7,6 +7,7 @@
 未支持的节点必须报诊断，不能产生空代码或忽略语义。
 """
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -17,6 +18,7 @@ from .backend_globals import GlobalBackend, integer_static_literal, literal_stri
 from .backend_sync import SyncBackend
 from .ffi import external_symbol
 from .formatting import format_argument_issue, format_field_issue, parse_format_template
+from .language_policy import current_profile
 from .parser import parse_source
 from .semantic import Checker, Signature
 from .semantic_sync import SYNC_TYPES
@@ -34,6 +36,7 @@ from .typesys import (
     STR,
     STRING,
     UNIT,
+    VIEW_NAME,
     Type,
     ptr,
     substitute,
@@ -95,6 +98,14 @@ class Scope:
     epoch: str | None = None
 
 
+@dataclass
+class LoopTarget:
+    label: str | None
+    scope_start: int
+    break_label: str | None
+    continue_label: str | None
+
+
 def identifier(name):
     """生成标识符不会与 C 关键字冲突，也支持 Xe Unicode 名称。"""
     return "xe_" + "".join(c if c.isascii() and c.isalnum() else f"_{ord(c):x}_" for c in name)
@@ -104,7 +115,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
     def __init__(self, checker: AnnotatedChecker):
         self.checker = checker
         self.tree = checker.tree
-        self.lines, self.scopes, self.loop_scopes = [], [], []
+        self.lines, self.scopes = [], []
+        self.loop_scopes: list[LoopTarget] = []
         self.global_slots = {}
         self.counter, self.indent = 0, 0
         self.signature: Signature | None = None
@@ -120,6 +132,7 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.thread_jobs, self.thread_definitions = {}, {}
         self.sync_used = False
         self.runtime_node = None
+        self.full_expression_depth = 0
 
     def fail(self, node, message) -> NoReturn:
         self.checker.fail(node, message, "XE-BACKEND-0001",
@@ -253,6 +266,23 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 capacity = " size_t cap;" if type_.name == "Vec" else ""
                 length = " size_t len;" if type_.name != "Box" else ""
                 self.definitions[type_] = f"struct {cname} {{ {ctype} *data;{length}{capacity} }};"
+            return self.tuple_names[type_]
+        if type_.name == VIEW_NAME:
+            if type_ not in self.tuple_names:
+                # View[P] stores the complete locator pointer P, including its
+                # actual pointer depth.  Do not append another '*' here: a
+                # pointer element already contributes its own extra level.
+                # Keeping both original-coordinate boundaries is necessary for an
+                # empty view: its anchor must not be reconstructed from len.
+                cname = identifier(f"coordinate_view_layout_{len(self.tuple_names)}")
+                self.tuple_names[type_] = cname
+                self.layout_types[type_] = type_
+                pointer = type_.args[0]
+                if pointer.name != "ptr":
+                    self.fail(at, "View[P] 的运行布局需要完整定位指针 P")
+                ctype = self.ctype(pointer, at)
+                self.definitions[type_] = (f"struct {cname} {{ {ctype} data; "
+                                           "size_t lower, upper; };")
             return self.tuple_names[type_]
         if type_.name == "Range":
             if type_ not in self.tuple_names:
@@ -689,6 +719,47 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         finally:
             self.runtime_node = previous
 
+    def has_temporary_array_source(self, node):
+        """Find admitted anonymous Array boxes, not arbitrary temporary values.
+
+        The checker, rather than syntax such as Call, decides whether an Index
+        source needs materialization.  A named Array or explicit pointer
+        dereference must keep its original storage identity.
+        """
+        if isinstance(node, list):
+            return any(self.has_temporary_array_source(child) for child in node)
+        if not isinstance(node, dict):
+            return False
+        if node.get("kind") in {"Function", "AnonymousFunction"}:
+            return False  # A separate function body owns its evaluation frames.
+        plan = getattr(self.checker, "access_plans", {}).get(id(node))
+        if plan is not None and getattr(plan, "temporary_source", False):
+            return True
+        return any(self.has_temporary_array_source(child) for key, child in node.items()
+                   if key not in {"span", "_sources"})
+
+    @contextmanager
+    def full_expression_scope(self):
+        """Keep anonymous Array sources alive through the entire operation.
+
+        This is a lowering scope, not a new source block or an extension of a
+        pointer's lifetime.  Static source/escape checks have already run.
+        Nested argument blocks use their own scopes and therefore cannot end
+        an earlier argument's outer full-expression scope at their semicolons.
+        """
+        self.line("{ /* full expression: temporary Array source */")
+        self.indent += 1
+        self.scopes.append(Scope())
+        self.full_expression_depth += 1
+        try:
+            yield
+        finally:
+            self.cleanup([self.scopes[-1]])
+            self.scopes.pop()
+            self.full_expression_depth -= 1
+            self.indent -= 1
+            self.line("}")
+
     def emit_index_recheck(self, check):
         code, index_node = check
         previous = self.runtime_node
@@ -702,6 +773,19 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         kind = node["kind"]
         if kind == "Binding":
             type_ = self.checker.binding_types[id(node)]
+            if (current_profile() == "core" and node["value"] is not None
+                    and self.has_temporary_array_source(node["value"])):
+                # The destination has the source block's lifetime; only the
+                # RHS's anonymous boxes belong to the full expression.  Do
+                # not put this named destination inside the temporary C block.
+                slot = self.storage(type_, node["name"])
+                with self.full_expression_scope():
+                    value = self.expression(node["value"], type_)
+                    if value.type == NEVER:
+                        return True
+                    self.assign(slot, value, node)
+                self.scopes[-1].names[node["name"]] = slot
+                return False
             value = self.expression(node["value"], type_) if node["value"] else None
             if value and value.type == NEVER:
                 return True
@@ -759,6 +843,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         elif kind == "Return":
             assert self.signature is not None
             value = self.expression(node["value"], self.signature.result) if node["value"] else CValue("0", UNIT)
+            if value.type == NEVER:
+                return True
             returned = self.storage(self.signature.result, "early_return")
             self.assign(returned, value, node)
             self.transfer(self.value(returned))
@@ -766,12 +852,25 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             self.line(f"return {returned.name};")
             return True
         elif kind in {"Break", "Continue"}:
-            if not self.loop_scopes:
-                self.fail(node, "后端没有对应循环")
-            self.cleanup(self.scopes[self.loop_scopes[-1]:])
-            self.line(kind.lower() + ";")
+            target = self.resolve_loop_target(node)
+            self.cleanup(self.scopes[target.scope_start:])
+            if node.get("target") is not None:
+                label = target.break_label if kind == "Break" else target.continue_label
+                assert label is not None  # Named targets always have C destinations.
+                self.line(f"goto {label};")
+            else:
+                self.line(kind.lower() + ";")
             return True
         else:
+            if (current_profile() == "core"
+                    and self.has_temporary_array_source(node["expression"])):
+                with self.full_expression_scope():
+                    value = self.expression(node["expression"])
+                    if value.type == NEVER:
+                        return True
+                    if value.slot and not self.checker.copyable(value.type):
+                        self.cleanup_slot(value.slot)
+                return False
             value = self.expression(node["expression"])
             if value.type == NEVER:
                 return True
@@ -826,10 +925,21 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
     def lower_expression(self, node, expected=None):
         kind = node["kind"]
         type_ = self.type_at(node, expected)
-        if kind in {"Tuple", "Array"} and type_ == NEVER:
+        access = getattr(self.checker, "access_plans", {}).get(id(node))
+        if access is not None:
+            # Only a checked plan authorizes intrinsic Array/View access.
+            # Array Index finds an element box, while View Index produces P;
+            # the backend must preserve that result category, not guess from
+            # the fact that both operations use the same index delimiters.
+            return self.coordinate_access(node, access)
+        if (type_ == NEVER and (kind in {"Tuple", "Array", "StructLiteral"}
+                or kind == "BracketApply" and id(node) not in self.checker.index_accesses)):
             # An aggregate that returns during construction has no completed
             # layout. Own each evaluated member until return cleanup runs.
-            for element in node["elements"]:
+            elements = (node["arguments"] if kind == "BracketApply" else
+                        [field["value"] for field in node["fields"]] if kind == "StructLiteral" else
+                        node["elements"])
+            for element in elements:
                 value = self.expression(element)
                 if value.type == NEVER:
                     return value
@@ -893,17 +1003,25 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             return self.anonymous_function(node, type_)
         if kind == "Cast":
             value = self.expression(node["operand"])
+            if value.type == NEVER:
+                return value
             if node["modifiers"]:
                 self.fail(node, "checked/wrap 数值转换尚未接入 C 后端")
             return self.temp(type_, f"({self.ctype(type_)})({value.code})")
         if kind == "Borrow":
             value = self.expression(node["operand"])
+            if value.type == NEVER:
+                return value
             return self.temp(type_, f"&({value.code})")
         if kind == "Dereference":
             value = self.expression(node["operand"])
+            if value.type == NEVER:
+                return value
             return CValue(f"*({value.code})", type_)
         if kind == "FieldAccess":
             value = self.expression(node["object"])
+            if value.type == NEVER:
+                return value
             base = value.type.args[0] if value.type.name == "ptr" else value.type
             if base.name in self.checker.types:
                 # Inspecting fields, unlike holding an address, needs a complete
@@ -956,15 +1074,20 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             self.initialized(slot)
             return self.value(slot)
         if kind == "Range":
-            lower = self.argument(self.expression(node["lower"], type_.args[0])) if node["lower"] else CValue("0", type_.args[0])
-            upper = self.argument(self.expression(node["upper"], type_.args[0])) if node["upper"] else CValue("0", type_.args[0])
+            endpoint = type_.args[0] if type_.name == "Range" else None
+            lower = self.argument(self.expression(node["lower"], endpoint)) if node["lower"] else CValue("0", endpoint or I32)
+            if lower.type == NEVER:
+                return lower
+            upper = self.argument(self.expression(node["upper"], endpoint)) if node["upper"] else CValue("0", endpoint or I32)
+            if upper.type == NEVER:
+                return upper
             values = [lower.code, upper.code, "true" if node["lower"] else "false",
                       "true" if node["upper"] else "false", "true" if node["operator"] == "..=" else "false"]
             return self.temp(type_, f"({self.ctype(type_)}){{{', '.join(values)}}}")
         if kind in {"Propagate", "Unwrap"}:
             return self.unwrap(node, type_, propagate=kind == "Propagate")
         if kind == "Pipeline":
-            # 先快照输入再执行处理器，资源所有权沿管道转交。
+            # 先快照输入再执行处理器；和普通实参一样，Copy 复制、资源转交。
             handler = node["handler"]
             input_type = None
             if handler["kind"] == "HandlerBinding" and handler["parameters"][0]["type"]:
@@ -989,6 +1112,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             return CValue("0", NEVER) if type_ == NEVER else self.value(slot)
         if kind == "If":
             condition = self.expression(node["condition"], BOOL)
+            if condition.type == NEVER:
+                return condition
             slot = self.storage(UNIT if type_ == NEVER else type_)
             self.line(f"if ({condition.code})")
             self.block(node["then"], slot)
@@ -1008,11 +1133,17 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             return CValue("0", NEVER) if type_ == NEVER else self.value(slot)
         if kind == "Unary":
             # 不先生成 +128 的 i8 临时变量，否则 -128 会被截断。
-            if node["operator"] == "-" and node["operand"]["kind"] == "Literal" and node["operand"]["literal_kind"] == "INTEGER":
-                number = node["operand"]["value"]
+            negative_operand = node["operand"]
+            if current_profile() == "core":
+                while negative_operand["kind"] == "Group":
+                    negative_operand = negative_operand["expression"]
+            if node["operator"] == "-" and negative_operand["kind"] == "Literal" and negative_operand["literal_kind"] == "INTEGER":
+                number = negative_operand["value"]
                 code = "(-INT64_C(9223372036854775807)-1)" if number == 2**63 else f"(-INT64_C({number}))"
                 return self.temp(type_, code)
             value = self.expression(node["operand"], type_)
+            if value.type == NEVER:
+                return value
             if node["operator"] == "not":
                 return self.temp(BOOL, f"!({value.code})")
             if node["operator"] == "bitnot":
@@ -1024,6 +1155,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             return self.temp(type_, code)
         if kind == "Binary":
             left = self.argument(self.expression(node["left"], type_))
+            if left.type == NEVER:
+                return left
             operator = node["operator"]
             if operator in {"and", "or"}:
                 result = self.storage(BOOL, initial=left.code)
@@ -1031,7 +1164,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.indent += 1
                 self.scopes.append(Scope())
                 right = self.expression(node["right"], BOOL)
-                self.line(f"{result.name} = {right.code};")
+                if right.type != NEVER:
+                    self.line(f"{result.name} = {right.code};")
                 self.cleanup([self.scopes[-1]])
                 self.scopes.pop()
                 self.indent -= 1
@@ -1039,21 +1173,29 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 return self.value(result)
             if operator in {"bitshl", "bitshr"}:
                 right = self.expression(node["right"])
+                if right.type == NEVER:
+                    return right
                 # 负次数转换为大无符号值，runtime 的 >= width 检查仍会拒绝它。
                 return self.temp(type_, f"xe_{operator}_{type_.name}({left.code}, (uint64_t)({right.code}))")
             right = self.expression(node["right"], type_)
+            if right.type == NEVER:
+                return right
             if operator in {"bitand", "bitor", "bitxor"}:
                 symbol = {"bitand": "&", "bitor": "|", "bitxor": "^"}[operator]
                 return self.temp(type_, f"({self.ctype(type_)})(({left.code}) {symbol} ({right.code}))")
             if operator == "%" and type_.name in {"f32", "f64"}:
                 self.fail(node, "浮点余数运算尚未接入 C 后端")
             operations = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "rem"}
-            code = f"xe_{operations[operator]}_{type_.name}({left.code}, {right.code})" if type_.name not in {"f32", "f64"} else f"({left.code}) {operator} ({right.code})"
+            operation = "core_rem" if operator == "%" and current_profile() == "core" else operations[operator]
+            code = f"xe_{operation}_{type_.name}({left.code}, {right.code})" if type_.name not in {"f32", "f64"} else f"({left.code}) {operator} ({right.code})"
             return self.temp(type_, code)
         if kind == "ComparisonChain":
             operand_type = next((self.type_at(n) for n in node["operands"]
-                                 if self.type_at(n) != I32 or self.checker.expression_types.get(id(n)) != INT_LITERAL), I32)
+                                 if self.type_at(n) != NEVER and (self.type_at(n) != I32
+                                 or self.checker.expression_types.get(id(n)) != INT_LITERAL)), I32)
             first = self.expression(node["operands"][0], operand_type)
+            if first.type == NEVER:
+                return first
             previous = self.storage(first.type, initial=first.code)
             result = self.storage(BOOL, initial="true")
             for operator, operand in zip(node["operators"], node["operands"][1:]):
@@ -1061,23 +1203,124 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.indent += 1
                 self.scopes.append(Scope())
                 next_value = self.expression(operand, first.type)
-                code = f"xe_str_compare({previous.name}, {next_value.code}) {operator} 0" if first.type == STR else f"{previous.name} {operator} {next_value.code}"
-                self.line(f"{result.name} = ({code});")
-                self.line(f"{previous.name} = {next_value.code};")
+                if next_value.type != NEVER:
+                    code = f"xe_str_compare({previous.name}, {next_value.code}) {operator} 0" if first.type == STR else f"{previous.name} {operator} {next_value.code}"
+                    self.line(f"{result.name} = ({code});")
+                    self.line(f"{previous.name} = {next_value.code};")
                 self.cleanup([self.scopes[-1]])
                 self.scopes.pop()
                 self.indent -= 1
                 self.line("}")
-            return self.value(result)
+                if next_value.type == NEVER:
+                    # Later pairs are guarded by all earlier comparisons. An
+                    # earlier false pair can still produce a normal bool.
+                    break
+            return CValue("0", NEVER) if type_ == NEVER else self.value(result)
         if kind in {"For", "While"}:
             return self.loop(node)
         if kind == "Unsafe":
             self.fail(node, "unsafe 裸指针操作尚未接入 C 后端")
         self.fail(node, f"C 后端尚未实现 {kind}")
 
+    def coordinate_access(self, node, plan):
+        """Lower non-owning location/restriction without copying its owner.
+
+        A view's data points at its lower coordinate, not coordinate zero.
+        Guard before unsigned subtraction or pointer arithmetic.  The source
+        and all written endpoints are evaluated once, in source order; known
+        semantic bounds are never substituted for those evaluations.
+        """
+        if getattr(plan, "temporary_source", False) and not self.full_expression_depth:
+            self.fail(node, "临时 Array 索引缺少已接入的完整表达式清理帧")
+        if plan.kind == "index" and node["kind"] == "Index":
+            source_node, selector = node["target"], node["index"]
+        elif plan.kind == "slice" and node["kind"] in {"Restriction", "ViewConstruct"}:
+            restriction = node["target"] if node["kind"] == "ViewConstruct" else node
+            if restriction["kind"] != "Restriction":
+                self.fail(node, "视图构造需要显式范围限制节点")
+            source_node, selector = restriction["target"], restriction["range"]
+        else:
+            self.fail(node, "定位计划与源码 AST 形状不一致")
+        source = self.expression(source_node)
+        if source.type == NEVER:
+            return source
+        base = plan.source_type
+        if base.name == "Array":
+            # argument(source) would make a by-value Array copy and might
+            # transfer resource flags.  A locator instead preserves the
+            # storage identity by taking its address before evaluating i/l/u.
+            owner = self.temp(ptr(base), f"&({source.code})")
+            data = f"({owner.code})->items"
+            parent_lower, parent_upper = "0", base.args[1].name
+            if base.args[0].name in self.checker.types:
+                self.define_type(base.args[0])
+        elif base.name == VIEW_NAME:
+            # Freeze this operation's descriptor, rather than re-reading a
+            # named view after an endpoint function has changed that binding.
+            # This implementation snapshot does not itself grant source-level
+            # Copy permission or transfer any element ownership.
+            descriptor = self.temp(base, source.code)
+            data = f"({descriptor.code}).data"
+            parent_lower = f"({descriptor.code}).lower"
+            parent_upper = f"({descriptor.code}).upper"
+            pointer = base.args[0]
+            if pointer.name != "ptr":
+                self.fail(node, "视图来源缺少已检查的定位指针类型")
+            if pointer.args[0].name in self.checker.types:
+                self.define_type(pointer.args[0])
+        else:
+            self.fail(node, "定位只接收已检查的数组或原坐标视图")
+        if plan.kind == "index":
+            index = self.argument(self.expression(selector, Type("usize")))
+            if index.type == NEVER:
+                return index
+            self.line(f"if ({index.code} < {parent_lower} || {index.code} >= {parent_upper}) "
+                      'xe_panic("array index out of bounds");')
+            address_code = f"{data} + ({index.code} - {parent_lower})"
+            if base.name == "Array":
+                # Freeze the checked element address once.  The expression is
+                # an actual C lvalue: reading, assigning and explicit @ all
+                # reuse this location and never copy the owning Array.
+                address = self.temp(ptr(base.args[0], plan.mutable), address_code)
+                return CValue(f"*({address.code})", self.type_at(node))
+            # A View lookup produces an address quantity, not the descriptor's
+            # data-field box and not an implicit dereference of that address.
+            return self.temp(self.type_at(node), address_code)
+        range_ = selector
+        while range_["kind"] == "Group":
+            range_ = range_["expression"]
+        if range_["kind"] != "Range" or range_["operator"] not in {"..", "..="}:
+            self.fail(node, "原坐标切片只接收已检查的连续范围")
+        lower = (self.argument(self.expression(range_["lower"], Type("usize")))
+                 if range_["lower"] else CValue(parent_lower, Type("usize")))
+        if lower.type == NEVER:
+            return lower
+        upper = (self.argument(self.expression(range_["upper"], Type("usize")))
+                 if range_["upper"] else CValue(parent_upper, Type("usize")))
+        if upper.type == NEVER:
+            return upper
+        if range_["operator"] == "..=":
+            # Check the written inclusive endpoint *before* forming end + 1.
+            # SIZE_MAX is consequently rejected rather than wrapping to zero.
+            self.line(f"if ({lower.code} < {parent_lower} || {lower.code} > {upper.code} "
+                      f"|| {upper.code} >= {parent_upper}) "
+                      'xe_panic("slice range out of bounds");')
+            upper = self.temp(Type("usize"), f"{upper.code} + 1")
+        else:
+            self.line(f"if ({lower.code} < {parent_lower} || {lower.code} > {upper.code} "
+                      f"|| {upper.code} > {parent_upper}) "
+                      'xe_panic("slice range out of bounds");')
+        result = self.type_at(node)
+        return self.temp(result, f"({self.ctype(result)}){{"
+                         f".data = {data} + ({lower.code} - {parent_lower}), "
+                         f".lower = {lower.code}, .upper = {upper.code}}}")
+
     def enum_value(self, node, type_):
         obj = node["object"]
-        if obj["kind"] not in {"Name", "AssociatedAccess"} or not self.variants(type_):
+        # The checker already resolved [] as indexing or variant construction.
+        # Enum elements (and locals named like variants) make result-type and
+        # spelling heuristics ambiguous here.
+        if id(node) in self.checker.index_accesses:
             value = self.expression(obj)
             base = value.type.args[0] if value.type.name == "ptr" else value.type
             if base.name not in {"Array", "Slice", "SliceMut", "Vec"}:
@@ -1101,6 +1344,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 array = f"*({container.code})"
                 rechecks = ()
             index = self.argument(self.expression(node["arguments"][0], Type("usize")))
+            if index.type == NEVER:
+                return index
             # The inner index expression itself may resize an outer Vec.
             for prior_check in rechecks:
                 self.emit_index_recheck(prior_check)
@@ -1135,6 +1380,8 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         after ownership of its active payload has been transferred.
         """
         subject = self.argument(operand or self.expression(node["operand"]))
+        if subject.type == NEVER:
+            return subject
         self.line(f"if (({subject.code}).tag != 0) {{")
         self.indent += 1
         self.scopes.append(Scope())
@@ -1282,11 +1529,19 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         return [(condition, payloads)]
 
     def branch(self, node, type_):
+        if current_profile() == "core":
+            return self.core_branch(node, type_)
         result = self.storage(UNIT if type_ == NEVER else type_, "branch_result")
         self.line("{")
         self.indent += 1
         self.scopes.append(Scope())
         input_value = self.expression(node["input"])
+        if input_value.type == NEVER:
+            self.cleanup([self.scopes[-1]])
+            self.scopes.pop()
+            self.indent -= 1
+            self.line("}")
+            return input_value
         borrowed = "borrow" in node["modifiers"]
         mutable = "mut" in node["modifiers"]
         if borrowed:
@@ -1340,6 +1595,72 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             self.line("}")
         if not wildcard:
             self.line('else { xe_panic("invalid enum tag or unmatched value"); }')
+        self.cleanup([self.scopes[-1]])
+        self.scopes.pop()
+        self.indent -= 1
+        self.line("}")
+        return CValue("0", NEVER) if type_ == NEVER else self.value(result)
+
+    def core_branch(self, node, type_):
+        """Lower only the exact tag/input plan checked for the reviewed core.
+
+        Else is not the archived wildcard: its finite remaining tags are known
+        before C generation. Keep their guards even on the final arm, so an
+        invalid tag cannot make us read an inactive payload. Whole delivery
+        transfers the complete subject through the ordinary handler path; it
+        must not also extract or transfer ownership of the payload first.
+        """
+        plans = getattr(self.checker, "core_branch_plans", {}).get(id(node))
+        if plans is None or len(plans) != len(node["arms"]):
+            self.fail(node, "核心枚举分支缺少已经检查的逐臂交付计划")
+        result = self.storage(UNIT if type_ == NEVER else type_, "branch_result")
+        self.line("{")
+        self.indent += 1
+        self.scopes.append(Scope())
+        input_value = self.expression(node["input"])
+        if input_value.type == NEVER:
+            self.cleanup([self.scopes[-1]])
+            self.scopes.pop()
+            self.indent -= 1
+            self.line("}")
+            return input_value
+        # Evaluate the original expression once and give the branch one owning
+        # subject. Each runtime path transfers it either as a whole or as its
+        # one active non-Copy payload, never both.
+        subject = self.argument(input_value)
+        tags = {name: tag for tag, (name, _) in enumerate(self.variants(subject.type))}
+        for index, (arm, plan) in enumerate(zip(node["arms"], plans)):
+            if not plan.tags or any(name not in tags for name in plan.tags):
+                self.fail(arm, "核心分支的已检查标签计划与枚举布局不一致")
+            tests = [f"({subject.code}).tag == {tags[name]}" for name in plan.tags]
+            condition = " || ".join(f"({test})" for test in tests)
+            self.line(f"{'if' if index == 0 else 'else if'} ({condition}) {{")
+            self.indent += 1
+            self.scopes.append(Scope())
+            if plan.whole:
+                payloads = [subject]
+            else:
+                payloads = []
+                for position, payload_type in enumerate(plan.payload_types):
+                    last = plan.tags[-1]
+                    address = f"&({self.payload_code(subject.code, last, position)})"
+                    for name, test in reversed(list(zip(plan.tags[:-1], tests[:-1]))):
+                        chosen = self.payload_code(subject.code, name, position)
+                        address = f"(({test}) ? &({chosen}) : ({address}))"
+                    # Select an address, not eagerly evaluated payload values.
+                    # This is important for a common resource type whose other
+                    # variant fields have never been initialized.
+                    payloads.append(CValue(f"*({address})", payload_type))
+                if any(not self.checker.copyable(payload.type) for payload in payloads):
+                    payloads = [self.argument(payload) for payload in payloads]
+                    self.transfer(subject)
+            value = self.handle(arm["handler"], payloads, result.type)
+            self.assign(result, value, arm)
+            self.cleanup([self.scopes[-1]])
+            self.scopes.pop()
+            self.indent -= 1
+            self.line("}")
+        self.line('else { xe_panic("invalid enum tag"); }')
         self.cleanup([self.scopes[-1]])
         self.scopes.pop()
         self.indent -= 1
@@ -1470,9 +1791,10 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 return self.sync_new(node, owner)
             if owner and owner.name == "Thread" and member == "spawn":
                 return self.thread_spawn(node, owner)
-        if (callee["kind"] == "AssociatedAccess" and callee["member"] in {"new", "with_capacity"}
-                and self.type_at(node).name == "Vec" and id(node) not in self.checker.call_targets):
-            return self.vector_new(node, callee["member"])
+            if owner and owner.name == "Vec" and member in {"new", "with_capacity"}:
+                # The result is Never when evaluating capacity exits. Resolve
+                # the constructor from its checked owner, before lowering it.
+                return self.vector_new(node, member)
         if (callee["kind"] == "AssociatedAccess" and callee["member"] == "new"
                 and id(node) not in self.checker.call_targets):
             owner = self.checker.expression_type(callee["object"])
@@ -1550,8 +1872,12 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                     if not self.checker.copyable(target):
                         self.fail(node, "消耗资源的按值方法不能通过指针调用")
                     receiver = CValue(f"*({receiver.code})", target)
-                arguments = [self.argument(receiver)] + [self.argument(self.expression(n, t)) for n, t in
-                                          zip(node["arguments"], signature.parameters[1:])]
+                arguments = [self.argument(receiver)]
+                for argument, parameter in zip(node["arguments"], signature.parameters[1:]):
+                    value = self.expression(argument, parameter)
+                    if value.type == NEVER:
+                        return value
+                    arguments.append(self.argument(value))
                 return self.invoke(signature, self.method_name(base.name, name), values=arguments)
             arguments = []
             for argument in node["arguments"]:
@@ -1769,11 +2095,17 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
     def string_slice(self, node, receiver):
         """Ranges are evaluated explicitly; both bounds and UTF-8 boundaries are checked."""
         range_ = node["arguments"][0]
+        if self.type_at(range_) == NEVER:
+            return self.expression(range_)
         if range_["kind"] != "Range" or range_["operator"] != "..":
             self.fail(range_, "slice_bytes 当前需要右端不包含的范围表达式")
         view = f"*({receiver.code})" if receiver.type.name == "ptr" else receiver.code
         lower = self.argument(self.expression(range_["lower"], Type("usize"))) if range_["lower"] else CValue("0", Type("usize"))
+        if lower.type == NEVER:
+            return lower
         upper = self.argument(self.expression(range_["upper"], Type("usize"))) if range_["upper"] else CValue(f"({view}).len", Type("usize"))
+        if upper.type == NEVER:
+            return upper
         result_type = self.type_at(node)
         result = self.temp(result_type, f"({self.ctype(result_type)}){{.tag = 1}}")
         self.line(f"if (xe_str_slice_valid({view}, {lower.code}, {upper.code})) {{")
@@ -1786,10 +2118,16 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
 
     def array_slice(self, node, receiver, base):
         range_ = node["arguments"][0]
+        if self.type_at(range_) == NEVER:
+            return self.expression(range_)
         if range_["kind"] != "Range" or range_["operator"] != "..":
             self.fail(range_, "数组切片当前需要右端不包含的范围表达式")
         lower = self.argument(self.expression(range_["lower"], Type("usize"))) if range_["lower"] else CValue("0", Type("usize"))
+        if lower.type == NEVER:
+            return lower
         upper = self.argument(self.expression(range_["upper"], Type("usize"))) if range_["upper"] else CValue(base.args[1].name, Type("usize"))
+        if upper.type == NEVER:
+            return upper
         self.line(f"if ({lower.code} > {upper.code} || {upper.code} > {base.args[1].name}) xe_panic(\"slice range out of bounds\");")
         array = f"*({receiver.code})" if receiver.type.name == "ptr" else receiver.code
         result = self.type_at(node)
@@ -1797,11 +2135,11 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
 
     def try_integer_conversion(self, node):
         """No cast happens before the signedness-aware range check succeeds."""
-        result_type = self.type_at(node)
-        target = result_type.args[0]
         value = self.argument(self.expression(node["arguments"][0]))
         if value.type == NEVER:
             return value
+        result_type = self.type_at(node)
+        target = result_type.args[0]
         if value.type.name in {"f32", "f64"} or target.name in {"f32", "f64"}:
             self.fail(node, "浮点失败转换尚未确定语言规则")
         name = target.name
@@ -1896,21 +2234,54 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
                 self.line(f"xe_string_drop(&({value.code}));")
         return CValue("0", UNIT)
 
+    def push_loop_target(self, node):
+        label = node.get("label")
+        target = LoopTarget(label, len(self.scopes) - 1,
+                            self.fresh("loop_break") if label is not None else None,
+                            self.fresh("loop_continue") if label is not None else None)
+        self.loop_scopes.append(target)
+        return target
+
+    def resolve_loop_target(self, node):
+        requested = node.get("target")
+        for target in reversed(self.loop_scopes):
+            if requested is None or target.label == requested:
+                return target
+        self.fail(node, "后端没有对应循环目标")
+
+    def emit_loop_label(self, label):
+        if label is not None:
+            # A label must precede a statement, even at the end of a C11 block.
+            self.line(f"{label}: ;")
+
     def loop(self, node):
         if node["kind"] == "While":
             self.line("while (true) {")
             self.indent += 1
             self.scopes.append(Scope())
+            # The condition executes inside this loop too. A transfer in a
+            # condition must not accidentally clean up an enclosing loop's
+            # resources or be mistaken for a return from the function.
+            target = self.push_loop_target(node)
             condition = self.expression(node["condition"], BOOL)
+            if condition.type == NEVER:
+                self.cleanup([self.scopes[-1]])
+                self.emit_loop_label(target.continue_label)
+                self.loop_scopes.pop()
+                self.scopes.pop()
+                self.indent -= 1
+                self.line("}")
+                self.emit_loop_label(target.break_label)
+                return CValue("0", self.type_at(node))
             self.line(f"if (!({condition.code})) {{")
             self.indent += 1
             self.cleanup([self.scopes[-1]])
             self.line("break;")
             self.indent -= 1
             self.line("}")
-            self.loop_scopes.append(len(self.scopes)-1)
             self.block(node["body"])
             self.cleanup([self.scopes[-1]])
+            self.emit_loop_label(target.continue_label)
             self.loop_scopes.pop()
             self.scopes.pop()
         else:
@@ -1942,13 +2313,16 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
             scope = Scope()
             scope.names[node["name"]] = Slot(name, type_)
             self.scopes.append(scope)
-            self.loop_scopes.append(len(self.scopes)-1)
+            target = self.push_loop_target(node)
             self.block(node["body"])
             self.cleanup([self.scopes[-1]])
+            # Jumping here still reaches the C for increment expression.
+            self.emit_loop_label(target.continue_label)
             self.loop_scopes.pop()
             self.scopes.pop()
         self.indent -= 1
         self.line("}")
+        self.emit_loop_label(target.break_label)
         return CValue("0", UNIT)
 
     def iterator_loop(self, node, base):
@@ -1965,15 +2339,15 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.line("while (true) {")
         self.indent += 1
         self.scopes.append(Scope())
-        self.loop_scopes.append(len(self.scopes)-1)
+        target = self.push_loop_target(node)
         signature = self.checker.for_iterators[id(node)]
         if signature is None:
             produced = self.from_fn_next(pointer, node)
         elif isinstance(signature, str):
             produced = self.text_next(node, base, pointer.code)
         else:
-            target = self.checker.call_targets.get(id(node))
-            name = self.function_name(target) if target else self.method_name(base.name, "next")
+            call_target = self.checker.call_targets.get(id(node))
+            name = self.function_name(call_target) if call_target else self.method_name(base.name, "next")
             produced = self.invoke(signature, name, values=[pointer])
         stop_tag = self.variant_tag(produced.type, "Stop", node)
         self.line(f"if (({produced.code}).tag == {stop_tag}) {{")
@@ -1990,10 +2364,14 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.scopes[-1].names[node["name"]] = slot
         self.block(node["body"])
         self.cleanup([self.scopes[-1]])
+        self.emit_loop_label(target.continue_label)
         self.loop_scopes.pop()
         self.scopes.pop()
         self.indent -= 1
         self.line("}")
+        # An owned iterator is outside the iteration scope. A named break
+        # reaches its cleanup, while continue retains it for the next next().
+        self.emit_loop_label(target.break_label)
         self.cleanup([self.scopes[-1]])
         self.scopes.pop()
         self.indent -= 1
@@ -2014,16 +2392,26 @@ class CBackend(GlobalBackend, SyncBackend, ContainerBackend):
         self.line(f"{self.ctype(element_type)} {name} = &(({pointer.code})->{items}[{index}]);")
         scope.names[node["name"]] = Slot(name, element_type)
         self.scopes.append(scope)
-        self.loop_scopes.append(len(self.scopes)-1)
+        target = self.push_loop_target(node)
         self.block(node["body"])
         self.cleanup([self.scopes[-1]])
+        self.emit_loop_label(target.continue_label)
         self.loop_scopes.pop()
         self.scopes.pop()
         self.indent -= 1
         self.line("}")
+        self.emit_loop_label(target.break_label)
         return CValue("0", UNIT)
 
     def generate(self):
+        # Defend the final Xe-to-C boundary even for direct AST/backend clients.
+        from .admission import validate_core_source
+        validate_core_source(self.checker.source, self.checker.tree)
+        if self.checker.diagnostics:
+            # Direct AST clients must not lower a failed checker, whose side
+            # tables may be incomplete. Warnings live in a separate list and
+            # remain compilable under their existing core/legacy contracts.
+            raise self.checker.diagnostics[0]
         for name, binding in getattr(self.checker, "globals", {}).items():
             self.global_slots[name] = Slot(identifier("global_" + name), binding.type)
         for name, declaration in self.checker.types.items():

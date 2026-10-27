@@ -2,6 +2,7 @@
 import copy
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
@@ -9,7 +10,7 @@ from compiler.xe_ast.stdlib_io import READLINE_RESULT, io_function, normalize_io
 from compiler.xe_ast.typesys import IO_ERROR, NONE, STRING, callable_type
 
 
-class StandardIoSemanticTests(unittest.TestCase):
+class StandardIoSemanticTests(LegacyTestCase):
     def check(self, text):
         tree = parse_source(text, "io.xe")
         original = copy.deepcopy(tree)

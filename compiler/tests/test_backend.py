@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import BuildError, build_executable, emit_c
 from compiler.xe_ast.cli import main
@@ -19,7 +20,7 @@ CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "运行后端验收需要系统 C 编译器")
-class BackendExecutionTests(unittest.TestCase):
+class BackendExecutionTests(LegacyTestCase):
     def run_source(self, text, checked=True, flags=()):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "test.xe"
@@ -205,7 +206,7 @@ class BackendExecutionTests(unittest.TestCase):
         fn main() { println("{}", a(3)); }''', "3\n")
 
 
-class BackendFailureTests(unittest.TestCase):
+class BackendFailureTests(LegacyTestCase):
     def test_nested_custom_drop_field_cannot_be_moved_out(self):
         text = '''struct Inner { text: String, }
         impl Drop for Inner { fn drop(self: Self@[mut]) { println("{}", self.text@); } }
@@ -296,12 +297,12 @@ class BackendFailureTests(unittest.TestCase):
             source.write_text("fn main() {}")
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                status = main([str(source), "--emit-c", "-o", "-"])
+                status = main(["--language-profile=legacy", str(source), "--emit-c", "-o", "-"])
             self.assertEqual(status, 0, err.getvalue())
             self.assertIn("int main(int argc, char **argv)", out.getvalue())
             source.write_text("fn main() { let values: Map[i32, i32]; }")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                status = main([str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])
+                status = main(["--language-profile=legacy", str(source), "--emit-c", "-o", "-", "--diagnostic-format", "json"])
             self.assertEqual(status, 1)
             self.assertEqual(json.loads(err.getvalue())["diagnostics"][0]["code"], "XE-SEM-0001")

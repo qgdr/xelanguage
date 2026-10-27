@@ -1,0 +1,19 @@
+// 管道与直接函数调用采用相同的按值传参规则。
+fn identity(value: i32) -> i32 { value }
+
+fn replace(pointer: i32@[mut]) -> Unit { pointer# = 43; }
+
+fn main() -> Unit {
+    let original: i32 = 42;
+    let direct: i32 = identity(original);
+    let piped: i32 = original |> identity;
+    let handled: i32 = piped |> value: i32 -> value;
+    let ignored: i32 = original |> _ -> 0;
+
+    let[mut] number: i32 = 41;
+    let address: i32@[mut] = number@[mut];
+    address |> replace;
+
+    // original和address都是Copy量，传参后原变量仍可使用。
+    println("{} {} {} {} {}", original, direct, handled, ignored, address#);
+}

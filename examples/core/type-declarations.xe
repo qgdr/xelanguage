@@ -1,0 +1,12 @@
+// 这些是编译期类型声明，不创建集合对象，也不分配并集值存储。
+type Small = set {1: i32, 2: i32};
+type More = set {3: i32};
+type Combined = Small | More;
+type Same = More union Small;
+type Empty = set {};
+
+fn main() -> Unit {
+    // 本步仍不允许 let value: Small = 1;，值使用规则要单独确定和实现。
+    let answer: i32 = 42;
+    println("{}", answer);
+}

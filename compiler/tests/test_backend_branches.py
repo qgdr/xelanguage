@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.source import Diagnostic
@@ -15,7 +16,7 @@ CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "运行后端验收需要系统 C 编译器")
-class BranchExecutionTests(unittest.TestCase):
+class BranchExecutionTests(LegacyTestCase):
     def run_source(self, text, checked=True, sanitize=False):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:
@@ -227,7 +228,7 @@ class BranchExecutionTests(unittest.TestCase):
         self.assertEqual(self.run_source(text), "left\nright\nfinished\n")
 
 
-class BranchDiagnosticTests(unittest.TestCase):
+class BranchDiagnosticTests(LegacyTestCase):
     def test_resource_payload_borrow_cannot_be_moved_into_function(self):
         text = '''enum E { Text[String], Empty, }
         fn consume(text: String) {}

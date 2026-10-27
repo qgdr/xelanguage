@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 
@@ -20,7 +21,7 @@ CC = shutil.which("cc") or ""
 
 
 @unittest.skipUnless(CC, "标准 IO 验收需要系统 C 编译器")
-class StdlibIoExecutionTests(unittest.TestCase):
+class StdlibIoExecutionTests(LegacyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="xe-stdlib-io-")

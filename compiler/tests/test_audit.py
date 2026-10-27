@@ -9,12 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from compiler.audit import audit_directory, audit_file, main, write_report
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.source import Diagnostic, Source
 
 CC = shutil.which("cc") or ""
 
 
-class AuditTests(unittest.TestCase):
+class AuditTests(LegacyTestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

@@ -1,7 +1,7 @@
 """前端契约测试：只验证 AST/语法，不把语义错误当语法错误。"""
-import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,7 +21,7 @@ def walk(value):
             yield from walk(child)
 
 
-class ExpressionTests(unittest.TestCase):
+class ExpressionTests(LegacyTestCase):
     def test_arithmetic(self):
         node = tail("1 + 2 * 3")
         self.assertEqual(node["operator"], "+")
@@ -114,7 +114,7 @@ class ExpressionTests(unittest.TestCase):
         self.assertEqual(node["arms"][0]["handler"]["body"]["kind"], "ComparisonChain")
 
 
-class DeclarationTests(unittest.TestCase):
+class DeclarationTests(LegacyTestCase):
     def test_function_generics_follow_fn_and_inline_bounds_are_constraints(self):
         tree = parse_source("pub fn[T: Measure, U] inspect(value: T@, other: U) -> i32 "
                             "where U implements Copy { value.measure() }")
@@ -243,7 +243,7 @@ class DeclarationTests(unittest.TestCase):
                 self.assertEqual(parse_source(path.read_text())["kind"], "Module")
 
 
-class SourceAndFailureTests(unittest.TestCase):
+class SourceAndFailureTests(LegacyTestCase):
     def test_nested_comments_and_doc_comments(self):
         tree = parse_source("/// API\n/* outer /* inner */ done */ fn f() {}")
         self.assertEqual(len(tree["comments"]), 2)

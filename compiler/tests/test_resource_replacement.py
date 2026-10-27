@@ -6,12 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
 
 
 @unittest.skipUnless(shutil.which("cc"), "需要 C 编译器")
-class ResourceReplacementTests(unittest.TestCase):
+class ResourceReplacementTests(LegacyTestCase):
     def execute_xe(self, text, sanitize=False):
         flags = ("-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie") if sanitize else ()
         with tempfile.TemporaryDirectory() as directory:

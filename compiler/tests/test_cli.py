@@ -3,17 +3,18 @@ import contextlib
 import io
 import json
 import tempfile
-import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
+from compiler.version import SYNTAX_VERSION
 from compiler.xe_ast.cli import main
 
 
-class CliTests(unittest.TestCase):
+class CliTests(LegacyTestCase):
     def run_cli(self, arguments):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = main(arguments)
+            status = main(["--language-profile=legacy", *arguments])
         return status, out.getvalue(), err.getvalue()
 
     def test_json_file_and_stdout(self):
@@ -25,7 +26,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(status, 0, err)
             data = json.loads(output.read_text())
             self.assertEqual(data["schema_version"], 1)
-            self.assertEqual(data["syntax_version"], "xe-1.0")
+            self.assertEqual(data["syntax_version"], SYNTAX_VERSION)
             status, stdout, _ = self.run_cli([str(source), "-o", "-"])
             self.assertEqual(status, 0)
             self.assertEqual(json.loads(stdout), data)

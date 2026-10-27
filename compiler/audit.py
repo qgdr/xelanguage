@@ -27,6 +27,7 @@ if __package__ in {None, ""}:
 from compiler.xe_ast.ast import SYNTAX_VERSION
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import atomic_text, protect_source
+from compiler.xe_ast.language_policy import current_profile, language_profile
 from compiler.xe_ast.modules import load_program
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
@@ -208,11 +209,15 @@ def main(argv=None):
     parser.add_argument("--run-warnings", action="store_true",
                         help="允许实际运行带指针风险警告的程序（可能触发未定义行为）")
     parser.add_argument("--strict", action="store_true", help="任何示例未通过全部阶段时退出 1")
+    parser.add_argument("--language-profile", choices=("core", "legacy"), default=None,
+                        help="默认 core；归档示例必须显式 legacy")
     args = parser.parse_args(argv)
     try:
-        report = audit_directory(args.directory, cc=args.cc,
-                                 compile_timeout=args.compile_timeout, run_timeout=args.run_timeout,
-                                 run_warnings=args.run_warnings)
+        with language_profile(args.language_profile or current_profile()):
+            report = audit_directory(args.directory, cc=args.cc,
+                                     compile_timeout=args.compile_timeout, run_timeout=args.run_timeout,
+                                     run_warnings=args.run_warnings)
+            report["language_profile"] = current_profile()
         write_report(report, args.output)
     except (ValueError, OSError, UnicodeError) as error:
         print(f"无法完成审核：{error}", file=sys.stderr)

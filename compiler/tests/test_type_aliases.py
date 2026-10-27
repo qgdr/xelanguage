@@ -2,13 +2,14 @@
 import copy
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import parse_source
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
 from compiler.xe_ast.typesys import I32, Type
 
 
-class TypeAliasTests(unittest.TestCase):
+class TypeAliasTests(LegacyTestCase):
     def check(self, text):
         tree = parse_source(text)
         original = copy.deepcopy(tree)

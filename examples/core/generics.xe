@@ -1,0 +1,12 @@
+// 最小显式泛型：先检查任意T的模板，再检查每个具体实例。
+fn[T] identity(value: T) -> T { value }
+
+fn[U] relay(value: U) -> U { identity[U](value) }
+
+fn main() -> Unit {
+    let number: i32 = relay[i32](42);
+    let text: String << identity[String](String::from("owned"));
+    let source: i32 = 7;
+    let pointer: i32@ = identity[i32@](source@);
+    println("{} {} {}", number, text@, pointer#);
+}

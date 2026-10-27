@@ -5,6 +5,7 @@
 """
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.semantic import Checker, check_source
 from compiler.xe_ast.source import Source
@@ -23,7 +24,7 @@ class RecordingChecker(Checker):
         return value
 
 
-class ResultConversionTests(unittest.TestCase):
+class ResultConversionTests(LegacyTestCase):
     def assert_ok(self, text):
         errors = check_source(text)
         self.assertEqual(errors, [], "\n".join(error.render() for error in errors))

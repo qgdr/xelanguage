@@ -3,9 +3,9 @@ import contextlib
 import io
 import json
 import tempfile
-import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, parse_source
 from compiler.xe_ast.cli import main
 from compiler.xe_ast.semantic import Checker, check_source
@@ -81,7 +81,7 @@ SYNTAX_FAILURES = {
 }
 
 
-class SemanticTests(unittest.TestCase):
+class SemanticTests(LegacyTestCase):
     def assert_error(self, source, code, checked=True):
         errors = check_source(source, "example.xe", checked)
         self.assertTrue(errors, source)
@@ -296,11 +296,11 @@ class SemanticTests(unittest.TestCase):
             check_source(source, check_borrows=True)
 
 
-class CheckCliTests(unittest.TestCase):
+class CheckCliTests(LegacyTestCase):
     def run_cli(self, args):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = main(args)
+            status = main(["--language-profile=legacy", *args])
         return status, out.getvalue(), err.getvalue()
 
     def test_semantic_json_and_no_ast_writes(self):

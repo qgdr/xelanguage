@@ -23,7 +23,7 @@ import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .version import PACKAGE_VERSION, SYNTAX_VERSION, VERSION
+from .version import PACKAGE_VERSION, RELEASE_NAME, SYNTAX_VERSION, VERSION
 from .xe_ast.ast import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,28 +36,52 @@ MAX_ARCHIVE_FILES = 10000
 # Directory + extension allowlists keep caches, executables, local configuration
 # and credentials out. New source formats require an intentional policy change.
 ROOT_FILES = frozenset({
-    "AGENTS.md", "Makefile", "README.md", "pyproject.toml", "uv.lock", "xe",
-    "LICENSE", "NOTICE", "CHANGELOG.md", "RELEASE.md", "ARCHITECTURE.md",
-    "CONTRIBUTING.md", ".gitignore", ".python-version",
+    "Makefile", "README.md", "pyproject.toml", "uv.lock", "xe",
+    "LICENSE", "NOTICE", "CHANGELOG.md", "RELEASE.md", ".gitignore", ".python-version",
+})
+# Development history stays local. A README beside implementation code must not
+# accidentally turn an archived toy feature into a public Core promise.
+PUBLIC_MARKDOWN = frozenset({
+    "README.md", "RELEASE.md", "CHANGELOG.md",
+    "examples/README.md", "examples/core/README.md", "examples/dependency-planner/README.md",
+    "docs/README.md", "docs/language.md", "docs/getting-started.md", "docs/cli.md",
+    "docs/support.md", "docs/releases.md", "docs/documentation.md",
+    "docs/language/01-first-program.md", "docs/language/02-basic-types.md",
+    "docs/language/03-functions-and-control-flow.md", "docs/language/04-boxes-and-values.md",
+    "docs/language/05-pointers.md", "docs/language/06-copy-and-move.md",
+    "docs/language/07-strings-and-resources.md", "docs/language/08-structs-and-methods.md",
+    "docs/language/09-integer-operations.md", "docs/language/10-arrays-and-views.md",
+    "docs/language/11-temporary-arrays.md", "docs/language/12-resource-arrays.md",
+    "docs/language/13-type-declarations.md", "docs/language/14-set-and-union.md",
+    "docs/language/15-enums.md", "docs/language/16-branch-pipelines.md",
+    "docs/language/17-generic-functions.md", "docs/language/18-initialization-and-cleanup.md",
+    "docs/language/19-support-boundaries.md",
 })
 DIRECTORY_SUFFIXES = {
-    "compiler": frozenset({".py", ".h", ".md"}),
-    "bootstrap": frozenset({".py", ".xe", ".md"}),
-    "stdlib": frozenset({".h", ".xe", ".md"}),
-    "doc": frozenset({".md"}),
-    "examples": frozenset({".xe", ".c", ".h", ".md", ".toml", ".calc"}),
-    "tests": frozenset({".xe", ".md"}),
+    "compiler": frozenset({".py", ".h"}),
+    "bootstrap": frozenset({".py", ".xe"}),
+    "stdlib": frozenset({".h", ".xe"}),
+    "docs": frozenset({".md"}),
+    "examples": frozenset({".xe", ".md"}),
+    "tests": frozenset({".xe"}),
 }
 EXCLUDED_DIRECTORIES = frozenset({
     ".git", ".venv", "target", "ignore", "__pycache__", "node_modules",
     ".aws", ".ssh", ".codex", ".agents", "build", "dist", "wheels",
+    "internal", "formal", "doc",
 })
 SECRET_NAMES = frozenset({
     "credentials", "credentials.json", "secrets.json", "secrets.py", "credentials.py",
     "id_rsa", "id_ed25519", "authorized_keys", "known_hosts",
 })
-REQUIRED_FILES = frozenset({
-    "xe", "README.md", "pyproject.toml", "uv.lock", "LICENSE", "NOTICE",
+REQUIRED_FILES = PUBLIC_MARKDOWN | frozenset({
+    "xe", "Makefile", "README.md", "RELEASE.md", "CHANGELOG.md", "pyproject.toml", "uv.lock",
+    "LICENSE", "NOTICE", "docs/README.md", "docs/language.md", "docs/getting-started.md",
+    "docs/cli.md", "docs/support.md", "docs/releases.md", "docs/documentation.md",
+    "examples/core/main.xe", "examples/core/structs.xe", "examples/core/resource-arrays.xe",
+    "examples/core/generics.xe", "examples/core/access.xe",
+    "examples/README.md", "examples/core/README.md", "examples/dependency-planner/main.xe",
+    "examples/dependency-planner/README.md",
     "compiler/__init__.py", "compiler/__main__.py", "compiler/version.py",
     "compiler/runtime/xe_runtime.h",
 })
@@ -84,6 +108,12 @@ def allowed_source(name: str) -> bool:
                 and not path.name.startswith("."))
     if path.name.lower() in SECRET_NAMES or path.name.lower().startswith(".env"):
         return False
+    if path.suffix == ".md":
+        # Merely placing a draft beside the handbook does not make it public.
+        return name in PUBLIC_MARKDOWN
+    if path.parts[0] == "examples":
+        return (len(path.parts) == 3 and path.parts[1] == "core" and path.suffix == ".xe"
+                or name == "examples/dependency-planner/main.xe")
     return path.suffix in DIRECTORY_SUFFIXES.get(path.parts[0], frozenset())
 
 
@@ -251,7 +281,7 @@ def package_sources(output_dir: Path, *, root: Path = ROOT, require_clean: bool 
         raise ReleaseError("uv.lock 项目版本与 compiler.version.PACKAGE_VERSION 不一致")
     archive_root = f"xelanguage-{VERSION}"
     selected[NOTICE_NAME] = (
-        f"Xe {VERSION}: local source release candidate, not a published release.\n"
+        f"{RELEASE_NAME} ({VERSION}): local source release candidate, not a published release.\n"
         "This workflow does not create a Git tag, push, or publish externally.\n"
         "The included Apache-2.0 LICENSE and NOTICE govern use of this source.\n"
         "Candidate status is not an additional restriction on that license.\n"
@@ -262,6 +292,7 @@ def package_sources(output_dir: Path, *, root: Path = ROOT, require_clean: bool 
         raise ReleaseError("候选源码超过 64 MiB 或文件数量验收限制")
     manifest = {
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
+        "release_name": RELEASE_NAME,
         "version": VERSION, "package_version": PACKAGE_VERSION,
         "syntax_version": SYNTAX_VERSION, "ast_schema_version": SCHEMA_VERSION,
         "archive_root": archive_root, "release_status": "local-candidate",
@@ -394,9 +425,11 @@ def clean_environment(base_python: Path) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("PYTHON") and key not in {
                        "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
-                       "UV_PROJECT_ENVIRONMENT",
+                       "UV_PROJECT_ENVIRONMENT", "ASAN_OPTIONS", "LSAN_OPTIONS", "UBSAN_OPTIONS",
                    }}
     environment["PYTHONNOUSERSITE"] = "1"
+    # Release acceptance uses the sanitizer defaults, rather than inheriting a
+    # developer's suppressions or detect_leaks=0 from the surrounding shell.
     virtual_roots = [Path(value).resolve() for value in
                      (os.environ.get("VIRTUAL_ENV"), sys.prefix if sys.prefix != sys.base_prefix else None)
                      if value]
@@ -408,7 +441,11 @@ def clean_environment(base_python: Path) -> dict[str, str]:
     return environment
 
 
-def smoke_archive(archive_path: Path, *, cc: str = "cc") -> dict[str, Any]:
+def smoke_archive(archive_path: Path, *, cc: str = "cc", language_profile: str = "core") -> dict[str, Any]:
+    if language_profile not in {"core", "legacy"}:
+        raise ReleaseError("未知语言准入策略；必须为 core 或 legacy")
+    if language_profile != "core":
+        raise ReleaseError("Core Preview 发布验收仅支持 core；legacy 示例属于本地开发资料，不随包发布")
     manifest, selected, checksum_verified = verify_archive(archive_path)
     base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
     environment = clean_environment(base_python)
@@ -434,6 +471,10 @@ def smoke_archive(archive_path: Path, *, cc: str = "cc") -> dict[str, Any]:
 
         def run(name: str, arguments: list[str], *, status: int = 0,
                 stdout: str | None = None, executable: list[str] | None = None) -> subprocess.CompletedProcess[str]:
+            # A child process cannot inherit the caller's Python policy context.
+            # Keep the Core release boundary explicit in every child process.
+            if executable is None and arguments and arguments[0] in {"ast", "check", "emit-c", "build", "run"}:
+                arguments = [f"--language-profile={language_profile}", *arguments]
             result = subprocess.run([*(executable or command), *arguments], cwd=outside,
                                     env=environment, capture_output=True, text=True,
                                     stdin=subprocess.DEVNULL, timeout=60)
@@ -450,40 +491,67 @@ def smoke_archive(archive_path: Path, *, cc: str = "cc") -> dict[str, Any]:
         version = run("version", ["--version"])
         if f"xe {manifest['version']} ({manifest['syntax_version']}, stage0)" not in version.stdout:
             raise ReleaseError("包内 xe --version 与 manifest 不一致")
-        run("legacy-script-help", ["--help"],
+        run("script-entry-help", ["--help"],
             executable=[str(base_python), str(unpacked / "compiler/main.py")])
         doctor = run("doctor", ["doctor", "--cc", compiler, "--message-format=json"])
         identity = json.loads(doctor.stdout)
         if Path(identity["python"]).resolve() != base_python or Path(identity["project"]).resolve() != outside:
             raise ReleaseError("解包验收错误借用了虚拟环境或未保留调用者工作目录")
-        run("check-globals", ["check", str(unpacked / "examples/globals/main.xe"), "--message-format=json"])
-        program = outside / "module program"
-        run("build-multiple-modules", ["build", "--manifest-path", str(unpacked / "examples/toolchain"),
-                                       "--cc", compiler, "-o", str(program), "--message-format=json"])
-        run("execute-built-program", [], executable=[str(program)], stdout="square(7) = 49\n")
-        arguments_program = outside / "argument program"
-        run("run-argument-boundaries", ["run", str(unpacked / "examples/args/main.xe"), "--cc", compiler,
-                                         "-o", str(arguments_program), "--", "two words", "", "--help"],
-            stdout=f"{arguments_program}\ntwo words\n\n--help\n")
-        for name, path in (("reject-semantic-error", "tests/fails/semantic_unknown_name.xe"),
-                           ("reject-syntax-error", "tests/syntax_fails/missing_expression.xe")):
-            rejected = run(name, ["check", str(unpacked / path), "--message-format=json"], status=1)
+        # Every source is checked, parsed, lowered, built and executed by the
+        # unpacked compiler from a separate working directory. No repository
+        # imports, activated environment or legacy fallback is available.
+        examples = (
+            ("main", "42\n"),
+            ("structs", "field 22\nfield 20\n42 44 21\nleft right\nfinish left right\ndone\n"),
+            ("resource-arrays", "pair\npair\ndone\n"),
+            ("generics", "42 owned 7\n"),
+            ("access", "40 99 99\n"),
+        )
+        for example, expected in examples:
+            source = str(unpacked / "examples/core" / f"{example}.xe")
+            checked = run(f"check-core-{example}", ["check", source, "--message-format=json"])
+            if checked.stderr or json.loads(checked.stdout).get("diagnostics") != []:
+                raise ReleaseError(f"Core 发布示例必须无诊断：{example}")
+            ast = outside / f"{example}.ast.json"
+            run(f"ast-core-{example}", ["ast", source, "-o", str(ast), "--message-format=json"])
+            envelope = json.loads(ast.read_text(encoding="utf-8"))
+            if (envelope.get("syntax_version") != manifest["syntax_version"]
+                    or envelope.get("schema_version") != manifest["ast_schema_version"]):
+                raise ReleaseError(f"Core 发布示例 AST 版本错误：{example}")
+            run(f"emit-c-core-{example}", ["emit-c", source, "-o", str(outside / f"{example}.c"),
+                                           "--message-format=json"])
+            program = outside / f"core {example}"
+            built = run(f"build-core-{example}", ["build", source, "--cc", compiler,
+                                                   "-o", str(program), "--message-format=json"])
+            if built.stderr:
+                raise ReleaseError(f"Core 发布示例构建有诊断：{example}\n{built.stderr}")
+            run(f"execute-core-{example}", [], executable=[str(program)], stdout=expected)
+        # Valid resource ownership only: no dangling-pointer experiment is
+        # executed. Keep ASan/UBSan and their default leak detection intact.
+        sanitized = run("run-core-resource-arrays-sanitized", [
+            "run", str(unpacked / "examples/core/resource-arrays.xe"), "--cc", compiler,
+            "--sanitize", "-o", str(outside / "core resources sanitized")],
+            stdout="pair\npair\ndone\n")
+        if sanitized.stderr:
+            raise ReleaseError("Core sanitizer 验收有诊断：\n" + sanitized.stderr)
+        rejected_sources = (
+            ("reject-semantic-error", "fn main()->Unit{let value:i32=missing;}", "XE-CORE-0001"),
+            ("reject-syntax-error", "fn main()->Unit{let value:i32=;}", "XE-PARSE-0001"),
+            ("reject-unconfirmed-float", "fn main()->Unit{let value:f64=1.0;}", "XE-CORE-0001"),
+            ("reject-unconfirmed-conversion", "fn main()->Unit{let value:i64=1 as i64;}", "XE-CORE-0001"),
+            ("reject-resource-element-move", "fn main()->Unit{let values:Array[String,1]<<"
+             "[String::from(\"owned\")];let item:String<<values⟦0⟧;}", "XE-CORE-0002"),
+        )
+        for name, text, expected_code in rejected_sources:
+            source = outside / f"{name}.xe"
+            source.write_text(text, encoding="utf-8")
+            rejected = run(name, ["check", str(source), "--message-format=json"], status=1)
             diagnostics = json.loads(rejected.stderr).get("diagnostics", [])
-            if not any(item.get("severity") == "error" and item.get("code", "").startswith("XE-")
+            if not any(item.get("severity") == "error" and item.get("code") == expected_code
                        and item.get("span") for item in diagnostics):
                 raise ReleaseError(f"解包验收缺少稳定的源码诊断：{name}")
-        run("run-c-ffi", ["run", str(unpacked / "examples/ffi/main.xe"), "--cc", compiler,
-                          "--link-input", str(unpacked / "examples/ffi/functions.c"),
-                          "-o", str(outside / "ffi program")], stdout="sum=42 after=41\n")
-        input_text = "let hello = 42;\n中😀 _next\0done\n"
-        (outside / "input sample.xe").write_text(input_text, encoding="utf-8")
-        run("run-stdlib-multiple-modules", ["run", str(unpacked / "examples/source_scan/src/main.xe"),
-                                             "--cc", compiler, "-o", str(outside / "source scan"),
-                                             "--", "input sample.xe", "word report.txt"],
-            stdout=f"bytes={len(input_text.encode())} chars={len(input_text)} lines=2 words=4\n")
-        if (outside / "word report.txt").read_text(encoding="utf-8") != "let\nhello\n_next\ndone\n":
-            raise ReleaseError("解包标准库验收的 UTF-8/NUL/文件输出错误")
     return {"archive": str(archive_path.resolve()), "version": manifest["version"],
+            "language_profile": language_profile,
             "passed": True, "checks": checks, "checksum_verified": checksum_verified,
             "clean_python": str(base_python), "cc": compiler, "uv_sync_required": False,
             "source_snapshot": manifest.get("source_snapshot", "working-tree"),
@@ -500,10 +568,12 @@ def main(argv: list[str] | None = None) -> int:
     smoke = commands.add_parser("smoke", help="验证可信本地候选包并在包外目录运行验收")
     smoke.add_argument("archive", type=Path)
     smoke.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    smoke.add_argument("--language-profile", choices=("core", "legacy"), default="core",
+                       help="发布验收仅支持 core；legacy 参数保留清晰拒绝诊断")
     args = parser.parse_args(argv)
     try:
         result = (package_sources(args.output_dir, require_clean=args.require_clean) if args.command == "package"
-                  else smoke_archive(args.archive, cc=args.cc))
+                  else smoke_archive(args.archive, cc=args.cc, language_profile=args.language_profile))
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (ReleaseError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:

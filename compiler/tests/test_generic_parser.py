@@ -1,11 +1,12 @@
 """泛型附件、关联路径和普通 [] 的边界；执行另由泛型后端测试覆盖。"""
 import unittest
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.source import Diagnostic
 
 
-class GenericParserTests(unittest.TestCase):
+class GenericParserTests(LegacyTestCase):
     def value(self, expression):
         return parse_source(f"fn main() {{ let value = {expression}; }}")["items"][0]["body"]["statements"][0]["value"]
 

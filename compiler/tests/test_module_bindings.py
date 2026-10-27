@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, check_source, parse_source
 from compiler.xe_ast.build import build_executable, emit_c
 from compiler.xe_ast.modules import load_program
@@ -22,7 +23,7 @@ def shape(value):
     return value
 
 
-class ModuleBindingTests(unittest.TestCase):
+class ModuleBindingTests(LegacyTestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

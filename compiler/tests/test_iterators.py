@@ -5,13 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.parser import parse_source
 from compiler.xe_ast.semantic import Checker
 from compiler.xe_ast.source import Source
 
-ROOT = Path(__file__).resolve().parents[2]
 CC = shutil.which("cc") or ""
 COUNTER = '''struct Counter { current: i32, end: i32, }
 impl Counter { fn next(self: Self@[mut]) -> Step[i32] {
@@ -23,7 +24,7 @@ TRACE = '''struct Trace { n: i32, }
 impl Drop for Trace { fn drop(self: Self@[mut]) { println("drop {}", self.n); } }'''
 
 
-class IteratorSemanticTests(unittest.TestCase):
+class IteratorSemanticTests(LegacyTestCase):
     def check(self, text, code=None):
         checker = Checker(Source(text, "iter.xe"), parse_source(text, "iter.xe"))
         errors = checker.check()
@@ -141,7 +142,7 @@ class IteratorSemanticTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CC, "需要系统 C 编译器")
-class IteratorExecutionTests(unittest.TestCase):
+class IteratorExecutionTests(LegacyTestCase):
     def run_source(self, text):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / "iter.xe", Path(directory) / "iter"
@@ -154,7 +155,7 @@ class IteratorExecutionTests(unittest.TestCase):
         return result.stdout
 
     def test_documented_example(self):
-        self.assertEqual(self.run_source((ROOT / 'examples/iterators/main.xe').read_text()),
+        self.assertEqual(self.run_source(private_example('iterators/main.xe').read_text()),
             'struct: 0 1 2\nclosure: 1 2 (outer 0)\nfrom_fn: 0 1 2\npointer: 1 2 (outer 2)\n')
 
     def test_borrowed_custom_iterator_keeps_owner_and_state(self):

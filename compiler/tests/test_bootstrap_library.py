@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast.backend_c import lower_to_c
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.semantic import check_source
@@ -12,7 +13,7 @@ from compiler.xe_ast.source import Diagnostic
 
 
 @unittest.skipUnless(shutil.which("cc"), "需要 C 编译器")
-class BootstrapLibraryTests(unittest.TestCase):
+class BootstrapLibraryTests(LegacyTestCase):
     def run_xe(self, text, expected, files=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -107,7 +108,7 @@ class BootstrapLibraryTests(unittest.TestCase):
         }''', "write error\n")
 
 
-class BootstrapLibrarySemanticTests(unittest.TestCase):
+class BootstrapLibrarySemanticTests(LegacyTestCase):
     def test_growing_recursive_container_types_fail_instead_of_expanding_forever(self):
         with self.assertRaises(Diagnostic) as caught:
             lower_to_c('''struct[T] Node {children:Vec[Node[Node[T]]],}

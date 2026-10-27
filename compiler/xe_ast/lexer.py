@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import NoReturn
 
+from .language_policy import current_profile
 from .source import Diagnostic, Source
 
 KEYWORDS = set("""let var const fn return if else while for in break continue
@@ -41,6 +42,11 @@ class Lexer:
 
     def scan(self) -> list[Token]:
         text, size, i = self.source.text, len(self.source.text), 0
+        # The accepted access delimiters are not aliases for comparisons. Keep
+        # the archived table unchanged so selecting legacy cannot silently
+        # acquire a new grammar (or accidentally enable tuple prototypes).
+        symbols = SYMBOLS if current_profile() == "legacy" else sorted(
+            [*SYMBOLS, "⟦", "⟧", "⟨", "⟩", "=>"], key=len, reverse=True)
         while i < size:
             char = text[i]
             if char.isspace():
@@ -108,7 +114,7 @@ class Lexer:
                 raw = text[start:i]
                 kind = raw if raw in KEYWORDS or raw == "_" else "IDENT"
             else:
-                symbol = next((s for s in SYMBOLS if text.startswith(s, i)), None)
+                symbol = next((s for s in symbols if text.startswith(s, i)), None)
                 if symbol is None:
                     self.fail(i, i + 1, f"无法识别的字符 {char!r}")
                 i += len(symbol)

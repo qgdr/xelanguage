@@ -1,0 +1,37 @@
+// :>交负载；=>交原枚举整值。没有隐式转换或零/一输入适配。
+enum Token {
+    Code[i32],
+    Count[i32],
+    End,
+    Closed,
+}
+
+fn number(token: Token) -> i32 {
+    token ? {
+        Token::End :> () -> 0,
+        Token::Closed :> () -> 1,
+        else :> value: i32 -> value,
+    }
+}
+
+fn empty(token: Token) -> i32 {
+    token ? {
+        Token::Code :> value: i32 -> value,
+        Token::Count :> value: i32 -> value,
+        else :> () -> 0,
+    }
+}
+
+fn relay(token: Token) -> Token {
+    token ? {
+        else => original: Token -> original,
+    }
+}
+
+fn main() -> Unit {
+    println("{} {} {} {}", number(Token::Code[42]), number(Token::Count[7]),
+            number(Token::End), number(Token::Closed));
+    println("{} {}", empty(Token::End), empty(Token::Closed));
+    let returned: Token << relay(Token::Count[99]);
+    println("{}", number(returned));
+}

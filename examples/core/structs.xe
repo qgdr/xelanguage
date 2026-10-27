@@ -1,0 +1,57 @@
+// 字段是对象盒子中的子盒子；显式Copy决定能否复制整个对象的量。
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Copy for Point {}
+
+impl Point {
+    fn origin() -> Self { Self { .x = 0; .y = 0; } }
+
+    fn sum(self: Self@) -> i32 { self.x + self.y }
+
+    fn shift(self: Self@[mut], amount: i32) -> Unit {
+        self.x = self.x + amount;
+        self.y = self.y + amount;
+    }
+}
+
+// 没有Copy标记：Pair按值传递时转交整体拥有权，字段由编译器自动清理。
+struct Pair {
+    left: String,
+    right: String,
+}
+
+impl Pair {
+    fn show(self: Self@) -> Unit {
+        println("{} {}", self.left@, self.right@);
+    }
+
+    fn finish(self: Self) -> Unit {
+        println("finish {} {}", self.left@, self.right@);
+        // 正常退出后清理self仍拥有的两个String，不需要自定义Drop。
+    }
+}
+
+fn marked(number: i32) -> i32 {
+    println("field {}", number);
+    number
+}
+
+fn main() -> Unit {
+    // 初始化依源码顺序执行，不按字段声明顺序重排。
+    let[mut] point: Point = Point { .y = marked(22); .x = marked(20); };
+    let copied: Point = point;
+    let pointer: Point@[mut] = point@[mut];
+    pointer.shift(1);
+    println("{} {} {}", copied.sum(), point.sum(), pointer.x);
+
+    let pair: Pair << Pair {
+        .left << String::from("left");
+        .right << String::from("right");
+    };
+    pair.show();
+    pair.finish();
+    println("done");
+}

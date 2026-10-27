@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compiler.tests.documentation_support import private_example
+from compiler.tests.legacy_support import LegacyTestCase
 from compiler.xe_ast import Diagnostic, check_source, parse_source
 from compiler.xe_ast.build import build_executable
 from compiler.xe_ast.modules import load_program
@@ -21,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CC = shutil.which("cc") or ""
 
 
-class GlobalBindingTests(unittest.TestCase):
+class GlobalBindingTests(LegacyTestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="xe-global-bindings-")
         self.addCleanup(temporary.cleanup)
@@ -319,13 +321,15 @@ class GlobalBindingTests(unittest.TestCase):
             }''', "42 true changed 猫\0tail 猫 -9223372036854775808\n18446744073709551615 0\n")
 
     @unittest.skipUnless(CC, "运行全局变量验收需要系统 C 编译器")
-    def test_backend_fixture_and_example_execute(self):
-        for relative, expected in (
-                ("tests/backend/global_variables.xe", "count=2 address=2\npoint=7,9 pair=20,40 values=3,4\n"
-                 "labels=first,changed\nshadow=99 global=2\nclosure=3 global=3\n"),
-                ("examples/globals/main.xe", "tick=1\ntick=2\nthrough-pointer=10\nlocal=100 global=10\n")):
-            with self.subTest(relative=relative):
-                self.run_text((ROOT / relative).read_text(encoding="utf-8"), expected)
+    def test_backend_fixture_executes(self):
+        self.run_text((ROOT / "tests/backend/global_variables.xe").read_text(encoding="utf-8"),
+                      "count=2 address=2\npoint=7,9 pair=20,40 values=3,4\n"
+                      "labels=first,changed\nshadow=99 global=2\nclosure=3 global=3\n")
+
+    @unittest.skipUnless(CC, "运行全局变量验收需要系统 C 编译器")
+    def test_private_example_executes(self):
+        self.run_text(private_example("globals/main.xe").read_text(encoding="utf-8"),
+                      "tick=1\ntick=2\nthrough-pointer=10\nlocal=100 global=10\n")
 
     @unittest.skipUnless(CC and sys.platform.startswith("linux"), "ASan/no-pie 运行验收当前针对 Linux")
     def test_global_aggregate_fixture_passes_address_and_undefined_sanitizers(self):
